@@ -161,6 +161,7 @@ private:
     // settings ask for them, and both hands located for `time`, their joints
     // in `seat` when it is valid.
     void LoadHandTracking();
+    void UpdateSimultaneousHandsAndControllers(bool wanted);
     void UpdateHandTrackers();
     void DestroyHandTrackers();
     void LocateHands(XrTime time, const driving::SeatFrame& seat);
@@ -225,6 +226,12 @@ private:
     PFN_xrLocateHandJointsEXT m_locate_hand_joints = nullptr;
     bool m_hand_data_source = false; // XR_EXT_hand_tracking_data_source
     bool m_hand_aim = false;         // XR_FB_hand_tracking_aim
+    // XR_META_simultaneous_hands_and_controllers: resumed while tracked hands
+    // are on, so a controller put down gives its hand to the cameras at once.
+    PFN_xrResumeSimultaneousHandsAndControllersTrackingMETA m_resume_simultaneous = nullptr;
+    PFN_xrPauseSimultaneousHandsAndControllersTrackingMETA m_pause_simultaneous = nullptr;
+    bool m_simultaneous = false;
+    bool m_simultaneous_failed = false;
     XrHandTrackerEXT m_hand_trackers[kHands]{};
     bool m_hand_trackers_failed = false;
     bool m_logged_hand_restart = false;

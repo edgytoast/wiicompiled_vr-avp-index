@@ -143,6 +143,11 @@ void TestGestures() {
     left.secondary = true;
     right.primary = true;
     Check(SelectOf(left, 0) && SelectOf(right, 1), "simple_controller's select per hand");
+
+    Check(!HandDriven(true, true, true), "a hand holding a controller is not bare");
+    Check(HandDriven(false, true, false), "a hand driving simple_controller is bare");
+    Check(HandDriven(false, false, true), "a camera-tracked hand with no profile of ours is bare");
+    Check(!HandDriven(false, false, false), "a hand with nothing active is not");
 }
 
 std::array<wii_remote::HandInputs, 2> PinchingHands() {

@@ -241,6 +241,15 @@ inline Gestures GesturesOf(bool aim_valid, bool aim_pinching, bool aim_menu, boo
     return {action_select, action_menu};
 }
 
+// Whether a hand is a bare hand this frame, for its buttons: no controller in
+// it (its squeeze action, which only the Touch profile binds, is inactive), and
+// either the runtime drives khr/simple_controller from it (select active) or
+// the cameras track it. The second covers a hand the runtime gives no profile
+// our actions are bound in, as simultaneous hands and controllers may do.
+inline bool HandDriven(bool squeeze_active, bool select_active, bool camera_joints) noexcept {
+    return !squeeze_active && (select_active || camera_joints);
+}
+
 // The select action as simple_controller delivers it: right select is bound to
 // the primary action, left select to the secondary one (openxr_input.cpp).
 inline bool SelectOf(const wii_remote::HandInputs& inputs, size_t hand) noexcept {

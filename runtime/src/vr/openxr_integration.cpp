@@ -196,16 +196,19 @@ XrPosef ScreenPoseAhead(const OpenXRFrame& frame, float distance) noexcept {
 // it offers one (XR_FB_hand_tracking_mesh), and tracked hands pose them from
 // the hand trackers: the controllers' touch sensors while they are held
 // (XR_EXT_hand_tracking_data_source) and the cameras once they are put down,
-// with the runtime's own pinch and menu gesture (XR_FB_hand_tracking_aim).
-// Asked for when either is on at launch, since none costs anything until a
-// tracker exists; turning both on later needs a restart for the mesh and the
-// tracked hands (until then the procedural gloves are drawn).
+// with the runtime's own pinch and menu gesture (XR_FB_hand_tracking_aim), and
+// with a put-down controller handing its side to the cameras at once
+// (XR_META_simultaneous_hands_and_controllers). Asked for when either is on at
+// launch, since none costs anything until it is used; turning both on later
+// needs a restart for the mesh and the tracked hands (until then the
+// procedural gloves are drawn).
 void AddHandMeshExtensions(OpenXRConfig& config) {
     if (RuntimeConfigFile::VrHandSteering() || RuntimeConfigFile::VrHandTracking()) {
         config.optional_extensions.push_back("XR_EXT_hand_tracking");
         config.optional_extensions.push_back("XR_FB_hand_tracking_mesh");
         config.optional_extensions.push_back("XR_EXT_hand_tracking_data_source");
         config.optional_extensions.push_back("XR_FB_hand_tracking_aim");
+        config.optional_extensions.push_back("XR_META_simultaneous_hands_and_controllers");
     }
 }
 

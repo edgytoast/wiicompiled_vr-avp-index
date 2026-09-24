@@ -508,6 +508,57 @@ void OpenXRInput::LoadHandTracking() {
     m_locate_hand_joints = reinterpret_cast<PFN_xrLocateHandJointsEXT>(locate);
     m_hand_data_source = enabled(XR_EXT_HAND_TRACKING_DATA_SOURCE_EXTENSION_NAME);
     m_hand_aim = enabled(XR_FB_HAND_TRACKING_AIM_EXTENSION_NAME);
+    if (enabled(XR_META_SIMULTANEOUS_HANDS_AND_CONTROLLERS_EXTENSION_NAME)) {
+        PFN_xrVoidFunction resume = nullptr, pause = nullptr;
+        if (m_runtime->GetInstanceProcAddress("xrResumeSimultaneousHandsAndControllersTrackingMETA", &resume) &&
+            m_runtime->GetInstanceProcAddress("xrPauseSimultaneousHandsAndControllersTrackingMETA", &pause) &&
+            resume != nullptr && pause != nullptr) {
+            m_resume_simultaneous = reinterpret_cast<PFN_xrResumeSimultaneousHandsAndControllersTrackingMETA>(resume);
+            m_pause_simultaneous = reinterpret_cast<PFN_xrPauseSimultaneousHandsAndControllersTrackingMETA>(pause);
+        }
+    }
+}
+
+// Simultaneous hands and controllers (Meta's "multimodal"): a controller that
+// is not in a hand no longer owns it, so the cameras track that hand straight
+// away and the system stops switching back to the controllers whenever one
+// lying on a table moves. A held controller keeps working, its fingers from its
+// touch sensors. Only while tracked hands are on; off, the system's own
+// switching between hands and controllers applies as before.
+void OpenXRInput::UpdateSimultaneousHandsAndControllers(bool wanted) {
+    if (m_resume_simultaneous == nullptr || m_pause_simultaneous == nullptr) {
+        return;
+    }
+    if (!wanted) {
+        m_simultaneous_failed = false;
+        if (m_simultaneous) {
+            XrSimultaneousHandsAndControllersTrackingPauseInfoMETA info{
+                XR_TYPE_SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_PAUSE_INFO_META};
+            m_runtime->ObserveResult(m_pause_simultaneous(m_runtime->Session(), &info));
+            m_simultaneous = false;
+            Log(OpenXRLogLevel::Info, "OpenXR simultaneous hands and controllers off");
+        }
+        return;
+    }
+    if (m_simultaneous || m_simultaneous_failed) {
+        return;
+    }
+    XrSimultaneousHandsAndControllersTrackingResumeInfoMETA info{
+        XR_TYPE_SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_RESUME_INFO_META};
+    const XrResult result = m_resume_simultaneous(m_runtime->Session(), &info);
+    m_runtime->ObserveResult(result);
+    if (XR_FAILED(result)) {
+        // Not asked again until tracked hands are turned off and on.
+        m_simultaneous_failed = true;
+        std::ostringstream message;
+        message << "xrResumeSimultaneousHandsAndControllersTrackingMETA failed (" << result
+                << "); putting a controller down hands over to the cameras only when the system switches";
+        Log(OpenXRLogLevel::Warning, message.str());
+        return;
+    }
+    m_simultaneous = true;
+    Log(OpenXRLogLevel::Info, "OpenXR simultaneous hands and controllers on: a controller put down hands its "
+                              "side to the cameras");
 }
 
 // Trackers only exist while tracked hands and hand steering are both on: the
@@ -515,7 +566,9 @@ void OpenXRInput::LoadHandTracking() {
 // otherwise (Idle and the cockpit's reset keep them); a runtime that refuses
 // them is not asked again until the option is turned off and on.
 void OpenXRInput::UpdateHandTrackers() {
-    if (!RuntimeConfigFile::VrHandTracking() || !RuntimeConfigFile::VrHandSteering()) {
+    const bool wanted = RuntimeConfigFile::VrHandTracking() && RuntimeConfigFile::VrHandSteering();
+    UpdateSimultaneousHandsAndControllers(wanted);
+    if (!wanted) {
         DestroyHandTrackers();
         m_hand_trackers_failed = false;
         m_logged_hand_restart = false;
@@ -747,6 +800,10 @@ void OpenXRInput::Destroy() {
     m_destroy_hand_tracker = nullptr;
     m_locate_hand_joints = nullptr;
     m_hand_data_source = m_hand_aim = false;
+    // The session, and simultaneous tracking with it, goes away after this.
+    m_resume_simultaneous = nullptr;
+    m_pause_simultaneous = nullptr;
+    m_simultaneous = m_simultaneous_failed = false;
     m_hand_trackers_failed = m_logged_hand_restart = false;
     m_logged_sources = {};
     m_sources_logged_at = 0;
@@ -909,18 +966,21 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
     UpdateHandTrackers();
     LocateHands(predicted_display_time, seat);
 #if defined(__ANDROID__)
-    // A hand driving simple_controller is a bare hand: its select is a pinch
-    // and its menu the palm-up gesture, which pauses from either hand.
+    // A bare hand (no controller in it: it drives simple_controller, or the
+    // cameras track it): its pinch and menu gesture come from the runtime's
+    // recognition, and the menu gesture pauses from either hand.
     bool menu_gesture = false;
     for (uint32_t hand = 0; hand < kHands; ++hand) {
-        m_hand_driven[hand] = !m_squeeze_active[hand] && select_active[hand];
+        const TrackedHand& located = m_tracked_hands[hand];
+        m_hand_driven[hand] = hand_tracking::HandDriven(
+            m_squeeze_active[hand], select_active[hand],
+            hand_tracking_on && located.active && located.source == hand_tracking::Source::Camera);
         if (!m_hand_driven[hand]) {
             m_pinch[hand] = false;
             continue;
         }
-        const TrackedHand& tracked = m_tracked_hands[hand];
         const hand_tracking::Gestures gestures = hand_tracking::GesturesOf(
-            tracked.aim_valid, tracked.aim_pinching, tracked.aim_menu, tracked.aim_system_gesture,
+            located.aim_valid, located.aim_pinching, located.aim_menu, located.aim_system_gesture,
             hand_tracking::SelectOf(hands[hand], hand), hands[hand].menu);
         m_pinch[hand] = gestures.pinch;
         menu_gesture = menu_gesture || gestures.menu;

@@ -535,8 +535,21 @@ no Wii Remote motion, so the permission changes nothing for players who leave th
 PC none of this applies: a PC runtime can drive real controllers through `khr/simple_controller`
 and synthesize joints for them, so a hand-edited `hand_tracking = true` only changes the drawing.
 
-With tracked hands on, bare hands drive. A hand is bare while it drives `khr/simple_controller`
-with camera-tracked joints, latched through `wheel_tracking_grace` (Meta also drops the select
+Left to itself, Horizon OS switches all input between the controllers and the hands, and it
+switches back to the controllers as soon as one lying on a table moves, so a race started with the
+controllers connected tended to stay on them (a Quest 3 log went controllers, hands, controllers
+within seconds). An app cannot disconnect them. Instead, with tracked hands on, the input resumes
+simultaneous hands and controllers (`XR_META_simultaneous_hands_and_controllers`, Meta's
+"multimodal"), which overrides that switching: a controller that is not in a hand no longer owns
+it, so the cameras track that hand at once, while a held controller keeps working (its fingers
+from its touch sensors). The log says `OpenXR simultaneous hands and controllers on` (and `off`
+when the option goes off). Meta documents that it cannot run together with passthrough and wide
+motion mode both on, and not while body tracking is; this app uses neither of the last two.
+
+With tracked hands on, bare hands drive. A hand is bare while it has no controller in it (its
+squeeze action inactive) and either drives `khr/simple_controller` or has camera-tracked joints (a
+free hand under simultaneous tracking may get no profile our actions are bound in),
+latched through `wheel_tracking_grace` (Meta also drops the select
 action while a hand is lost) and cleared as soon as a controller's squeeze is back. Its palm joint
 stands in for the grip and a grasp for the squeeze: the middle, ring and little fingers' flexion,
 summed over each finger's three joints, read as 0 below 1.2 radians (a relaxed hand) and 1 from
