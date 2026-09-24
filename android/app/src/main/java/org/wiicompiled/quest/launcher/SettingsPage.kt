@@ -189,6 +189,14 @@ class SettingsPage(
                 write = { c, value -> c.setBool("vr", "hand_steering", value) },
                 enabledIf = cockpit,
             )
+            // The hands follow the headset's hand tracking; kVrHandTrackingDefault is off. The
+            // hands are only drawn while they can steer, so it goes with hand steering.
+            toggle(
+                R.string.vr_hand_tracking, R.string.vr_hand_tracking_helper,
+                read = { it.bool("vr", "hand_tracking") ?: false },
+                write = { c, value -> c.setBool("vr", "hand_tracking", value) },
+                enabledIf = { c -> cockpit(c) && (c.bool("vr", "hand_steering") ?: true) },
+            )
             slider(
                 R.string.vr_lean_back, R.string.vr_lean_back_helper, -45.0, 45.0, 1.0,
                 read = { number(it, "vr", "lean_back_degrees", -45.0, 45.0, 0.0) },

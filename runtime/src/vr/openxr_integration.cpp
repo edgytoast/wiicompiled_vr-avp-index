@@ -193,12 +193,19 @@ XrPosef ScreenPoseAhead(const OpenXRFrame& frame, float distance) noexcept {
 }
 
 // Hand steering draws the player's hands, in the runtime's own hand mesh where
-// it offers one (XR_FB_hand_tracking_mesh). Only asked for when hand steering
-// is on at launch; turning it on later uses the procedural gloves.
+// it offers one (XR_FB_hand_tracking_mesh), and tracked hands pose them from
+// the hand trackers: the controllers' touch sensors while they are held
+// (XR_EXT_hand_tracking_data_source) and the cameras once they are put down,
+// with the runtime's own pinch and menu gesture (XR_FB_hand_tracking_aim).
+// Asked for when either is on at launch, since none costs anything until a
+// tracker exists; turning both on later needs a restart for the mesh and the
+// tracked hands (until then the procedural gloves are drawn).
 void AddHandMeshExtensions(OpenXRConfig& config) {
-    if (RuntimeConfigFile::VrHandSteering()) {
+    if (RuntimeConfigFile::VrHandSteering() || RuntimeConfigFile::VrHandTracking()) {
         config.optional_extensions.push_back("XR_EXT_hand_tracking");
         config.optional_extensions.push_back("XR_FB_hand_tracking_mesh");
+        config.optional_extensions.push_back("XR_EXT_hand_tracking_data_source");
+        config.optional_extensions.push_back("XR_FB_hand_tracking_aim");
     }
 }
 
@@ -437,6 +444,7 @@ public:
             runtime_->LoadFunction("xrPerfSettingsSetPerformanceLevelEXT", &set_performance_level_);
         }
         interpolation_available_.store(convert_display_time_ != nullptr, std::memory_order_release);
+        hand_tracking_available_.store(has_extension("XR_EXT_hand_tracking"), std::memory_order_release);
         if (!backend_->QueryGraphicsRequirements(*runtime_)) {
             SetError(backend_->LastError());
             ResetPreparedObjects();
@@ -551,6 +559,7 @@ public:
         headset_hz_.store(0, std::memory_order_relaxed);
         rendered_fps_.store(0, std::memory_order_relaxed);
         interpolation_available_.store(false, std::memory_order_release);
+        hand_tracking_available_.store(false, std::memory_order_release);
         ResetTrackingOrigin();
         applied_session_run_serial_ = 0;
         session_was_active_ = false;
@@ -572,6 +581,10 @@ public:
 
     bool FrameInterpolationAvailable() const noexcept {
         return interpolation_available_.load(std::memory_order_acquire);
+    }
+
+    bool HandTrackingAvailable() const noexcept {
+        return hand_tracking_available_.load(std::memory_order_acquire);
     }
 
     void SetPassthrough(bool enabled) noexcept {
@@ -1322,7 +1335,10 @@ private:
         const DrivingSnapshot driving = input_ != nullptr ? input_->Driving() : DrivingSnapshot{};
         if (driving.hand_steering && !hand_meshes_loaded_ && runtime_ != nullptr) {
             hand_meshes_loaded_ = true;
-            const bool loaded = LoadRuntimeHandMeshes(*runtime_);
+            // Tracked hands' trackers, when they exist, serve the mesh too.
+            const XrHandTrackerEXT trackers[2]{input_ != nullptr ? input_->HandTracker(0) : XR_NULL_HANDLE,
+                                               input_ != nullptr ? input_->HandTracker(1) : XR_NULL_HANDLE};
+            const bool loaded = LoadRuntimeHandMeshes(*runtime_, trackers);
             RT_LOG(RT_TAG_RUNTIME) << "[mkw-vr] cockpit hands: "
                                    << (loaded ? "the runtime's hand mesh" : "procedural gloves (no runtime hand mesh)")
                                    << std::endl;
@@ -1346,6 +1362,7 @@ private:
             ViewFromBase(source.xr_frame.views[eye].pose, base_position_, true, 1.0f, lean_back_radians,
                          cockpit.eyeFromSeat[eye]);
         }
+        const hand_tracking::HandJointFrame* joints = input_ != nullptr ? &input_->HandJoints() : nullptr;
         for (size_t hand = 0; hand < 2; ++hand) {
             auto& target = cockpit.hands[hand];
             const auto& from = driving.hands[hand];
@@ -1353,6 +1370,14 @@ private:
             target.held = from.held;
             target.squeeze = from.squeeze;
             std::copy(from.seat_from_grip.begin(), from.seat_from_grip.end(), target.seatFromGrip);
+            target.jointsValid = from.joints_valid && joints != nullptr && joints->valid[hand];
+            if (target.jointsValid) {
+                for (size_t joint = 0; joint < hand_tracking::kJointCount; ++joint) {
+                    const auto& matrix = joints->seat_from_joint[hand][joint];
+                    std::copy(matrix.begin(), matrix.end(), target.seatFromJoint[joint]);
+                    target.jointRadii[joint] = joints->radius[hand][joint];
+                }
+            }
         }
     }
 
@@ -1893,6 +1918,7 @@ private:
     std::atomic_bool immersive_window_{RuntimeConfigFile::VrImmersiveWindow()};
     std::atomic_uint32_t frame_interpolation_fps_{RuntimeConfigFile::VrFrameInterpolationFps()};
     std::atomic_bool interpolation_available_{false};
+    std::atomic_bool hand_tracking_available_{false};
     std::mutex interpolation_mutex_;
     bool interpolation_stopping_ = true;
     FrameInterpolationPacing interpolation_pacing_;
@@ -2039,6 +2065,14 @@ OpenXRFrameTiming OpenXRGetFrameTiming() noexcept {
 bool OpenXRFrameInterpolationAvailable() noexcept {
 #if MKW_OPENXR_GRAPHICS_BACKEND
     return OpenXRIntegration::Get().FrameInterpolationAvailable();
+#else
+    return false;
+#endif
+}
+
+bool OpenXRHandTrackingAvailable() noexcept {
+#if MKW_OPENXR_GRAPHICS_BACKEND
+    return OpenXRIntegration::Get().HandTrackingAvailable();
 #else
     return false;
 #endif

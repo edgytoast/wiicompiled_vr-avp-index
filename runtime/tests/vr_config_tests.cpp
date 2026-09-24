@@ -35,6 +35,13 @@ int main() {
     Require(Parse("[vr]\nsingle_pass_eyes = false\n").vrSinglePassEyes == false);
     Require(!Parse("[vr]\n").vrSinglePassEyes.has_value());
 
+    // [vr] hand_tracking: the cockpit hands follow the headset's hand tracking.
+    Require(Parse("[vr]\nhand_tracking = true\n").vrHandTracking == true);
+    Require(Parse("[vr]\nhand_tracking = false\n").vrHandTracking == false);
+    Require(!Parse("[vr]\n").vrHandTracking.has_value());
+    Require(!Parse("[vr]\nhand_tracking = 1\n").vrHandTracking.has_value());
+    Require(!RuntimeConfigFile::kVrHandTrackingDefault);
+
     // [vr] immersive_window and flat_screen: one race view in two keys, Flat
     // Screen mode winning, so a file that predates the window reads as before.
     using RuntimeConfigFile::VrRaceView;

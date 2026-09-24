@@ -80,6 +80,7 @@ struct RuntimeUserConfig {
     std::optional<bool> vrSteeringWheel;
     std::optional<bool> vrNativeSteeringWheel;
     std::optional<bool> vrHandSteering;
+    std::optional<bool> vrHandTracking;
     std::optional<float> vrWheelKartDegrees;
     std::optional<float> vrWheelBikeDegrees;
     std::optional<float> vrWheelGrabDistance;
@@ -233,6 +234,11 @@ inline constexpr float kVrCockpitUnitsPerMeterMax = 400.0f;
 inline constexpr bool kVrSteeringWheelDefault = true;
 inline constexpr bool kVrNativeSteeringWheelDefault = true;
 inline constexpr bool kVrHandSteeringDefault = true;
+// The cockpit hands follow the headset's hand tracking (the controllers' touch
+// sensors while they are held, the cameras once they are put down, when bare
+// hands also drive). Opt-in, and only offered on the Quest for now; the
+// launcher's Settings page shows the same default.
+inline constexpr bool kVrHandTrackingDefault = false;
 // Hand steering tuning ranges; the defaults are mkw::vr::WheelTuning's.
 inline constexpr float kVrWheelDegreesMin = 20.0f, kVrWheelDegreesMax = 180.0f;
 inline constexpr float kVrWheelGrabDistanceMin = 0.15f, kVrWheelGrabDistanceMax = 0.8f;
@@ -862,6 +868,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     config.vrSteeringWheel = FindConfigValue<bool>(document, "vr", "steering_wheel");
     config.vrNativeSteeringWheel = FindConfigValue<bool>(document, "vr", "native_steering_wheel");
     config.vrHandSteering = FindConfigValue<bool>(document, "vr", "hand_steering");
+    config.vrHandTracking = FindConfigValue<bool>(document, "vr", "hand_tracking");
     config.vrWheelKartDegrees = readRangedFloat("wheel_kart_degrees", kVrWheelDegreesMin, kVrWheelDegreesMax);
     config.vrWheelBikeDegrees = readRangedFloat("wheel_bike_degrees", kVrWheelDegreesMin, kVrWheelDegreesMax);
     config.vrWheelGrabDistance =
@@ -1261,6 +1268,11 @@ inline bool SetVrNativeSteeringWheel(bool value) {
 inline bool SetVrHandSteering(bool value) {
     Mutable().vrHandSteering = value;
     return WriteSetting("vr", "hand_steering", value ? "true" : "false");
+}
+
+inline bool SetVrHandTracking(bool value) {
+    Mutable().vrHandTracking = value;
+    return WriteSetting("vr", "hand_tracking", value ? "true" : "false");
 }
 
 inline bool SetVrWheelTuning(const mkw::vr::WheelTuning& tuning) {
@@ -1744,6 +1756,10 @@ inline bool VrNativeSteeringWheel(bool fallback = kVrNativeSteeringWheelDefault)
 
 inline bool VrHandSteering(bool fallback = kVrHandSteeringDefault) {
     return Get().vrHandSteering.value_or(fallback);
+}
+
+inline bool VrHandTracking(bool fallback = kVrHandTrackingDefault) {
+    return Get().vrHandTracking.value_or(fallback);
 }
 
 inline mkw::vr::WheelTuning VrWheelTuning() {

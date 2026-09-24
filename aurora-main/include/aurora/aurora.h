@@ -123,11 +123,20 @@ typedef enum {
  * immersive base position. Aurora draws it per eye after the scene, depth-tested
  * against the scene with the scene's own depth mapping.
  */
+enum { AURORA_VR_HAND_JOINT_COUNT = 26 };
+
 typedef struct {
   bool tracked;
   bool held;
+  // The hand-tracking joints below are valid: the hand is drawn from them
+  // instead of curling from squeeze at seatFromGrip.
+  bool jointsValid;
   float squeeze;
   float seatFromGrip[12];
+  // XR_EXT_hand_tracking joints in XR_HAND_JOINT_* order, each a row-major 3x4
+  // in the seated frame, and their radii in metres.
+  float seatFromJoint[AURORA_VR_HAND_JOINT_COUNT][12];
+  float jointRadii[AURORA_VR_HAND_JOINT_COUNT];
 } AuroraCockpitHand;
 
 typedef struct {
@@ -159,7 +168,9 @@ typedef struct {
 void aurora_set_stereo_panel_layer(bool enabled);
 
 // Copies optional runtime-provided hand meshes (XR_FB_hand_tracking_mesh, 26
-// joints). Null clears to the procedural glove. Bind poses: x,y,z,w,px,py,pz.
+// joints). Null clears to the procedural glove. Bind poses: x,y,z,w,px,py,pz,
+// in the space of the mesh's vertices, as xrLocateHandJointsEXT reports poses:
+// a hand with tracked joints is skinned with seatFromJoint * inverse(bind).
 void aurora_set_vr_hand_mesh(uint32_t hand, const AuroraVRHandVertex* vertices, uint32_t vertexCount,
                              const uint16_t* indices, uint32_t indexCount, const float* bindPoses,
                              const int32_t* parents, uint32_t jointCount);

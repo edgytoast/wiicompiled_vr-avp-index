@@ -166,6 +166,9 @@ live, from the headset panel's VR tab or the launcher's Settings page. The app d
 So that the room frames the picture rather than black bands, the Quest's menu quad shows only the
 part of its eye-sized image Aurora draws into (the desktop snapshot, and the in-eye settings
 panel's rectangle), at the same size per pixel, so nothing moves.
+`hand_tracking` (Quest only, default off) makes the first-person cockpit's hands follow the
+headset's hand tracking; see "Tracked hands" under
+[Steering wheel and hand steering](#steering-wheel-and-hand-steering).
 `stop_at_display_copy` ends eye replay at the final `GXCopyDisp`, matching the frame shown on the
 desktop. `skip_copy_clears` independently suppresses the EFB reset performed after a copy. Both
 default on and can be changed live from the F10 settings bar for diagnostics.
@@ -496,11 +499,40 @@ player 1's GameCube controller. The cockpit's wheel follows its calibrated steer
 full-lock angle as the stick (`wheel_kart_degrees`, `wheel_bike_degrees`), and hand steering steps
 aside while it drives.
 
+**Tracked hands.** `hand_tracking` (Quest only for now, default off; the Quest launcher's
+Settings > VR and the headset panel's VR tab, under hand steering, which it needs) poses the
+cockpit hands from the headset's hand tracking instead of curling them with the grip. Two hand
+trackers (`XR_EXT_hand_tracking`) are located every XR frame at the display time. While the
+controllers are held the Quest builds the joints from their touch sensors
+(`XR_EXT_hand_tracking_data_source`'s controller source: the trigger finger, the thumb on its rest or
+a button, the grip); once they are put down, from its cameras. The runtime's hand mesh is then
+skinned with the joints themselves, each joint's tracked pose times its inverse bind pose (the bind
+poses are in the mesh's space, as `xrLocateHandJointsEXT` reports poses), with no curl and no grip;
+a runtime with joints but no mesh (SteamVR, Virtual Desktop) gets a skeleton along the joints. A
+hand whose joints are not located, or not finite, falls back to the curl at its grip. The trackers
+exist only while the option and hand steering are both on, and serve the mesh too; the extensions
+(with `XR_FB_hand_tracking_aim`) are asked for when either is on at launch, otherwise turning the
+option on applies after a restart. The log says `OpenXR tracked hands ready (controller-driven
+hands: yes|no)` and, at each change, `OpenXR tracked hands: left camera, right controller`; the
+headset panel shows each hand's source under the checkbox.
+
+The Quest app declares `horizonos.permission.HAND_TRACKING` (and the older
+`com.oculus.permission.HAND_TRACKING`), normal permissions granted at install with no prompt, and
+`oculus.software.handtracking` as optional: without that flag Horizon OS keeps the app
+controllers-only. With it, putting the controllers down drives `khr/simple_controller` from the
+hands (an index pinch is select, the left palm-up pinch the menu), and every change of interaction
+profile is logged (`OpenXR interaction profiles: left ..., right ...`). A hand driving that profile
+instead of the Touch one (its squeeze action inactive, its select active) is a bare hand; with
+tracked hands off it presses nothing but the menu gesture, which pauses, is not drawn, and feeds
+no Wii Remote motion, so the permission changes nothing for players who leave the option off. On
+PC none of this applies: a PC runtime can drive real controllers through `khr/simple_controller`
+and synthesize joints for them, so a hand-edited `hand_tracking = true` only changes the drawing.
+
 **Hands and the separate wheel.** Hands are drawn while hand steering is on: the runtime's own hand
-mesh where it offers one (`XR_EXT_hand_tracking` and `XR_FB_hand_tracking_mesh`, requested only when
-hand steering is on at launch), otherwise procedural gloves that curl with the squeeze. A Quest 3
-offers that mesh without the app declaring hand tracking, and the log says which is drawn
-(`[mkw-vr] cockpit hands:`). Both close their fingers towards the palm: the mesh's joints point
+mesh where it offers one (`XR_EXT_hand_tracking` and `XR_FB_hand_tracking_mesh`, requested when
+hand steering or tracked hands are on at launch), otherwise procedural gloves that curl with the
+squeeze. A Quest 3 offers that mesh even without the app declaring hand tracking, and the log says
+which is drawn (`[mkw-vr] cockpit hands:`). Both close their fingers towards the palm: the mesh's joints point
 -Z towards the fingertip and +Y out of the back of the hand, so flexion is negative about the
 joint's own X, on both hands. They and the
 separate VR wheel or handlebar travel with the stereo packet in metres in the seated frame, and each

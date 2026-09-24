@@ -78,6 +78,10 @@ void OpenXRSetImmersiveWindow(bool enabled) noexcept;
 // 0 = Off, 1 = Auto, otherwise 72/90/120 as a rendering-rate ceiling.
 void OpenXRSetFrameInterpolationFps(uint32_t target) noexcept;
 bool OpenXRFrameInterpolationAvailable() noexcept;
+
+// This session started with XR_EXT_hand_tracking, so [vr] hand_tracking applies
+// live (it is asked for when hand steering or tracked hands are on at launch).
+bool OpenXRHandTrackingAvailable() noexcept;
 struct OpenXRFrameTiming {
     float headset_hz = 0;
     float rendered_fps = 0; // Newly rendered pairs; excludes retained-layer repeats.

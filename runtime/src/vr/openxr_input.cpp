@@ -271,6 +271,7 @@ bool OpenXRInput::Create(OpenXRRuntime& runtime) {
     m_created = true;
     CreatePoseSpaces();
     LoadInputClock();
+    LoadHandTracking();
     if (!AttachVirtualGamepad()) {
         Log(OpenXRLogLevel::Warning,
             "SDL refused the virtual gamepad; OpenXR controllers will not reach the game");
@@ -484,6 +485,197 @@ XrTime OpenXRInput::InputSampleTime(XrTime predicted_display_time) const {
     return now > 0 ? (std::min)(predicted_display_time, now) : predicted_display_time;
 }
 
+// The hand-tracking extensions are asked for at launch when hand steering or
+// tracked hands are on (openxr_integration.cpp), so the option itself is live.
+void OpenXRInput::LoadHandTracking() {
+    const auto& extensions = m_runtime->EnabledExtensions();
+    const auto enabled = [&](const char* name) {
+        return std::find(extensions.begin(), extensions.end(), name) != extensions.end();
+    };
+    if (!enabled(XR_EXT_HAND_TRACKING_EXTENSION_NAME)) {
+        return;
+    }
+    PFN_xrVoidFunction create = nullptr, destroy = nullptr, locate = nullptr;
+    if (!m_runtime->GetInstanceProcAddress("xrCreateHandTrackerEXT", &create) ||
+        !m_runtime->GetInstanceProcAddress("xrDestroyHandTrackerEXT", &destroy) ||
+        !m_runtime->GetInstanceProcAddress("xrLocateHandJointsEXT", &locate) || create == nullptr ||
+        destroy == nullptr || locate == nullptr) {
+        return;
+    }
+    m_create_hand_tracker = reinterpret_cast<PFN_xrCreateHandTrackerEXT>(create);
+    m_destroy_hand_tracker = reinterpret_cast<PFN_xrDestroyHandTrackerEXT>(destroy);
+    m_locate_hand_joints = reinterpret_cast<PFN_xrLocateHandJointsEXT>(locate);
+    m_hand_data_source = enabled(XR_EXT_HAND_TRACKING_DATA_SOURCE_EXTENSION_NAME);
+    m_hand_aim = enabled(XR_FB_HAND_TRACKING_AIM_EXTENSION_NAME);
+}
+
+// Trackers only exist while tracked hands and hand steering are both on: the
+// hands are only drawn while they can steer. They live as long as the session
+// otherwise (Idle and the cockpit's reset keep them); a runtime that refuses
+// them is not asked again until the option is turned off and on.
+void OpenXRInput::UpdateHandTrackers() {
+    if (!RuntimeConfigFile::VrHandTracking() || !RuntimeConfigFile::VrHandSteering()) {
+        DestroyHandTrackers();
+        m_hand_trackers_failed = false;
+        m_logged_hand_restart = false;
+        return;
+    }
+    if (m_hand_trackers[0] != XR_NULL_HANDLE || m_hand_trackers_failed) {
+        return;
+    }
+    if (m_create_hand_tracker == nullptr) {
+        if (!m_logged_hand_restart) {
+            m_logged_hand_restart = true;
+            Log(OpenXRLogLevel::Info, "OpenXR tracked hands apply after a restart: this session started "
+                                      "without XR_EXT_hand_tracking");
+        }
+        return;
+    }
+    bool controller_hands = m_hand_data_source;
+    for (uint32_t hand = 0; hand < kHands; ++hand) {
+        XrHandTrackerCreateInfoEXT info{XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT};
+        info.hand = hand == 0 ? XR_HAND_LEFT_EXT : XR_HAND_RIGHT_EXT;
+        info.handJointSet = XR_HAND_JOINT_SET_DEFAULT_EXT;
+        // Both sources: the cameras once the controllers are put down, the
+        // controllers' touch sensors while they are held.
+        XrHandTrackingDataSourceEXT sources[]{XR_HAND_TRACKING_DATA_SOURCE_UNOBSTRUCTED_EXT,
+                                              XR_HAND_TRACKING_DATA_SOURCE_CONTROLLER_EXT};
+        XrHandTrackingDataSourceInfoEXT source_info{XR_TYPE_HAND_TRACKING_DATA_SOURCE_INFO_EXT};
+        source_info.requestedDataSourceCount = 2;
+        source_info.requestedDataSources = sources;
+        info.next = controller_hands ? &source_info : nullptr;
+        XrResult result = m_create_hand_tracker(m_runtime->Session(), &info, &m_hand_trackers[hand]);
+        if (XR_FAILED(result) && info.next != nullptr) {
+            // The cameras still work without the controller source.
+            controller_hands = false;
+            info.next = nullptr;
+            result = m_create_hand_tracker(m_runtime->Session(), &info, &m_hand_trackers[hand]);
+        }
+        m_runtime->ObserveResult(result);
+        if (XR_FAILED(result)) {
+            m_hand_trackers[hand] = XR_NULL_HANDLE;
+            DestroyHandTrackers();
+            m_hand_trackers_failed = true;
+            std::ostringstream message;
+            message << "xrCreateHandTrackerEXT failed (" << result
+                    << "); the cockpit hands keep following the controllers";
+            Log(OpenXRLogLevel::Warning, message.str());
+            return;
+        }
+    }
+    Log(OpenXRLogLevel::Info, controller_hands ? "OpenXR tracked hands ready (controller-driven hands: yes)"
+                                               : "OpenXR tracked hands ready (controller-driven hands: no)");
+}
+
+void OpenXRInput::DestroyHandTrackers() {
+    for (XrHandTrackerEXT& tracker : m_hand_trackers) {
+        if (tracker != XR_NULL_HANDLE) {
+            if (m_destroy_hand_tracker != nullptr) {
+                m_destroy_hand_tracker(tracker);
+            }
+            tracker = XR_NULL_HANDLE;
+        }
+    }
+    m_tracked_hands = {};
+    m_joint_frame = {};
+}
+
+// Both hands' joints for `time` in the application space, and, when the
+// seated frame is valid, in it for the cockpit (m_joint_frame keeps a hand's
+// last located joints until new ones arrive; UpdateDriving decides what is
+// drawn). A hand counts only when every joint is located.
+void OpenXRInput::LocateHands(XrTime time, const driving::SeatFrame& seat) {
+    using hand_tracking::Source;
+    for (uint32_t hand = 0; hand < kHands; ++hand) {
+        TrackedHand& tracked = m_tracked_hands[hand];
+        tracked = {};
+        if (m_hand_trackers[hand] == XR_NULL_HANDLE || m_locate_hand_joints == nullptr) {
+            continue;
+        }
+        std::array<XrHandJointLocationEXT, XR_HAND_JOINT_COUNT_EXT> joints{};
+        XrHandJointLocationsEXT locations{XR_TYPE_HAND_JOINT_LOCATIONS_EXT};
+        locations.jointCount = XR_HAND_JOINT_COUNT_EXT;
+        locations.jointLocations = joints.data();
+        XrHandTrackingDataSourceStateEXT source{XR_TYPE_HAND_TRACKING_DATA_SOURCE_STATE_EXT};
+        XrHandTrackingAimStateFB aim{XR_TYPE_HAND_TRACKING_AIM_STATE_FB};
+        void* next = nullptr;
+        if (m_hand_data_source) {
+            source.next = next;
+            next = &source;
+        }
+        if (m_hand_aim) {
+            aim.next = next;
+            next = &aim;
+        }
+        locations.next = next;
+        XrHandJointsLocateInfoEXT info{XR_TYPE_HAND_JOINTS_LOCATE_INFO_EXT};
+        info.baseSpace = m_runtime->AppSpace();
+        info.time = time;
+        if (XR_FAILED(m_locate_hand_joints(m_hand_trackers[hand], &info, &locations)) ||
+            locations.isActive != XR_TRUE) {
+            continue;
+        }
+        constexpr XrSpaceLocationFlags kValid =
+            XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+        if (!std::all_of(joints.begin(), joints.end(),
+                         [](const XrHandJointLocationEXT& joint) { return (joint.locationFlags & kValid) == kValid; })) {
+            continue;
+        }
+        tracked.active = true;
+        tracked.source = !m_hand_data_source || source.isActive != XR_TRUE ? Source::Unknown
+                         : source.dataSource == XR_HAND_TRACKING_DATA_SOURCE_CONTROLLER_EXT ? Source::Controller
+                                                                                           : Source::Camera;
+        if (m_hand_aim) {
+            tracked.aim_valid = (aim.status & XR_HAND_TRACKING_AIM_VALID_BIT_FB) != 0;
+            tracked.aim_pinching = (aim.status & XR_HAND_TRACKING_AIM_INDEX_PINCHING_BIT_FB) != 0;
+            tracked.aim_menu = (aim.status & XR_HAND_TRACKING_AIM_MENU_PRESSED_BIT_FB) != 0;
+            tracked.aim_system_gesture = (aim.status & XR_HAND_TRACKING_AIM_SYSTEM_GESTURE_BIT_FB) != 0;
+        }
+        for (size_t joint = 0; joint < hand_tracking::kJointCount; ++joint) {
+            const XrPosef& pose = joints[joint].pose;
+            tracked.positions[joint] = {pose.position.x, pose.position.y, pose.position.z};
+            if (seat.valid) {
+                m_joint_frame.seat_from_joint[hand][joint] =
+                    driving::SeatFromApp(seat, {pose.position.x, pose.position.y, pose.position.z},
+                                         {pose.orientation.x, pose.orientation.y, pose.orientation.z,
+                                          pose.orientation.w});
+                m_joint_frame.radius[hand][joint] = joints[joint].radius;
+            }
+        }
+        tracked.seated = seat.valid;
+    }
+    if (m_tracked_hands[0].source != m_logged_sources[0] || m_tracked_hands[1].source != m_logged_sources[1]) {
+        m_logged_sources = {m_tracked_hands[0].source, m_tracked_hands[1].source};
+        std::ostringstream message;
+        message << "OpenXR tracked hands: left " << hand_tracking::SourceLabel(m_logged_sources[0]) << ", right "
+                << hand_tracking::SourceLabel(m_logged_sources[1]);
+        Log(OpenXRLogLevel::Info, message.str());
+    }
+}
+
+// Which interaction profile each hand moved to, whenever the runtime reports a
+// change: on the Quest, the Touch profile with controllers and
+// khr/simple_controller for bare hands.
+void OpenXRInput::LogInteractionProfiles() {
+    std::ostringstream message;
+    message << "OpenXR interaction profiles:";
+    for (uint32_t hand = 0; hand < kHands; ++hand) {
+        message << (hand == 0 ? " left " : ", right ");
+        XrInteractionProfileState state{XR_TYPE_INTERACTION_PROFILE_STATE};
+        char path[XR_MAX_PATH_LENGTH]{};
+        uint32_t length = 0;
+        if (XR_SUCCEEDED(xrGetCurrentInteractionProfile(m_runtime->Session(), m_hand_paths[hand], &state)) &&
+            state.interactionProfile != XR_NULL_PATH &&
+            XR_SUCCEEDED(xrPathToString(m_runtime->Instance(), state.interactionProfile, sizeof(path), &length,
+                                        path))) {
+            message << path;
+        } else {
+            message << "none";
+        }
+    }
+    Log(OpenXRLogLevel::Info, message.str());
+}
+
 void OpenXRApplyVirtualGamepad() noexcept {
     Relay().Apply();
 }
@@ -544,6 +736,15 @@ void OpenXRInput::Destroy() {
         StopRumble();
     }
     DetachVirtualGamepad();
+    DestroyHandTrackers();
+    m_create_hand_tracker = nullptr;
+    m_destroy_hand_tracker = nullptr;
+    m_locate_hand_joints = nullptr;
+    m_hand_data_source = m_hand_aim = false;
+    m_hand_trackers_failed = m_logged_hand_restart = false;
+    m_logged_sources = {};
+    m_squeeze_active = m_hand_driven = m_pinch = {};
+    m_profile_serial = 0;
     DestroyPoseSpaces();
     if (m_action_set != XR_NULL_HANDLE) {
         // Destroying the set destroys every action created from it.
@@ -583,6 +784,9 @@ void OpenXRInput::Idle() {
     m_panel_select_held = false;
     OpenXRPublishSettingsPanelPointer(false, 0.0f, 0.0f, false, 0.0f);
     m_first_person_click.Reset();
+    // The trackers stay with the session; only this frame's hands are forgotten.
+    m_tracked_hands = {};
+    m_squeeze_active = m_hand_driven = m_pinch = {};
     ResetDriving();
     StopRumble();
     // Nothing stays held on the gamepad either while input is away.
@@ -619,24 +823,31 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
         return;
     }
 
-    const auto boolean = [&](XrAction action, uint32_t hand) {
+    // `active`, when given, says whether the action is bound to a source the
+    // runtime has right now (a controller, or a tracked hand).
+    const auto boolean = [&](XrAction action, uint32_t hand, bool* active = nullptr) {
         XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
         info.action = action;
         info.subactionPath = m_hand_paths[hand];
         XrActionStateBoolean state{XR_TYPE_ACTION_STATE_BOOLEAN};
-        return XR_SUCCEEDED(xrGetActionStateBoolean(m_runtime->Session(), &info, &state)) &&
-               state.isActive == XR_TRUE && state.currentState == XR_TRUE;
+        const bool bound = XR_SUCCEEDED(xrGetActionStateBoolean(m_runtime->Session(), &info, &state)) &&
+                           state.isActive == XR_TRUE;
+        if (active != nullptr) {
+            *active = bound;
+        }
+        return bound && state.currentState == XR_TRUE;
     };
-    const auto scalar = [&](XrAction action, uint32_t hand) {
+    const auto scalar = [&](XrAction action, uint32_t hand, bool* active = nullptr) {
         XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
         info.action = action;
         info.subactionPath = m_hand_paths[hand];
         XrActionStateFloat state{XR_TYPE_ACTION_STATE_FLOAT};
-        if (XR_FAILED(xrGetActionStateFloat(m_runtime->Session(), &info, &state)) ||
-            state.isActive != XR_TRUE) {
-            return 0.0f;
+        const bool bound = XR_SUCCEEDED(xrGetActionStateFloat(m_runtime->Session(), &info, &state)) &&
+                           state.isActive == XR_TRUE;
+        if (active != nullptr) {
+            *active = bound;
         }
-        return state.currentState;
+        return bound ? state.currentState : 0.0f;
     };
     const auto vector = [&](XrAction action, uint32_t hand) {
         XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
@@ -651,17 +862,22 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
     };
 
     std::array<wii_remote::HandInputs, kHands> hands{};
+    // simple_controller binds select to the right primary and the left secondary action.
+    std::array<bool, kHands> select_active{};
     for (uint32_t hand = 0; hand < kHands; ++hand) {
         wii_remote::HandInputs& inputs = hands[hand];
-        inputs.primary = boolean(m_button_primary, hand);
-        inputs.secondary = boolean(m_button_secondary, hand);
+        bool primary_active = false, secondary_active = false, squeeze_active = false;
+        inputs.primary = boolean(m_button_primary, hand, &primary_active);
+        inputs.secondary = boolean(m_button_secondary, hand, &secondary_active);
         inputs.menu = boolean(m_menu, hand);
         inputs.thumbstick_click = boolean(m_thumbstick_click, hand);
         inputs.trigger = scalar(m_trigger, hand);
-        inputs.squeeze = scalar(m_squeeze, hand);
+        inputs.squeeze = scalar(m_squeeze, hand, &squeeze_active);
         const XrVector2f stick = vector(m_thumbstick, hand);
         inputs.stick_x = stick.x;
         inputs.stick_y = stick.y;
+        m_squeeze_active[hand] = squeeze_active;
+        select_active[hand] = hand == 1 ? primary_active : secondary_active;
     }
 
     PollInjection();
@@ -674,6 +890,42 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
     } else if (Injected("right")) {
         hands[0].stick_x = 1.0f;
     }
+
+    if (m_runtime->InteractionProfileSerial() != m_profile_serial) {
+        m_profile_serial = m_runtime->InteractionProfileSerial();
+        LogInteractionProfiles();
+    }
+    // Tracked hands, before anything reads the hands (the settings panel, the
+    // wheel, the game).
+    const bool hand_tracking_on = RuntimeConfigFile::VrHandTracking();
+    UpdateHandTrackers();
+    LocateHands(predicted_display_time, seat);
+#if defined(__ANDROID__)
+    // A hand driving simple_controller is a bare hand: its select is a pinch
+    // and its menu the palm-up gesture, which pauses from either hand.
+    bool menu_gesture = false;
+    for (uint32_t hand = 0; hand < kHands; ++hand) {
+        m_hand_driven[hand] = !m_squeeze_active[hand] && select_active[hand];
+        if (!m_hand_driven[hand]) {
+            m_pinch[hand] = false;
+            continue;
+        }
+        const TrackedHand& tracked = m_tracked_hands[hand];
+        const hand_tracking::Gestures gestures = hand_tracking::GesturesOf(
+            tracked.aim_valid, tracked.aim_pinching, tracked.aim_menu, tracked.aim_system_gesture,
+            hand_tracking::SelectOf(hands[hand], hand), hands[hand].menu);
+        m_pinch[hand] = gestures.pinch;
+        menu_gesture = menu_gesture || gestures.menu;
+        hands[hand].menu = false;
+    }
+    hand_tracking::ApplyHandDrivenButtons(hands, m_hand_driven, m_pinch, hand_tracking_on);
+    if (menu_gesture) {
+        hands[0].menu = true;
+    }
+#else
+    (void)select_active;
+    (void)hand_tracking_on;
+#endif
 
     const XrTime input_time = InputSampleTime(predicted_display_time);
     const float dt_seconds =
@@ -812,6 +1064,15 @@ void OpenXRInput::PublishWiiRemote(XrTime input_time, const OpenXRPointerScreen&
                 aim_valid[hand] = true;
             }
         }
+        if (m_hand_driven[hand]) {
+            // A bare hand keeps its pointer but is a still remote: camera-tracked
+            // poses are too noisy to differentiate twice (turning the wheel would
+            // trick and wheelie), and resting every frame clears the history, so
+            // picking a controller back up cannot read as a jolt.
+            m_motion[hand].Rest();
+            (hand == 0 ? sample.nunchuk_acc : sample.acc) = OpenXRWiiRemoteSample{}.acc;
+            continue;
+        }
         wii_remote::Vec3 grip_position{};
         wii_remote::Vec3 grip_velocity{};
         bool position_valid = false;
@@ -877,6 +1138,7 @@ void OpenXRInput::ResetDriving() {
     m_wheel_held = {};
     m_wheel_time = 0;
     m_driving = {};
+    m_joint_frame.valid = {};
     OpenXRPublishDriving(m_driving);
 }
 
@@ -934,6 +1196,7 @@ void OpenXRInput::UpdateDriving(XrTime display_time, const driving::SeatFrame& s
 
     constexpr XrSpaceLocationFlags kPoseValid =
         XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+    const bool hand_tracking_on = RuntimeConfigFile::VrHandTracking();
     std::array<WheelHand, kHands> wheel_hands{};
     for (uint32_t hand = 0; hand < kHands; ++hand) {
         bool tracked = false;
@@ -950,8 +1213,25 @@ void OpenXRInput::UpdateDriving(XrTime display_time, const driving::SeatFrame& s
             }
         }
         const float squeeze = hands[hand].squeeze;
+        const TrackedHand& located = m_tracked_hands[hand];
+        // With tracked hands on, a hand whose joints were located is drawn from
+        // them (the controller's touch sensors, or the cameras). A bare hand is
+        // never drawn or steered from its grip pose, which would show an open
+        // hand wherever it rests.
+        const bool joints = hand_tracking_on && located.active && located.seated;
+        if (m_hand_driven[hand]) {
+            tracked = false;
+        }
+        DrivingHand& out = snapshot.hands[hand];
         // Hands are shown only while they can steer.
-        snapshot.hands[hand] = {tracked && hand_steering, false, squeeze, seat_from_grip};
+        out.tracked = hand_steering && (tracked || joints);
+        out.held = false;
+        out.squeeze = squeeze;
+        out.seat_from_grip = seat_from_grip;
+        out.joints_valid = joints;
+        out.source = located.source;
+        out.pinch = m_pinch[hand];
+        m_joint_frame.valid[hand] = joints;
         wheel_hands[hand] = {seat_from_grip[3], seat_from_grip[7], seat_from_grip[11], squeeze, tracked};
         if (uses_geometry) {
             wheel_hands[hand] = geometry.ToWheel(wheel_hands[hand]);
@@ -966,7 +1246,7 @@ void OpenXRInput::UpdateDriving(XrTime display_time, const driving::SeatFrame& s
                                             uses_geometry ? geometry.radius : SteeringWheel::Radius,
                                             anchor.bike, tuning);
     for (uint32_t hand = 0; hand < kHands; ++hand) {
-        if (wheel.held[hand] != m_wheel_held[hand] && active && tuning.haptics) {
+        if (wheel.held[hand] != m_wheel_held[hand] && active && tuning.haptics && !m_hand_driven[hand]) {
             constexpr XrDuration kGrabPulseNs = 25'000'000;
             constexpr XrDuration kReleasePulseNs = 15'000'000;
             ApplyHaptic(hand, wheel.held[hand] ? 0.25f : 0.12f, wheel.held[hand] ? kGrabPulseNs : kReleasePulseNs);

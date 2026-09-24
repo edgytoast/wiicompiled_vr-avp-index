@@ -557,6 +557,16 @@ OpenXREventStatus OpenXRRuntime::PollEvents() {
             }
             break;
         }
+        case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED: {
+            // A controller picked up or put down; the input logs the profiles
+            // the hands moved to.
+            const auto& profile_event =
+                *reinterpret_cast<const XrEventDataInteractionProfileChanged*>(&event);
+            if (profile_event.session == m_session) {
+                ++m_interaction_profile_serial;
+            }
+            break;
+        }
         case XR_TYPE_EVENT_DATA_EVENTS_LOST: {
             const auto& lost_event =
                 *reinterpret_cast<const XrEventDataEventsLost*>(&event);

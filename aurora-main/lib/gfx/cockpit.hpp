@@ -128,6 +128,25 @@ inline void glove(std::vector<Vertex>& v, const AuroraCockpitHand& hand, int sid
   tube(v,thumbKnuckle,{palm*(0.030f+0.014f*curl),-(0.052f-0.016f*curl),-0.020f},0.009f,white);
   for(size_t i=start;i<v.size();++i) v[i].position=point(hand.seatFromGrip,v[i].position);
 }
+// Blends the runtime mesh with one skinning matrix per joint (joints left out
+// by `valid` do not pull), then places it: shifted by `offset` and carried by
+// `seatFromMesh` when there is one.
+inline void skin_mesh(std::vector<Vertex>& out, const HandMesh& mesh, const std::array<M,26>& skin,
+                      const std::array<bool,26>& valid, V offset, const float* seatFromMesh) {
+  std::vector<V> points(mesh.vertices.size());
+  for(size_t i=0;i<points.size();++i) {
+    const auto& v=mesh.vertices[i]; V p{}; float total=0;
+    for(int w=0;w<4;++w) if(v.joints[w]>=0&&v.joints[w]<26&&valid[v.joints[w]]&&v.weights[w]>0) {
+      p=add(p,mul(point(skin[v.joints[w]].data(),{v.position[0],v.position[1],v.position[2]}),v.weights[w]));
+      total+=v.weights[w];
+    }
+    if(total>0) p=mul(p,1/total);
+    p=add(p,offset);
+    points[i]=seatFromMesh?point(seatFromMesh,p):p;
+  }
+  for(size_t i=0;i+2<mesh.indices.size();i+=3)
+    triangle(out,points[mesh.indices[i]],points[mesh.indices[i+1]],points[mesh.indices[i+2]],{0.91f,0.95f,1.0f});
+}
 inline void runtime_hand(std::vector<Vertex>& out, const AuroraCockpitHand& hand, const HandMesh& mesh) {
   std::array<M,26> posed{}, skin{};
   std::array<bool,26> done{};
@@ -151,19 +170,52 @@ inline void runtime_hand(std::vector<Vertex>& out, const AuroraCockpitHand& hand
     skin[j]=compose(mesh.inverseBind[1],compose(posed[j],mesh.inverseBind[j]));
     done[j]=true;
   }
-  std::vector<V> points(mesh.vertices.size());
-  for(size_t i=0;i<points.size();++i) {
-    const auto& v=mesh.vertices[i]; V p{}; float total=0;
-    for(int w=0;w<4;++w) if(v.joints[w]>=0&&v.joints[w]<26&&done[v.joints[w]]&&v.weights[w]>0) {
-      p=add(p,mul(point(skin[v.joints[w]].data(),{v.position[0],v.position[1],v.position[2]}),v.weights[w]));
-      total+=v.weights[w];
-    }
-    if(total>0) p=mul(p,1/total);
-    p=add(p,{0,0,0.04f}); // wrist behind the controller grip/palm origin.
-    points[i]=point(hand.seatFromGrip,p);
+  // The wrist sits behind the controller grip/palm origin.
+  skin_mesh(out,mesh,skin,done,{0,0,0.04f},hand.seatFromGrip);
+}
+// The hand-tracking joints are all finite: the hand is drawn from them.
+inline bool joints_finite(const AuroraCockpitHand& hand) {
+  const auto finite=[](float value) {
+    uint32_t bits; std::memcpy(&bits,&value,sizeof(bits)); return (bits&0x7f800000u)!=0x7f800000u;
+  };
+  for(int j=0;j<AURORA_VR_HAND_JOINT_COUNT;++j) {
+    if(!finite(hand.jointRadii[j])) return false;
+    for(float value : hand.seatFromJoint[j]) if(!finite(value)) return false;
   }
-  for(size_t i=0;i+2<mesh.indices.size();i+=3)
-    triangle(out,points[mesh.indices[i]],points[mesh.indices[i+1]],points[mesh.indices[i+2]],{0.91f,0.95f,1.0f});
+  return true;
+}
+inline M joint_matrix(const AuroraCockpitHand& hand, int joint) {
+  M m; std::memcpy(m.data(),hand.seatFromJoint[joint],sizeof(m)); return m;
+}
+// The runtime mesh posed by the tracked joints themselves: the bind poses are
+// in the mesh's own space, as xrLocateHandJointsEXT reports poses, so each
+// joint's skinning matrix is its tracked pose times its inverse bind pose,
+// already in the seated frame. Nothing curls and the grip plays no part.
+inline void tracked_hand(std::vector<Vertex>& out, const AuroraCockpitHand& hand, const HandMesh& mesh) {
+  std::array<M,26> skin{};
+  std::array<bool,26> valid{};
+  for(int j=0;j<26;++j) { skin[j]=compose(joint_matrix(hand,j),mesh.inverseBind[j]); valid[j]=true; }
+  skin_mesh(out,mesh,skin,valid,{0,0,0},nullptr);
+}
+// Without a runtime mesh (PC runtimes report joints but no XR_FB mesh), the
+// tracked joints as a skeleton: each finger a chain of tubes from the wrist to
+// its tip, the joints' own radii, and a ball in the palm.
+inline void joint_skeleton(std::vector<Vertex>& v, const AuroraCockpitHand& hand) {
+  const V white{0.91f,0.95f,1.0f};
+  const auto at=[&](int joint) -> V {
+    return {hand.seatFromJoint[joint][3],hand.seatFromJoint[joint][7],hand.seatFromJoint[joint][11]};
+  };
+  const auto radius=[&](int joint) { return std::clamp(hand.jointRadii[joint],0.004f,0.02f); };
+  constexpr int metacarpal[5]{2,6,11,16,21}, tip[5]{5,10,15,20,25};
+  for(int finger=0;finger<5;++finger) {
+    tube(v,at(1),at(metacarpal[finger]),radius(metacarpal[finger]),white);
+    for(int joint=metacarpal[finger];joint<tip[finger];++joint) {
+      tube(v,at(joint),at(joint+1),radius(joint+1),white);
+      ellipsoid(v,at(joint+1),{radius(joint+1),radius(joint+1),radius(joint+1)},white);
+    }
+  }
+  const float palm=std::clamp(hand.jointRadii[0],0.015f,0.03f);
+  ellipsoid(v,at(0),{palm,palm,palm},white);
 }
 inline void build_geometry(const AuroraCockpit& cockpit, std::vector<Vertex>& vertices) {
   vertices.clear();vertices.reserve(12000);
@@ -192,8 +244,11 @@ inline void build_geometry(const AuroraCockpit& cockpit, std::vector<Vertex>& ve
   std::array<std::shared_ptr<const HandMesh>,2> current;
   { std::lock_guard lock(meshMutex);current=meshes; }
   for(int side=0;side<2;++side) if(cockpit.hands[side].tracked) {
-    if(current[side]) runtime_hand(vertices,cockpit.hands[side],*current[side]);
-    else glove(vertices,cockpit.hands[side],side);
+    const auto& hand=cockpit.hands[side];
+    const bool joints=hand.jointsValid && joints_finite(hand);
+    if(current[side]) joints ? tracked_hand(vertices,hand,*current[side]) : runtime_hand(vertices,hand,*current[side]);
+    else if(joints) joint_skeleton(vertices,hand);
+    else glove(vertices,hand,side);
   }
 }
 inline std::vector<Vertex> geometry(const AuroraCockpit& cockpit) {

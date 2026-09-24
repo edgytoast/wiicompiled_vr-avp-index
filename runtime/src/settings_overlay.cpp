@@ -15,6 +15,7 @@
 #include "vr/mkw_vr_first_person.h"
 #include "vr/mkw_vr_policy.h"
 #include "vr/openxr_diagnostics.h"
+#include "vr/openxr_driving.h"
 #include "vr/openxr_integration.h"
 #include "vr/openxr_settings_panel.h"
 #include "vr/openxr_wii_remote.h"
@@ -149,6 +150,7 @@ bool g_vrFlatScreen = g_vrRaceView == static_cast<int>(RuntimeConfigFile::VrRace
 constexpr std::array<const char*, 3> kVrRaceViewLabels{"Immersive", "Immersive window", "Flat screen"};
 #if defined(__ANDROID__)
 bool g_vrPassthrough = RuntimeConfigFile::VrPassthrough();
+bool g_vrHandTracking = RuntimeConfigFile::VrHandTracking();
 // Menu labels for the foveation levels, index-matched to RuntimeConfigFile::kVrFoveationLevels and to
 // aurora_set_stereo_foveation.
 constexpr std::array<const char*, 4> kVrFoveationLabels{"Off", "Low", "Medium", "High"};
@@ -1181,6 +1183,34 @@ void DrawVrSteeringWheelSettings() {
                           "back to the stick, which still aims items. The runtime's hand mesh is "
                           "used when hand steering was on at launch.");
     }
+#if defined(__ANDROID__)
+    ImGui::BeginDisabled(!g_vrHandSteering);
+    if (ImGui::Checkbox("Tracked hands", &g_vrHandTracking)) {
+        RuntimeConfigFile::SetVrHandTracking(g_vrHandTracking);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "%s", mkw::vr::OpenXRHandTrackingAvailable()
+                      ? "The cockpit hands follow your own. Holding the controllers, the fingers follow "
+                        "their touch sensors; put the controllers down and the headset's cameras track "
+                        "your hands. Needs hand tracking on in the headset's settings."
+                      : "The cockpit hands follow your own, from the controllers' touch sensors or, "
+                        "with the controllers put down, the headset's cameras. This session started "
+                        "with hand steering and tracked hands off, so it applies after a restart.");
+    }
+    ImGui::EndDisabled();
+    if (g_vrHandSteering && g_vrHandTracking) {
+        const mkw::vr::DrivingSnapshot driving = mkw::vr::OpenXRReadDriving();
+        const auto hand = [&](size_t side) {
+            const auto& state = driving.hands[side];
+            return std::string(mkw::vr::hand_tracking::SourceLabel(state.source)) +
+                   (state.bare ? " (bare)" : "") + (state.held ? ", holding" : "") +
+                   (state.pinch ? ", pinch" : "");
+        };
+        ImGui::TextDisabled("Hands: left %s, grasp %.2f | right %s, grasp %.2f", hand(0).c_str(),
+                            driving.hands[0].grasp, hand(1).c_str(), driving.hands[1].grasp);
+    }
+#endif
     if (g_vrHandSteering && ImGui::TreeNode("Hand steering tuning")) {
         bool changed = false;
         changed |= ImGui::SliderFloat("Kart full lock (degrees)", &g_vrWheelTuning.kartDegrees,
@@ -1694,6 +1724,10 @@ void DrawVrSettings() {
         RuntimeConfigFile::SetVrSteeringWheel(g_vrSteeringWheel);
         RuntimeConfigFile::SetVrNativeSteeringWheel(g_vrNativeSteeringWheel);
         RuntimeConfigFile::SetVrHandSteering(g_vrHandSteering);
+#if defined(__ANDROID__)
+        g_vrHandTracking = RuntimeConfigFile::kVrHandTrackingDefault;
+        RuntimeConfigFile::SetVrHandTracking(g_vrHandTracking);
+#endif
         g_vrFirstPersonUnitsPerMeter = RuntimeConfigFile::kVrFirstPersonUnitsPerMeterDefault;
         g_vrFirstPersonHeadUp = RuntimeConfigFile::kVrFirstPersonHeadUpDefault;
         g_vrFirstPersonHeadForward = RuntimeConfigFile::kVrFirstPersonHeadForwardDefault;

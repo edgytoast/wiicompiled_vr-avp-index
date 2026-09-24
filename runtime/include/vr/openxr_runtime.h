@@ -209,6 +209,9 @@ public:
     XrSpace ViewSpace() const { return m_view_space; }
     XrSessionState SessionState() const { return m_session_state; }
     uint64_t SessionRunSerial() const { return m_session_run_serial; }
+    // Advances each time the runtime reports that a hand's interaction profile
+    // changed (a controller picked up or put down).
+    uint64_t InteractionProfileSerial() const { return m_interaction_profile_serial; }
     XrReferenceSpaceType AppSpaceType() const { return m_app_space_type; }
     XrEnvironmentBlendMode EnvironmentBlendMode() const { return m_blend_mode; }
 
@@ -281,6 +284,7 @@ private:
 
     FramePhase m_frame_phase = FramePhase::Idle;
     uint64_t m_session_run_serial = 0;
+    uint64_t m_interaction_profile_serial = 0;
     uint64_t m_next_frame_serial = 1;
     uint64_t m_active_frame_serial = 0;
     XrTime m_active_frame_display_time = 0;

@@ -196,6 +196,23 @@ shoulders, thumbsticks → sticks (clicks → stick buttons), left menu → Star
 and every existing binding, dead zone and overlay setting applies. Bindings are
 suggested for `oculus/touch_controller` and `khr/simple_controller`.
 
+The manifest declares hand tracking (`horizonos.permission.HAND_TRACKING`, the
+deprecated `com.oculus.permission.HAND_TRACKING` for older builds, and
+`oculus.software.handtracking` as optional). Both permissions are `normal` on a
+Quest 3 (`adb shell pm list permissions -g -f`), so there is no prompt. Without
+the feature flag Horizon OS keeps the app controllers-only: the game process logs
+`setting hand mode control settings to ControllersOnly` / `sethandmanifest 0`,
+and putting the controllers down logs `going to controller mode because hands are
+disabled by manifest flag`; with it, `Is hands or controller` /
+`sethandmanifest 2`. Bare hands then drive `khr/simple_controller` (a pinch is
+select, the left palm-up pinch the menu), which the runtime ignores apart from
+the menu gesture unless `[vr] hand_tracking` is on; see "Tracked hands" in
+`OPENXR.md`. The Quest 3 runtime (`libvrapiimpl.so` in the `com.meta.xr` APEX's
+VrDriver.apk) implements `XR_EXT_hand_tracking_data_source`,
+`XR_FB_hand_tracking_aim`, `XR_EXT_hand_interaction`, microgestures and the
+wide-motion modes; Meta's manifest filter skips the wide-motion modes unless the
+app also declares `com.oculus.software.body_tracking`.
+
 ### Android platform glue
 
 - `runtime/src/vr/openxr_android.cpp`: `xrInitializeLoaderKHR` with the
@@ -273,8 +290,8 @@ palette. **Home** has the Play button and reports a missing or incomplete `DATA`
 (the check is the runtime's own `IsDvdDataRoot`: `files/` and `sys/fst.bin`).
 **Settings** edits `Config.toml` in tabs: VR (race view: immersive, immersive window or flat
 screen, camera, rotation, driver hiding,
-seat, hand steering, lean back, render scale, VR interpolation, virtual screen
-size and distance),
+seat, hand steering, tracked hands, lean back, render scale, VR interpolation,
+virtual screen size and distance),
 Graphics (resolution, widescreen, bloom, shader stutter), Controls (controller
 mode, vibration, the Wii Remote mapping), Audio, and About (paths, OpenXR
 logging). The launch-time geometry (`render_scale`, `hud_distance_meters`,
