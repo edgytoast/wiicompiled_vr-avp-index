@@ -279,8 +279,8 @@ own motion detection still reads them, so a sharp enough turn can read as a shak
 `khr/simple_controller`: a right pinch is A with the pointer on the hand's aim ray, the left
 palm-up pinch is + (pause), and in a cockpit race a hand on the wheel holds A and a free hand's
 pinch is Z; see "Tracked hands" under [Steering wheel and hand
-steering](#steering-wheel-and-hand-steering). A bare hand feeds no motion. With `hand_tracking` off
-a bare hand presses nothing but +.
+steering](#steering-wheel-and-hand-steering). A bare hand feeds no motion; flicking the hands up
+plays one shake instead. With `hand_tracking` off a bare hand presses nothing but +.
 
 `"gamepad"` keeps the controllers one ordinary gamepad read through PAD as a GameCube controller:
 A/B → South/East, X/Y → West/North, index triggers → trigger axes, grips → shoulders, thumbsticks
@@ -556,6 +556,17 @@ presentation there is no pointer, so the race controls apply throughout the cock
 has no gesture: choose Automatic drift. The headset panel reads out each hand's source, grasp,
 hold and pinch under the checkbox, for tuning.
 
+A bare hand feeds no Wii Remote motion: camera-tracked poses are too noisy to differentiate twice,
+and turning the wheel would trick and wheelie. Tricks come from a flick instead. Both hands on
+the wheel rising together (at least 1.2 m/s on average, 0.6 m/s each, within 0.6 m/s of each
+other) or a free bare hand rising at 1.5 m/s makes one; a turn, where one hand rises as the other
+drops, never does, nor does a lone hand on the wheel. A rise has to last three samples and cover
+5 cm within 150 ms, a pose jumping faster than 5 m/s (tracking coming back) resets it, and
+flicks are 0.5 s apart. A flick plays one shake on the remote's accelerometer: 150 ms, so the
+guest sees it on at least three of its frames, one cycle up to +2 g and down to the -3.6 g limit,
+as Dolphin's emulated shake does. Only the Wii Remote presentation has it (the gamepad has no
+shake); `debug.wiicompiled.inject <n>:flick` plays the same shake with or without hands.
+
 **Hands and the separate wheel.** Hands are drawn while hand steering is on: the runtime's own hand
 mesh where it offers one (`XR_EXT_hand_tracking` and `XR_FB_hand_tracking_mesh`, requested when
 hand steering or tracked hands are on at launch), otherwise procedural gloves that curl with the
@@ -579,8 +590,10 @@ The guest offsets involved (driver, movement, damage, grip frames, bike handle, 
 their world matrices) are PAL `RMCP01` constants listed with the leaf getter or constructor that
 proves each in `runtime/src/vr/mkw_vr_first_person.cpp`. `mkw_steering_wheel_tests`,
 `mkw_vr_cockpit_tests` and `mkw_vr_hand_steering_tests` cover the grab model, the seat and wheel
-geometry and the hand-off to the game; `gx_fifo_tests` covers the per-draw substitution and the
-overlay geometry, and `cockpit_gpu_smoke` its depth test on a real GPU.
+geometry and the hand-off to the game, and `mkw_vr_hand_tracking_tests` the tracked hands' rules
+(grasp, bare latch, pinch gate, bare-hand buttons, flick and its shake); `gx_fifo_tests` covers the
+per-draw substitution and the overlay geometry, joint skinning included, and `cockpit_gpu_smoke`
+its depth test on a real GPU.
 
 ## Presentation policy
 

@@ -124,8 +124,9 @@ VirtualGamepadRelay& Relay() {
 // presentation also home, c and z (x/y/start press 1/2/+ there, and the
 // directions push the Nunchuk stick). `panel` presses the settings panel's
 // button (left Y, or both thumbsticks for a gamepad), opening or closing it,
-// where `a` then selects. The property is unset in normal use, so this costs
-// one property read every few frames.
+// where `a` then selects. `flick` plays the bare hands' flick, one shake of the
+// remote. The property is unset in normal use, so this costs one property read
+// every few frames.
 constexpr uint32_t kInjectHoldFrames = 12;
 constexpr uint32_t kInjectPollFrames = 4;
 
@@ -745,6 +746,7 @@ void OpenXRInput::Destroy() {
     m_logged_sources = {};
     m_squeeze_active = m_hand_driven = m_pinch = {};
     m_logged_game_pointer = -2;
+    m_injected_flick_held = false;
     m_profile_serial = 0;
     DestroyPoseSpaces();
     if (m_action_set != XR_NULL_HANDLE) {
@@ -987,17 +989,32 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
                            !panel.withheld && game_pointer <= 0;
     if (bare_race) {
         std::array<bool, kHands> bare_held{}, item_pinch{};
+        std::array<hand_tracking::FlickHand, kHands> flick{};
         for (uint32_t hand = 0; hand < kHands; ++hand) {
             bare_held[hand] = m_bare_latch[hand].Bare() && m_wheel_held[hand];
             item_pinch[hand] = m_hand_driven[hand] && m_pinch_gate[hand].Update(m_pinch[hand], m_wheel_held[hand],
                                                                                  dt_seconds);
+            flick[hand] = {m_bare_latch[hand].Tracked(), m_wheel_held[hand],
+                           m_joint_frame.seat_from_joint[hand][hand_tracking::kPalm][7]};
         }
         hand_tracking::ApplyBareHandRace(hands, m_hand_driven, bare_held, item_pinch);
+        // A trick or a wheelie: the remote's shake, which the gamepad cannot give.
+        if (m_flick.Update(flick, dt_seconds) && wii_remote) {
+            m_flick_start = input_time;
+        }
     } else {
         for (auto& gate : m_pinch_gate) {
             gate.Reset();
         }
+        m_flick.Reset();
     }
+    // `debug.wiicompiled.inject <n>:flick` plays the same shake, with the
+    // controllers or unattended, to tune it apart from the gesture.
+    const bool injected_flick = Injected("flick");
+    if (injected_flick && !m_injected_flick_held) {
+        m_flick_start = input_time;
+    }
+    m_injected_flick_held = injected_flick;
 #endif
 
     // While the panel has the controllers, the game sees them idle.
@@ -1130,8 +1147,19 @@ void OpenXRInput::PublishWiiRemote(XrTime input_time, const OpenXRPointerScreen&
         sample.acc = OpenXRWiiRemoteSample{}.acc;
         sample.nunchuk_acc = OpenXRWiiRemoteSample{}.nunchuk_acc;
         m_pointer.Reset();
+        m_flick_start = 0;
         OpenXRPublishWiiRemote(m_joystick_id, sample);
         return;
+    }
+    if (m_flick_start != 0) {
+        // A bare-hand flick: one clean shake, whatever the hands' own motion.
+        bool playing = false;
+        const wii_remote::Vec3 acc = hand_tracking::FlickPulse(input_time - m_flick_start, &playing);
+        if (playing) {
+            sample.acc = acc;
+        } else {
+            m_flick_start = 0;
+        }
     }
 
     wii_remote::Screen target{};
@@ -1173,6 +1201,8 @@ void OpenXRInput::ResetDriving() {
         m_bare_latch[hand].Reset();
         m_pinch_gate[hand].Reset();
     }
+    m_flick.Reset();
+    m_flick_start = 0;
     OpenXRPublishDriving(m_driving);
 }
 

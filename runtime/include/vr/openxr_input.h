@@ -242,6 +242,11 @@ private:
     std::array<hand_tracking::BareLatch, kHands> m_bare_latch{};
     std::array<hand_tracking::PinchGate, kHands> m_pinch_gate{};
     int m_logged_game_pointer = -2;
+    // A flick of the bare hands plays one shake on the remote's accelerometer
+    // from this input time (0 when none is playing).
+    hand_tracking::FlickDetector m_flick;
+    XrTime m_flick_start = 0;
+    bool m_injected_flick_held = false;
     uint64_t m_profile_serial = 0;
 
     bool m_created = false;

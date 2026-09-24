@@ -1194,9 +1194,9 @@ void DrawVrSteeringWheelSettings() {
                       ? "The cockpit hands follow your own. Holding the controllers, the fingers follow "
                         "their touch sensors. Put the controllers down to drive with bare hands: close a "
                         "hand on the wheel to hold it, which also holds the gas; pinch with a free hand "
-                        "to use an item; pinch with your left palm facing you to pause. In menus, a "
-                        "right pinch is A. Choose Automatic drift. Needs hand tracking on in the "
-                        "headset's settings."
+                        "to use an item; flick your hands up for a trick; pinch with your left palm "
+                        "facing you to pause. In menus, a right pinch is A. Choose Automatic drift. "
+                        "Needs hand tracking on in the headset's settings."
                       : "The cockpit hands follow your own, from the controllers' touch sensors or, "
                         "with the controllers put down, the headset's cameras. This session started "
                         "with hand steering and tracked hands off, so it applies after a restart.");
