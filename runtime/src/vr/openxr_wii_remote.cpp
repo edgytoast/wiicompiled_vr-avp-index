@@ -25,6 +25,8 @@ std::atomic<OpenXRControllerMode> g_mode{OpenXRControllerMode::WiiRemote};
 // SDL_JoystickID of the virtual gamepad the samples belong to; 0 when none.
 std::atomic<uint32_t> g_joystick_id{0};
 std::atomic<bool> g_rumble{false};
+// -1 until the game polls the VR remote, then its pointer switch.
+std::atomic<int> g_game_pointer{-1};
 
 } // namespace wii_remote_bridge
 
@@ -73,9 +75,18 @@ void OpenXRPublishWiiRemote(uint32_t sdl_joystick_id, const OpenXRWiiRemoteSampl
     wii_remote_bridge::g_joystick_id.store(sdl_joystick_id, std::memory_order_relaxed);
 }
 
+void OpenXRPublishGamePointer(bool enabled) noexcept {
+    wii_remote_bridge::g_game_pointer.store(enabled ? 1 : 0, std::memory_order_relaxed);
+}
+
+int OpenXRGamePointerState() noexcept {
+    return wii_remote_bridge::g_game_pointer.load(std::memory_order_relaxed);
+}
+
 void OpenXRWithdrawWiiRemote() noexcept {
     wii_remote_bridge::g_joystick_id.store(0, std::memory_order_relaxed);
     wii_remote_bridge::g_rumble.store(false, std::memory_order_relaxed);
+    wii_remote_bridge::g_game_pointer.store(-1, std::memory_order_relaxed);
     auto& published = wii_remote_bridge::Published();
     std::lock_guard lock(published.mutex);
     published.available = false;

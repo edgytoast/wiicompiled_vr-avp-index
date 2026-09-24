@@ -275,6 +275,13 @@ see [Steering wheel and hand
 steering](#steering-wheel-and-hand-steering). Turning the wheel moves the controllers, and the game's
 own motion detection still reads them, so a sharp enough turn can read as a shake.
 
+**Bare hands.** On the Quest, with `hand_tracking` on and the controllers put down, the hands drive
+`khr/simple_controller`: a right pinch is A with the pointer on the hand's aim ray, the left
+palm-up pinch is + (pause), and in a cockpit race a hand on the wheel holds A and a free hand's
+pinch is Z; see "Tracked hands" under [Steering wheel and hand
+steering](#steering-wheel-and-hand-steering). A bare hand feeds no motion. With `hand_tracking` off
+a bare hand presses nothing but +.
+
 `"gamepad"` keeps the controllers one ordinary gamepad read through PAD as a GameCube controller:
 A/B → South/East, X/Y → West/North, index triggers → trigger axes, grips → shoulders, thumbsticks
 → sticks (clicks → stick buttons), left menu → Start. Every binding in the F10 controller menu
@@ -527,6 +534,27 @@ tracked hands off it presses nothing but the menu gesture, which pauses, is not 
 no Wii Remote motion, so the permission changes nothing for players who leave the option off. On
 PC none of this applies: a PC runtime can drive real controllers through `khr/simple_controller`
 and synthesize joints for them, so a hand-edited `hand_tracking = true` only changes the drawing.
+
+With tracked hands on, bare hands drive. A hand is bare while it drives `khr/simple_controller`
+with camera-tracked joints, latched through `wheel_tracking_grace` (Meta also drops the select
+action while a hand is lost) and cleared as soon as a controller's squeeze is back. Its palm joint
+stands in for the grip and a grasp for the squeeze: the middle, ring and little fingers' flexion,
+summed over each finger's three joints, read as 0 below 1.2 radians (a relaxed hand) and 1 from
+3.0 (a hand closed on a rim), so the wheel's own 55 % press and 15 % release apply, and closing a
+hand on the rim takes hold. The grasp never reaches the game's buttons (as a squeeze it would press
+the gamepad's shoulders). In a cockpit race a bare hand holding the wheel holds the gas (A, the
+gamepad's South) until both hands let go, and a pinch from a free bare hand uses an item (Z, the
+gamepad's L) if the hand has been off the wheel for 0.15 s, so opening a hand off the rim does not
+fire one; holding the pinch holds the button. The left palm-up pinch pauses (a pinch made in that
+gesture is not an item: `XR_FB_hand_tracking_aim` reports the system gesture). Outside a race, and
+in a race whenever the game has the remote's pointer on (the pause menu, the results), a right
+pinch is A and the pointer follows the hand's aim ray; a left pinch does nothing, so the headset
+panel cannot be opened with bare hands (an open one takes a right pinch, and the palm-up pinch
+closes it). The game's pointer switch is read where KPAD polls the VR remote, and the log notes
+each change (`OpenXR bare hands: the game's pointer is off (driving)`); with the gamepad
+presentation there is no pointer, so the race controls apply throughout the cockpit. Manual drift
+has no gesture: choose Automatic drift. The headset panel reads out each hand's source, grasp,
+hold and pinch under the checkbox, for tuning.
 
 **Hands and the separate wheel.** Hands are drawn while hand steering is on: the runtime's own hand
 mesh where it offers one (`XR_EXT_hand_tracking` and `XR_FB_hand_tracking_mesh`, requested when

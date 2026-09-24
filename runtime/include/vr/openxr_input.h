@@ -237,6 +237,11 @@ private:
     std::array<bool, kHands> m_squeeze_active{};
     std::array<bool, kHands> m_hand_driven{};
     std::array<bool, kHands> m_pinch{};
+    // Bare-hand driving: each hand's bare latch (camera joints, last grasp) and
+    // item pinch gate, and the game's pointer switch as last logged.
+    std::array<hand_tracking::BareLatch, kHands> m_bare_latch{};
+    std::array<hand_tracking::PinchGate, kHands> m_pinch_gate{};
+    int m_logged_game_pointer = -2;
     uint64_t m_profile_serial = 0;
 
     bool m_created = false;

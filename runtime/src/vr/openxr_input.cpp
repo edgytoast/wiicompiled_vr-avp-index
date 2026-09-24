@@ -744,6 +744,7 @@ void OpenXRInput::Destroy() {
     m_hand_trackers_failed = m_logged_hand_restart = false;
     m_logged_sources = {};
     m_squeeze_active = m_hand_driven = m_pinch = {};
+    m_logged_game_pointer = -2;
     m_profile_serial = 0;
     DestroyPoseSpaces();
     if (m_action_set != XR_NULL_HANDLE) {
@@ -970,6 +971,35 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
     // steers through the left stick and keeps its grips from the game.
     UpdateDriving(predicted_display_time, seat, hands, panel.withheld);
 
+#if defined(__ANDROID__)
+    // Bare hands in a cockpit race: a hand on the wheel holds the gas and a free
+    // hand's pinch uses an item. Only while the game's pointer is off: the
+    // pause menu and the results keep the cockpit but need A from a pinch.
+    const bool wii_remote = OpenXRGetControllerMode() == OpenXRControllerMode::WiiRemote;
+    const int game_pointer = wii_remote ? OpenXRGamePointerState() : -1;
+    if (hand_tracking_on && game_pointer != m_logged_game_pointer) {
+        m_logged_game_pointer = game_pointer;
+        Log(OpenXRLogLevel::Info, game_pointer > 0    ? "OpenXR bare hands: the game's pointer is on (menu)"
+                                  : game_pointer == 0 ? "OpenXR bare hands: the game's pointer is off (driving)"
+                                                      : "OpenXR bare hands: the game's pointer is unknown");
+    }
+    const bool bare_race = hand_tracking_on && m_driving.cockpit_active && m_driving.hand_steering &&
+                           !panel.withheld && game_pointer <= 0;
+    if (bare_race) {
+        std::array<bool, kHands> bare_held{}, item_pinch{};
+        for (uint32_t hand = 0; hand < kHands; ++hand) {
+            bare_held[hand] = m_bare_latch[hand].Bare() && m_wheel_held[hand];
+            item_pinch[hand] = m_hand_driven[hand] && m_pinch_gate[hand].Update(m_pinch[hand], m_wheel_held[hand],
+                                                                                 dt_seconds);
+        }
+        hand_tracking::ApplyBareHandRace(hands, m_hand_driven, bare_held, item_pinch);
+    } else {
+        for (auto& gate : m_pinch_gate) {
+            gate.Reset();
+        }
+    }
+#endif
+
     // While the panel has the controllers, the game sees them idle.
     static const std::array<wii_remote::HandInputs, kHands> kIdleHands{};
     const auto& game_hands = panel.withheld ? kIdleHands : hands;
@@ -1139,6 +1169,10 @@ void OpenXRInput::ResetDriving() {
     m_wheel_time = 0;
     m_driving = {};
     m_joint_frame.valid = {};
+    for (uint32_t hand = 0; hand < kHands; ++hand) {
+        m_bare_latch[hand].Reset();
+        m_pinch_gate[hand].Reset();
+    }
     OpenXRPublishDriving(m_driving);
 }
 
@@ -1197,6 +1231,9 @@ void OpenXRInput::UpdateDriving(XrTime display_time, const driving::SeatFrame& s
     constexpr XrSpaceLocationFlags kPoseValid =
         XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
     const bool hand_tracking_on = RuntimeConfigFile::VrHandTracking();
+    // The wheel's own tracking grace (SteeringWheel::Update clamps it the same way).
+    const float grace = driving::IsFinite(tuning.trackingGrace) ? std::clamp(tuning.trackingGrace, 0.05f, 0.5f)
+                                                                : 0.2f;
     std::array<WheelHand, kHands> wheel_hands{};
     for (uint32_t hand = 0; hand < kHands; ++hand) {
         bool tracked = false;
@@ -1214,12 +1251,24 @@ void OpenXRInput::UpdateDriving(XrTime display_time, const driving::SeatFrame& s
         }
         const float squeeze = hands[hand].squeeze;
         const TrackedHand& located = m_tracked_hands[hand];
+        const bool fresh_joints = hand_tracking_on && located.active && located.seated;
+        // A bare hand: camera-tracked joints on a hand driving simple_controller
+        // (Android), latched through the wheel's grace with its last grasp.
+        const bool camera_joints = fresh_joints && located.source != hand_tracking::Source::Controller;
+        const float grasp = camera_joints ? hand_tracking::GraspFromJoints(located.positions) : 0.0f;
+        const bool bare = hand_tracking_on &&
+                          m_bare_latch[hand].Update(m_hand_driven[hand], m_squeeze_active[hand], camera_joints,
+                                                    grasp, dt, grace);
+        if (!hand_tracking_on) {
+            m_bare_latch[hand].Reset();
+        }
         // With tracked hands on, a hand whose joints were located is drawn from
-        // them (the controller's touch sensors, or the cameras). A bare hand is
-        // never drawn or steered from its grip pose, which would show an open
-        // hand wherever it rests.
-        const bool joints = hand_tracking_on && located.active && located.seated;
-        if (m_hand_driven[hand]) {
+        // them (the controller's touch sensors, or the cameras), and a bare hand
+        // holding the wheel keeps its last joints through a short loss. A bare
+        // hand is never drawn or steered from its grip pose, which would show
+        // an open hand wherever it rests.
+        const bool joints = fresh_joints || (bare && m_wheel_held[hand]);
+        if (m_hand_driven[hand] || bare) {
             tracked = false;
         }
         DrivingHand& out = snapshot.hands[hand];
@@ -1229,10 +1278,20 @@ void OpenXRInput::UpdateDriving(XrTime display_time, const driving::SeatFrame& s
         out.squeeze = squeeze;
         out.seat_from_grip = seat_from_grip;
         out.joints_valid = joints;
+        out.bare = bare;
         out.source = located.source;
+        out.grasp = bare ? m_bare_latch[hand].Grasp() : grasp;
         out.pinch = m_pinch[hand];
         m_joint_frame.valid[hand] = joints;
-        wheel_hands[hand] = {seat_from_grip[3], seat_from_grip[7], seat_from_grip[11], squeeze, tracked};
+        if (bare) {
+            // The palm stands in for the grip, and the fingers' grasp for the
+            // squeeze; the grasp never reaches the game's buttons.
+            const auto& palm = m_joint_frame.seat_from_joint[hand][hand_tracking::kPalm];
+            wheel_hands[hand] = {palm[3], palm[7], palm[11], m_bare_latch[hand].Grasp(),
+                                 m_bare_latch[hand].Tracked()};
+        } else {
+            wheel_hands[hand] = {seat_from_grip[3], seat_from_grip[7], seat_from_grip[11], squeeze, tracked};
+        }
         if (uses_geometry) {
             wheel_hands[hand] = geometry.ToWheel(wheel_hands[hand]);
         }

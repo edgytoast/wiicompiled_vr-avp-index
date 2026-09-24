@@ -56,10 +56,18 @@ bool OpenXRReadWiiRemote(OpenXRWiiRemoteSample& sample) noexcept;
 // WPADControlMotor for the emulated remote.
 void OpenXRSetWiiRemoteRumble(bool active) noexcept;
 
+// Guest side: whether the game has the remote's pointer switched on, as KPAD
+// reads it each time the game polls the VR remote (Input::WiiController::
+// TogglePointer flips it). Tracked bare hands use it to tell driving from a
+// menu inside a race; OpenXRInput logs every change.
+void OpenXRPublishGamePointer(bool enabled) noexcept;
+
 // XR side.
 void OpenXRPublishWiiRemote(uint32_t sdl_joystick_id, const OpenXRWiiRemoteSample& sample) noexcept;
 void OpenXRWithdrawWiiRemote() noexcept;
 bool OpenXRWiiRemoteRumbleRequested() noexcept;
+// The game's pointer switch: 1 on, 0 off, -1 not known (no remote polled yet).
+int OpenXRGamePointerState() noexcept;
 
 // The geometry and signal conditioning behind a sample, kept free of OpenXR
 // types so it can be checked headlessly (tests/vr_wii_remote_tests.cpp).
