@@ -126,6 +126,11 @@ void TestPinchGate() {
     Check(gate.Update(true, false, dt), "holding the pinch holds the button");
     Check(!gate.Update(false, false, dt), "letting go releases it");
     Check(!gate.Update(true, true, dt), "grabbing the wheel stops it");
+
+    Check(ItemPinch(true, GraspFromJoints(Hand(0.3f, 0.5f, 0.3f))), "a pinch from a relaxed hand is an item");
+    Check(!ItemPinch(true, GraspFromJoints(Hand(1.0f, 1.3f, 0.6f))), "a hand closing on the rim is not an item");
+    Check(!ItemPinch(true, std::numeric_limits<float>::quiet_NaN()), "an unknown grasp is not an item");
+    Check(!ItemPinch(false, 0.0f), "no pinch, no item");
 }
 
 void TestGestures() {

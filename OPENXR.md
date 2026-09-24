@@ -544,8 +544,9 @@ summed over each finger's three joints, read as 0 below 1.2 radians (a relaxed h
 hand on the rim takes hold. The grasp never reaches the game's buttons (as a squeeze it would press
 the gamepad's shoulders). In the cockpit, while a bare hand holds the wheel it holds the gas (A,
 the gamepad's South) until both hands let go, and a pinch from a free bare hand, either one, uses
-an item (Z, the gamepad's L) if the hand has been off the wheel for 0.15 s, so opening a hand off
-the rim does not fire one; holding the pinch holds the button. The left palm-up pinch pauses (a
+an item (Z, the gamepad's L) if the hand has been off the wheel for 0.15 s and is still mostly open
+(a grasp under 0.5), so neither opening a hand off the rim nor closing one on it fires one;
+holding the pinch holds the button. The left palm-up pinch pauses (a
 pinch made in that gesture is not an item: `XR_FB_hand_tracking_aim` reports the system gesture).
 With no bare hand on the wheel, in the cockpit or anywhere else, a right pinch is A and the
 pointer follows the hand's aim ray, which is what the pause menu and the results need; in a race

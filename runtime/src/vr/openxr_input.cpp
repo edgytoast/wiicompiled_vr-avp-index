@@ -992,8 +992,8 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
     if (bare_held[0] || bare_held[1]) {
         std::array<bool, kHands> item_pinch{};
         for (uint32_t hand = 0; hand < kHands; ++hand) {
-            item_pinch[hand] = m_hand_driven[hand] && m_pinch_gate[hand].Update(m_pinch[hand], m_wheel_held[hand],
-                                                                                 dt_seconds);
+            const bool pinch = hand_tracking::ItemPinch(m_pinch[hand], m_driving.hands[hand].grasp);
+            item_pinch[hand] = m_hand_driven[hand] && m_pinch_gate[hand].Update(pinch, m_wheel_held[hand], dt_seconds);
         }
         hand_tracking::ApplyBareHandRace(hands, bare_held, item_pinch);
     } else {

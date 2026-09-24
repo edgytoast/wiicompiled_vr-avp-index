@@ -214,6 +214,15 @@ private:
     bool m_blocked = false;
 };
 
+// A pinch uses an item only from a hand still mostly open: a hand closing on
+// the rim can bring thumb and index together on the way, and a fist is not a
+// pinch.
+inline constexpr float kItemPinchMaxGrasp = 0.5f;
+
+inline bool ItemPinch(bool pinch, float grasp) noexcept {
+    return pinch && IsFinite(grasp) && grasp < kItemPinchMaxGrasp;
+}
+
 // A hand's pinch and menu gesture this frame. The runtime's own recognition
 // (XR_FB_hand_tracking_aim) is preferred when it is valid, and a pinch made
 // while the hand is in the system gesture (palm towards the face) is the menu
