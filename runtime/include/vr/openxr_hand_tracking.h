@@ -256,23 +256,24 @@ inline void ApplyHandDrivenButtons(std::array<wii_remote::HandInputs, 2>& hands,
     }
 }
 
-// In a cockpit race, after the wheel: a bare hand on the wheel holds the gas
-// (A: the right primary button), and an item pinch uses an item (the left
-// trigger: the Wii Remote's Z, the GameCube's L). A hand-driven right hand's
-// pinch stops meaning A there. The grasp itself never becomes a squeeze, which
-// would press the gamepad's shoulders (GameCube R drifts).
-inline void ApplyBareHandRace(std::array<wii_remote::HandInputs, 2>& hands,
-                              const std::array<bool, 2>& hand_driven, const std::array<bool, 2>& bare_held,
+// In the cockpit, after the wheel. While a bare hand holds the wheel it holds
+// the gas (A: the right primary button, whatever a right pinch says), and an
+// item pinch uses an item (the left trigger: the Wii Remote's Z, the
+// GameCube's L). With no bare hand on the wheel nothing changes, so a right
+// pinch stays A for the menus inside a race (the pause menu, the results),
+// which the game's pointer cannot tell from driving: MKW keeps it on in a
+// race. The grasp itself never becomes a squeeze, which would press the
+// gamepad's shoulders (GameCube R drifts). True while a bare hand holds.
+inline bool ApplyBareHandRace(std::array<wii_remote::HandInputs, 2>& hands, const std::array<bool, 2>& bare_held,
                               const std::array<bool, 2>& item_pinch) noexcept {
-    if (hand_driven[1]) {
-        hands[1].primary = false;
+    if (!bare_held[0] && !bare_held[1]) {
+        return false;
     }
-    if (bare_held[0] || bare_held[1]) {
-        hands[1].primary = true;
-    }
+    hands[1].primary = true;
     if (item_pinch[0] || item_pinch[1]) {
         hands[0].trigger = 1.0f;
     }
+    return true;
 }
 
 // One bare hand for the flick detector: its palm's height in the seated frame.

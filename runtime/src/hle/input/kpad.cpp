@@ -1,6 +1,5 @@
 #include "hle_stubs.h"
 #include "memory.h"
-#include "vr/openxr_wii_remote.h"
 #include "wii_remote_input.h"
 
 #include <algorithm>
@@ -277,11 +276,6 @@ extern "C" int32_t KPAD__Read_HLE(uint32_t chan, uint32_t statusPtr, uint32_t co
     WiiRemoteInput::KpadSample sample;
     const bool have = WiiRemoteInput::ReadKpadSample(chan, sample);
     try {
-        if (have && WiiRemoteInput::IsVrControllerChannel(chan)) {
-            // Tracked bare hands drive with the pointer off and point at menus
-            // with it on (openxr_hand_tracking.h).
-            mkw::vr::OpenXRPublishGamePointer(DpdEnabled(chan));
-        }
         return WriteStatus(chan, statusPtr, have ? &sample : nullptr);
     } catch (const Memory::AccessViolation&) {
         return 0;

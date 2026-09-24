@@ -232,16 +232,16 @@ private:
     hand_tracking::HandJointFrame m_joint_frame{};
     std::array<hand_tracking::Source, kHands> m_logged_sources{hand_tracking::Source::None,
                                                                hand_tracking::Source::None};
+    XrTime m_sources_logged_at = 0;
     // Per frame, from the actions: a controller is in the hand (its squeeze is
     // bound), and the hand drives simple_controller (Android only).
     std::array<bool, kHands> m_squeeze_active{};
     std::array<bool, kHands> m_hand_driven{};
     std::array<bool, kHands> m_pinch{};
     // Bare-hand driving: each hand's bare latch (camera joints, last grasp) and
-    // item pinch gate, and the game's pointer switch as last logged.
+    // item pinch gate.
     std::array<hand_tracking::BareLatch, kHands> m_bare_latch{};
     std::array<hand_tracking::PinchGate, kHands> m_pinch_gate{};
-    int m_logged_game_pointer = -2;
     // A flick of the bare hands plays one shake on the remote's accelerometer
     // from this input time (0 when none is playing).
     hand_tracking::FlickDetector m_flick;

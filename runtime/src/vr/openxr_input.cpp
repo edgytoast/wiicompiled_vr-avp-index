@@ -645,7 +645,12 @@ void OpenXRInput::LocateHands(XrTime time, const driving::SeatFrame& seat) {
         }
         tracked.seated = seat.valid;
     }
-    if (m_tracked_hands[0].source != m_logged_sources[0] || m_tracked_hands[1].source != m_logged_sources[1]) {
+    // Camera-tracked hands drop in and out of view often; a change is logged at
+    // most once a second, so the log still ends on the settled state.
+    constexpr XrTime kSourceLogIntervalNs = 1'000'000'000;
+    if ((m_tracked_hands[0].source != m_logged_sources[0] || m_tracked_hands[1].source != m_logged_sources[1]) &&
+        (m_sources_logged_at == 0 || time - m_sources_logged_at >= kSourceLogIntervalNs)) {
+        m_sources_logged_at = time;
         m_logged_sources = {m_tracked_hands[0].source, m_tracked_hands[1].source};
         std::ostringstream message;
         message << "OpenXR tracked hands: left " << hand_tracking::SourceLabel(m_logged_sources[0]) << ", right "
@@ -744,8 +749,8 @@ void OpenXRInput::Destroy() {
     m_hand_data_source = m_hand_aim = false;
     m_hand_trackers_failed = m_logged_hand_restart = false;
     m_logged_sources = {};
+    m_sources_logged_at = 0;
     m_squeeze_active = m_hand_driven = m_pinch = {};
-    m_logged_game_pointer = -2;
     m_injected_flick_held = false;
     m_profile_serial = 0;
     DestroyPoseSpaces();
@@ -974,38 +979,40 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
     UpdateDriving(predicted_display_time, seat, hands, panel.withheld);
 
 #if defined(__ANDROID__)
-    // Bare hands in a cockpit race: a hand on the wheel holds the gas and a free
-    // hand's pinch uses an item. Only while the game's pointer is off: the
-    // pause menu and the results keep the cockpit but need A from a pinch.
-    const bool wii_remote = OpenXRGetControllerMode() == OpenXRControllerMode::WiiRemote;
-    const int game_pointer = wii_remote ? OpenXRGamePointerState() : -1;
-    if (hand_tracking_on && game_pointer != m_logged_game_pointer) {
-        m_logged_game_pointer = game_pointer;
-        Log(OpenXRLogLevel::Info, game_pointer > 0    ? "OpenXR bare hands: the game's pointer is on (menu)"
-                                  : game_pointer == 0 ? "OpenXR bare hands: the game's pointer is off (driving)"
-                                                      : "OpenXR bare hands: the game's pointer is unknown");
+    // Bare hands in the cockpit. While one of them holds the wheel it holds the
+    // gas and a free hand's pinch uses an item; with none on the wheel (the
+    // pause menu, the results, coasting) a right pinch stays A. The game's own
+    // pointer cannot tell the two apart: MKW keeps it on while driving.
+    const bool cockpit_hands =
+        hand_tracking_on && m_driving.cockpit_active && m_driving.hand_steering && !panel.withheld;
+    std::array<bool, kHands> bare_held{};
+    for (uint32_t hand = 0; hand < kHands; ++hand) {
+        bare_held[hand] = cockpit_hands && m_bare_latch[hand].Bare() && m_wheel_held[hand];
     }
-    const bool bare_race = hand_tracking_on && m_driving.cockpit_active && m_driving.hand_steering &&
-                           !panel.withheld && game_pointer <= 0;
-    if (bare_race) {
-        std::array<bool, kHands> bare_held{}, item_pinch{};
-        std::array<hand_tracking::FlickHand, kHands> flick{};
+    if (bare_held[0] || bare_held[1]) {
+        std::array<bool, kHands> item_pinch{};
         for (uint32_t hand = 0; hand < kHands; ++hand) {
-            bare_held[hand] = m_bare_latch[hand].Bare() && m_wheel_held[hand];
             item_pinch[hand] = m_hand_driven[hand] && m_pinch_gate[hand].Update(m_pinch[hand], m_wheel_held[hand],
                                                                                  dt_seconds);
-            flick[hand] = {m_bare_latch[hand].Tracked(), m_wheel_held[hand],
-                           m_joint_frame.seat_from_joint[hand][hand_tracking::kPalm][7]};
         }
-        hand_tracking::ApplyBareHandRace(hands, m_hand_driven, bare_held, item_pinch);
-        // A trick or a wheelie: the remote's shake, which the gamepad cannot give.
-        if (m_flick.Update(flick, dt_seconds) && wii_remote) {
-            m_flick_start = input_time;
-        }
+        hand_tracking::ApplyBareHandRace(hands, bare_held, item_pinch);
     } else {
+        // A pinch already held when a hand takes the wheel is not an item.
         for (auto& gate : m_pinch_gate) {
             gate.Reset();
         }
+    }
+    // A trick or a wheelie: the remote's shake, which the gamepad cannot give.
+    if (cockpit_hands) {
+        std::array<hand_tracking::FlickHand, kHands> flick{};
+        for (uint32_t hand = 0; hand < kHands; ++hand) {
+            flick[hand] = {m_bare_latch[hand].Tracked(), m_wheel_held[hand],
+                           m_joint_frame.seat_from_joint[hand][hand_tracking::kPalm][7]};
+        }
+        if (m_flick.Update(flick, dt_seconds) && OpenXRGetControllerMode() == OpenXRControllerMode::WiiRemote) {
+            m_flick_start = input_time;
+        }
+    } else {
         m_flick.Reset();
     }
     // `debug.wiicompiled.inject <n>:flick` plays the same shake, with the

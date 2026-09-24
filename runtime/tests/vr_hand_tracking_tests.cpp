@@ -173,20 +173,24 @@ void TestHandDrivenButtons() {
 
 void TestBareHandRace() {
     std::array<wii_remote::HandInputs, 2> hands{};
-    hands[1].primary = true; // a right pinch, already A from the menus' mapping
-    ApplyBareHandRace(hands, {true, true}, {false, false}, {false, false});
-    Check(!hands[1].primary, "in a race a bare right pinch is not A");
-    ApplyBareHandRace(hands, {true, true}, {true, false}, {false, false});
-    Check(hands[1].primary, "a bare hand on the wheel holds the gas");
+    hands[1].primary = true; // a right pinch, A from the menus' mapping
+    Check(!ApplyBareHandRace(hands, {false, false}, {false, false}) && hands[1].primary,
+          "with no hand on the wheel a right pinch stays A (the pause menu, the results)");
+    hands = {};
+    Check(ApplyBareHandRace(hands, {true, false}, {false, false}) && hands[1].primary,
+          "a bare hand on the wheel holds the gas");
     Check(hands[0].trigger == 0.0f && hands[0].squeeze == 0.0f && hands[1].squeeze == 0.0f,
           "holding presses no item and no shoulder");
     hands = {};
-    ApplyBareHandRace(hands, {true, true}, {false, true}, {true, false});
+    ApplyBareHandRace(hands, {false, true}, {true, false});
     Check(hands[1].primary && hands[0].trigger == 1.0f, "a free hand's pinch uses an item while the other drives");
+    hands = {};
+    ApplyBareHandRace(hands, {true, false}, {false, true});
+    Check(hands[1].primary && hands[0].trigger == 1.0f, "a free right hand's pinch is an item, not A, while driving");
     std::array<wii_remote::HandInputs, 2> controllers{};
     controllers[1].primary = true;
     controllers[0].trigger = 0.3f;
-    ApplyBareHandRace(controllers, {false, false}, {false, false}, {false, false});
+    ApplyBareHandRace(controllers, {false, false}, {false, false});
     Check(controllers[1].primary && controllers[0].trigger == 0.3f, "controller hands keep their own buttons");
 }
 
