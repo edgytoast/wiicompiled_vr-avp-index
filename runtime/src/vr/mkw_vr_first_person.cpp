@@ -740,22 +740,18 @@ bool PublishNativeWheelMesh(uint32_t part, const Mtx34& model_view, const Mtx34&
         if (version < 8 || version > 11) {
             return false;
         }
+        const uint32_t mdl_size = Memory::Read32(mdl + 4);
+        const uint8_t* mdl_bytes = mdl_size <= 0x1000000 ? Memory::GetPointer(mdl, mdl_size) : nullptr;
         Mtx34 body_from_vertices = kIdentityMtx34;
         Mtx34 wheel_model_view = model_view;
         if (!whole_part) {
-            // Body::mtx is the model placement, while the root bone may have
-            // its own authored rotation (notably the Baby Booster). GX draws
-            // its positions through placement * root, so both wheel selection
-            // and Aurora's local-player matrix match must include that root.
-            const uint32_t bone_dic_offset = Memory::Read32(mdl + 0x14);
-            if (!bone_dic_offset || bone_dic_offset > 0x100000) return false;
-            const uint32_t bone_dic = mdl + bone_dic_offset;
-            if (!Memory::Contains(bone_dic, 40) || !Memory::Read32(bone_dic + 4)) return false;
-            const uint32_t bone_offset = Memory::Read32(bone_dic + 36);
-            if (bone_offset > 0x100000) return false;
-            const uint32_t root_bone = bone_dic + bone_offset;
-            if (!Memory::Contains(root_bone, 0xa0) || Memory::Read32(root_bone + 0x10) != 0 ||
-                !ReadGuestMtx34(root_bone + 0x70, body_from_vertices)) return false;
+            // Body::mtx is the model placement, while the bone GX draws the
+            // body's node 0 through may have its own authored transform (the
+            // Baby Booster's rotated root). GX draws its positions through
+            // placement * bone, so both wheel selection and Aurora's
+            // local-player matrix match must include it. It is found by node
+            // id: the Flame Flyer and Cheep Charger list an nw4r_root first.
+            if (!ReadNativeWheelNodeMatrix(mdl_bytes, mdl_size, 0, body_from_vertices.data())) return false;
             wheel_model_view = ComposeMtx(model_view, body_from_vertices);
         }
         const uint32_t dic_offset = Memory::Read32(mdl + 0x18);
@@ -814,8 +810,6 @@ bool PublishNativeWheelMesh(uint32_t part, const Mtx34& model_view, const Mtx34&
                     point = detail::TransformPoint(correction, point.x, point.y, point.z);
                 }
             } else {
-                const uint32_t mdl_size = Memory::Read32(mdl + 4);
-                const uint8_t* mdl_bytes = mdl_size <= 0x1000000 ? Memory::GetPointer(mdl, mdl_size) : nullptr;
                 NativeWheelTopology topology(num);
                 if (!ReadNativeWheelTopology(mdl_bytes, mdl_size, Memory::Read32(header + 0x10), topology) ||
                     RotateNativeWheelVertices(points, topology, center, radius, angle, &correction,

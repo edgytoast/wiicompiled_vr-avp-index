@@ -456,11 +456,14 @@ model. Karts bake the wheel into the body, so at the race draw boundary the runt
 body's MDL0 position arrays and shape connectivity. Hand grips locate the wheel, but its complete
 rim determines the rotation centre, radius and tilt: grip height/spacing varies by character.
 Whole rim and spoke components turn together on a copy; a column or chassis component crossing
-the selection stays intact. The root bone's authored transform is included when locating and
-turning the wheel (the Baby Booster authors its body with rotated axes). The copy goes to the GX
-thread; Aurora substitutes it into draws that bind that array with the player's model-view
-matrix including the root transform (`aurora_set_native_wheel_vertices`), checking each changed vertex's
-matrix slot, so an opponent sharing the asset and other joints of the same draw are untouched. The
+the selection stays intact. The authored transform of the bone that draws the body's node 0 is
+included when locating and turning the wheel (the Baby Booster authors its body with rotated
+axes). That bone is found by its node id, not its place in the bone dictionary: the Flame Flyer and
+Cheep Charger list an `nw4r_root` bone first, and taking that one left both on the separate VR
+wheel. The copy goes to the GX thread; Aurora substitutes it into draws that bind that array with
+the player's model-view matrix including that bone's transform (`aurora_set_native_wheel_vertices`),
+checking each changed vertex's matrix slot, so an opponent sharing the asset and other joints of
+the same draw are untouched. The
 guest's own vertices are never written, and the copies are dropped after the frame's draws. Bikes
 turn their handle part in the game already; its copy is only re-seated on the cockpit frame so the
 bars stay with your hands while the bike banks. The wheel rides in the same frame as the view: the
@@ -470,11 +473,12 @@ which is also what `native_steering_wheel = false` draws. The copy keeps being p
 vehicle's own wheel returns as soon as draws take it again, and the log notes both switches.
 
 Validated on the extracted PAL disc's 216 single-player kart/character and Mii combinations
-(all 18 kart types): each selects the complete 21-position rim and 15-position spoke assembly,
-with the remaining positions unchanged and connected-piece distances preserved. Regression tests
-also cover raised/narrow grips, domed hubs, rotated roots, child joints, chassis triangles crossing
-the wheel volume, degenerate strip connectors and malformed MDL0 data. This asset check does not
-by itself verify every combination's live draw matching or modded vehicle models.
+(all 18 kart types): each resolves its node-0 bone as the runtime does and selects the complete
+21-position rim and 15-position spoke assembly, with the remaining positions unchanged and
+connected-piece distances preserved. Regression tests also cover raised/narrow grips, domed hubs,
+rotated roots, a node-0 bone listed behind another, child joints, chassis triangles crossing the
+wheel volume, degenerate strip connectors and malformed MDL0 data. This asset check does not by
+itself verify every combination's live draw matching or modded vehicle models.
 
 The substitution is decided per draw, and a draw that folds into a neighbour renders through that
 neighbour's array binding, so only draws that reached the same decision may merge. Deciding this

@@ -10,7 +10,9 @@
 #include "vr/mkw_vr_first_person.h"
 #include "vr/native_wheel_mesh.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <vector>
 
@@ -337,6 +339,45 @@ void TestNativeWheelTopology() {
     Check(!ReadNativeWheelTopology(mdl.data(), mdl.size(), 1, model), "unrelated position array ignored");
     put32(shape + 0x2c, UINT32_MAX);
     Check(!ReadNativeWheelTopology(mdl.data(), mdl.size(), 0, model), "escaping primitive offset rejected");
+    // The bone the wheel's positions are drawn through is found by node id:
+    // the Flame Flyer and Cheep Charger list an nw4r_root bone (node 2)
+    // before the node-0 bone, which used to leave them on the VR wheel.
+    std::vector<uint8_t> bones(0x1c0, 0);
+    const auto putBone32 = [&](size_t at, uint32_t value) {
+        for (unsigned i = 0; i < 4; ++i)
+            bones[at + i] = uint8_t(value >> ((3 - i) * 8));
+    };
+    const auto putBoneFloat = [&](size_t at, float value) {
+        uint32_t bits;
+        std::memcpy(&bits, &value, sizeof bits);
+        putBone32(at, bits);
+    };
+    putBone32(0, 0x4d444c30);
+    putBone32(4, uint32_t(bones.size()));
+    putBone32(8, 11);
+    putBone32(0x14, 0x40);
+    putBone32(0x44, 2);
+    putBone32(0x40 + 8 + 16 + 12, 0x40);
+    putBone32(0x40 + 8 + 32 + 12, 0xe0);
+    putBone32(0x80 + 0x10, 2);
+    putBone32(0x120 + 0x10, 0);
+    const float authored[12]{0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0};
+    for (unsigned i = 0; i < 12; ++i) {
+        putBoneFloat(0x80 + 0x70 + i * 4, i % 5 == 0 ? 1.0f : 0.0f);
+        putBoneFloat(0x120 + 0x70 + i * 4, authored[i]);
+    }
+    float bone[12]{};
+    Check(ReadNativeWheelNodeMatrix(bones.data(), bones.size(), 0, bone) &&
+              std::equal(std::begin(authored), std::end(authored), bone),
+          "node-0 bone found behind an nw4r_root bone");
+    Check(ReadNativeWheelNodeMatrix(bones.data(), bones.size(), 2, bone) && bone[0] == 1.0f && bone[2] == 0.0f,
+          "bones are told apart by node id");
+    Check(!ReadNativeWheelNodeMatrix(bones.data(), bones.size(), 5, bone), "missing node rejected");
+    Check(!ReadNativeWheelNodeMatrix(bones.data(), bones.size() - 1, 0, bone), "MDL0 size mismatch rejected");
+    putBoneFloat(0x120 + 0x70, NAN);
+    Check(!ReadNativeWheelNodeMatrix(bones.data(), bones.size(), 0, bone), "non-finite bone matrix rejected");
+    putBone32(0x40 + 8 + 32 + 12, uint32_t(bones.size()));
+    Check(!ReadNativeWheelNodeMatrix(bones.data(), bones.size(), 0, bone), "escaping bone offset rejected");
 }
 
 } // namespace

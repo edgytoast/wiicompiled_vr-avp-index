@@ -2,8 +2,10 @@
 #pragma once
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <numeric>
 #include <vector>
 
@@ -169,6 +171,48 @@ inline bool ReadNativeWheelTopology(const uint8_t *mdl, size_t size, uint32_t ar
         found = true;
     }
     return found;
+}
+
+// The bone GX draws node `node` through: its 0x70 matrix is that bone's
+// model-space transform, parents included. Found by node id, not dictionary
+// position: the Flame Flyer and Cheep Charger bodies open with an nw4r_root
+// bone on node 2 or 3, and the node-0 bone their wheel belongs to comes third.
+inline bool ReadNativeWheelNodeMatrix(const uint8_t *mdl, size_t size, uint32_t node, float out[12]) {
+    if (!mdl || size < 0x40)
+        return false;
+    const auto read32 = [&](size_t at) {
+        return (uint32_t(mdl[at]) << 24) | (uint32_t(mdl[at + 1]) << 16) | (uint32_t(mdl[at + 2]) << 8) | mdl[at + 3];
+    };
+    const auto contains = [&](size_t at, size_t length) { return at <= size && length <= size - at; };
+    const auto version = read32(8);
+    if (read32(0) != 0x4d444c30 || version < 8 || version > 11 || read32(4) != size)
+        return false;
+    const size_t dictionary = read32(0x14);
+    if (!dictionary || !contains(dictionary, 8))
+        return false;
+    const auto count = read32(dictionary + 4);
+    if (!count || count > 4096 || !contains(dictionary + 8, size_t(count + 1) * 16))
+        return false;
+    for (uint32_t entry = 1; entry <= count; ++entry) {
+        const size_t offset = read32(dictionary + 8 + entry * 16 + 12);
+        if (offset > size - dictionary)
+            return false;
+        const size_t bone = dictionary + offset;
+        if (!contains(bone, 0xa0))
+            return false;
+        if (read32(bone + 0x10) != node)
+            continue;
+        for (unsigned i = 0; i < 12; ++i) {
+            const uint32_t bits = read32(bone + 0x70 + i * 4);
+            float value;
+            std::memcpy(&value, &bits, sizeof value);
+            if (!std::isfinite(value))
+                return false;
+            out[i] = value;
+        }
+        return true;
+    }
+    return false;
 }
 
 } // namespace mkw::vr
