@@ -5133,3 +5133,116 @@ TEST_F(GXFifoTest, Composite_TevSetup) {
   EXPECT_EQ(g_gxState.tevStages[0].colorPass.d, GX_CC_TEXC);
   EXPECT_EQ(g_gxState.tevStages[0].alphaPass.d, GX_CA_TEXA);
 }
+
+// Mario Kart Wii's dynamic shadows: EGG::DrawPathShadowVolume counts the shadow
+// volumes' coverage into the EFB alpha plane with perspective draws, then one
+// full-screen orthographic quad darkens the image by destination alpha. The
+// quad samples nothing, so only its blend factors say it composes with the
+// framebuffer; it must keep its recorded transforms in an immersive eye.
+static void draw_full_screen_ortho_quad_with_blend(GXBlendFactor src, GXBlendFactor dst) {
+  aurora::gfx::testing::use_real_vertex_format_helpers(true);
+  aurora::gfx::testing::use_draw_command_tracking(true);
+
+  aurora::Mat4x4<float> proj{};
+  proj.m0[0] = 2.0f / 608.0f;
+  proj.m0[3] = -1.0f;
+  proj.m1[1] = -2.0f / 456.0f;
+  proj.m1[3] = 1.0f;
+  proj.m2[2] = -1.0f;
+  proj.m3[3] = 1.0f;
+  GXSetProjection(&proj, GX_ORTHOGRAPHIC);
+  GXSetViewport(0.0f, 0.0f, 608.0f, 456.0f, 0.0f, 1.0f);
+  GXSetScissor(0, 0, 608, 456);
+  aurora::Mat3x4<float> identity{};
+  identity.m0[0] = identity.m1[1] = identity.m2[2] = 1.0f;
+  GXLoadPosMtxImm(&identity, GX_PNMTX0);
+  GXSetCurrentMtx(GX_PNMTX0);
+
+  GXClearVtxDesc();
+  GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
+  GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+  GXSetNumChans(0);
+  GXSetNumTexGens(0);
+  GXSetNumTevStages(1);
+  GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR_NULL);
+  GXSetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_C0);
+  GXSetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+  GXSetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_A0);
+  GXSetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+  GXSetBlendMode(GX_BM_BLEND, src, dst, GX_LO_CLEAR);
+  GXSetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
+
+  const float corners[4][2]{{0.0f, 0.0f}, {608.0f, 0.0f}, {608.0f, 456.0f}, {0.0f, 456.0f}};
+  GXBegin(GX_QUADS, GX_VTXFMT0, 4);
+  for (const auto& corner : corners) {
+    GXPosition3f32(corner[0], corner[1], 0.0f);
+  }
+  GXEnd();
+}
+
+TEST_F(GXFifoTest, OrthographicQuadBlendingWithDestinationAlphaIsNativeEfbEffect) {
+  draw_full_screen_ortho_quad_with_blend(GX_BL_DSTALPHA, GX_BL_INVDSTALPHA);
+  decode_fifo(flush_and_capture());
+  const auto* draw = aurora::gfx::get_last_draw_command<aurora::gx::DrawData>();
+  ASSERT_NE(draw, nullptr);
+  EXPECT_FALSE(draw->uniformReplayLayout.perspective);
+  EXPECT_TRUE(draw->uniformReplayLayout.nativeEfbEffect);
+}
+
+TEST_F(GXFifoTest, OrthographicQuadBlendingWithSourceAlphaStaysOnScreen) {
+  // An ordinary alpha-blended 2D element (a fade, a translucent HUD panel)
+  // depends on its own alpha only and remains virtual-screen content.
+  draw_full_screen_ortho_quad_with_blend(GX_BL_SRCALPHA, GX_BL_INVSRCALPHA);
+  decode_fifo(flush_and_capture());
+  const auto* draw = aurora::gfx::get_last_draw_command<aurora::gx::DrawData>();
+  ASSERT_NE(draw, nullptr);
+  EXPECT_FALSE(draw->uniformReplayLayout.perspective);
+  EXPECT_FALSE(draw->uniformReplayLayout.nativeEfbEffect);
+}
+
+TEST_F(GXFifoTest, OffscreenViewportPassOverFreshCopyIsNativeEfbEffect) {
+  // MKW builds its object shadow map in a 440x440 corner of the EFB: every
+  // stage is a full-resolution, unblended orthographic pass over the previous
+  // stage's copy, drawn in that corner's viewport and copied back out. The
+  // displayed frame never shows those passes, so they are not 2D-layer content.
+  std::array<u8, 440 * 440 * 4> image{};
+  gxState().pixelFmt = GX_PF_RGBA6_Z24;
+  aurora::gfx::testing::set_framebuffer_sizes(640, 528, 640, 528);
+
+  GXSetTexCopySrc(0, 0, 440, 440);
+  GXSetTexCopyDst(440, 440, GX_TF_RGBA8, GX_FALSE);
+  aurora::gfx::testing::set_current_frame(42);
+  GXCopyTex(image.data(), GX_TRUE);
+  const auto& records = aurora::gfx::testing::resolve_pass_records();
+  ASSERT_EQ(records.size(), 1u);
+  ASSERT_TRUE(records.front().texture);
+
+  GXTexObj_ texObj{};
+  texObj.mWidth = 440;
+  texObj.mHeight = 440;
+  texObj.mFormat = GX_TF_RGBA8;
+  gxState().textures[GX_TEXMAP0] = aurora::gfx::TextureBind{texObj, records.front().texture};
+  gxState().blendMode = GX_BM_NONE;
+  aurora::gx::ShaderConfig shader{};
+  shader.numTexGens = 1;
+  shader.tevStageCount = 1;
+  shader.tevStages[0].texCoordId = GX_TEXCOORD0;
+  shader.tevStages[0].texMapId = GX_TEXMAP0;
+  shader.tevStages[0].colorPass.d = GX_CC_TEXC;
+  shader.tevStages[0].alphaPass.d = GX_CA_TEXA;
+  const auto info = aurora::gx::build_shader_info(shader);
+
+  gxState().logicalViewport = {0.0f, 0.0f, 440.0f, 440.0f, 0.0f, 1.0f};
+  aurora::gfx::testing::reset_uniform_allocations();
+  const auto cornerLayout = aurora::gx::build_uniform(info, 0, aurora::gx::BindGroupRanges{},
+                                                      aurora::gx::FrameInterpolationDrawIdentity{}, false);
+  EXPECT_TRUE(cornerLayout.replayLayout.nativeEfbEffect);
+
+  // The same full-resolution, opaque copy drawn across the whole frame is a
+  // frozen-frame background (pause menus) and stays on the screen.
+  gxState().logicalViewport = {0.0f, 0.0f, 640.0f, 528.0f, 0.0f, 1.0f};
+  aurora::gfx::testing::reset_uniform_allocations();
+  const auto frameLayout = aurora::gx::build_uniform(info, 0, aurora::gx::BindGroupRanges{},
+                                                     aurora::gx::FrameInterpolationDrawIdentity{}, false);
+  EXPECT_FALSE(frameLayout.replayLayout.nativeEfbEffect);
+}

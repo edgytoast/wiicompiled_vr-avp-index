@@ -737,11 +737,20 @@ is parked at mid-depth for clipping. This avoids the view-dependent perspective-
 that otherwise breaks equal-depth `LEQUAL` ordering and causes overlapping menu/HUD elements to
 z-fight.
 
-Two classes of draw are deliberately left on their recorded transforms: native framebuffer effects
-(bloom and the rest of the post-processing chain, recognised by sampling a freshly produced,
-reduced or blended-back EFB copy), which belong to the rendered image rather than to the game's 2D
-layer, and any draw whose matrix is not actually affine. Retained one-shot EFB bakes such as Mario
-Kart Wii's minimap are treated as game art and remain eligible for the screen. A reprojected 2D draw
+Two classes of draw are deliberately left on their recorded transforms: native framebuffer effects,
+which belong to the rendered image rather than to the game's 2D layer, and any draw whose matrix is
+not actually affine. A native framebuffer effect is recognised three ways: it samples a freshly
+produced EFB copy that is reduced or blended back (bloom and the rest of the post-processing chain);
+it samples a fresh copy inside a viewport that does not cover the frame (an offscreen bake such as
+the 440x440 corner in which Mario Kart Wii builds its object shadow map, copying each stage back
+out); or it samples no texture and blends with destination alpha. The last is how Mario Kart Wii
+draws its dynamic shadows:
+the shadow volumes are perspective draws that count their coverage into the EFB's alpha plane, and one
+full-screen orthographic quad then darkens the image by destination alpha. The eyes replay the
+volumes, so that alpha exists in each eye, and the quad has to cover the whole eye: on the virtual
+screen it shaded only the screen's rectangle, cutting every shadow off at its edge. Retained one-shot
+EFB bakes such as Mario Kart Wii's minimap are treated as game art and remain eligible for the
+screen. A reprojected 2D draw
 uses the full eye viewport and scissor because its recorded rectangle no longer describes where it
 ended up; its original viewport is folded into the projection instead.
 
