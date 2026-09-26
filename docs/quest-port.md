@@ -819,7 +819,10 @@ Android facts this design rests on, all measured on a Quest 3:
   `app/src/main/cpp/CMakeLists.txt` adds the repository's `runtime/` as a
   subdirectory with those Android choices and builds both game kit probes
   (the Retro Rewind one only when the translation includes the mod), which
-  `exportDebugQuestGameKit` turns into the single kit the app carries.
+  each variant's `export<Variant>QuestGameKit` task (for example
+  `exportModernQuestDebugQuestGameKit`) turns into the single kit that
+  variant's APK carries, read from the CMake tree whose `MKW_ANDROID_CPU`
+  matches the flavour.
 - `android/nod-jni`: Gradle's `buildNodJni` task runs `cargo build --release
   --locked --target aarch64-linux-android` with the NDK's clang as linker and C
   compiler. `stageNodJni` puts `libnod_jni.so` into the APK's `arm64-v8a`
