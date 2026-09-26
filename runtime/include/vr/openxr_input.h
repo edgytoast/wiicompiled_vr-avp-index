@@ -57,6 +57,11 @@ struct OpenXRPointerScreen {
 //   left / right thumbstick-> left / right stick axes, clicks -> stick buttons
 //   left menu              -> Start
 //
+// None: the virtual joystick is unplugged, so the controllers hold no port and
+// another controller (a desktop gamepad, a Bluetooth remote) plays in their
+// place. The game sees them idle, the way it does while the settings panel has
+// them; they still open the panel and toggle the first-person camera.
+//
 // Both are bound for the Oculus Touch profile; khr/simple_controller gets
 // select/menu and the poses so an unknown runtime still offers something.
 //
@@ -90,7 +95,8 @@ struct OpenXRPointerScreen {
 // run on the XR pacing thread. The Wii Remote bridge is internally locked, so
 // the game thread may read it concurrently, and the virtual gamepad is only
 // published here: OpenXRApplyVirtualGamepad() performs the SDL writes on the
-// game thread, keeping SDL's joystick lock off this thread entirely.
+// game thread, and plugs the joystick in or out as the controller mode
+// changes, keeping SDL's joystick lock off this thread during a session.
 class OpenXRInput final {
 public:
     explicit OpenXRInput(OpenXRLogCallback logger = {});
@@ -131,7 +137,6 @@ public:
     void ApplyHaptic(uint32_t hand, float amplitude, XrDuration duration);
 
     bool IsCreated() const noexcept { return m_created; }
-    bool HasVirtualGamepad() const noexcept { return m_joystick_id != 0; }
     const std::string& LastError() const noexcept { return m_last_error; }
 
 private:
@@ -143,8 +148,6 @@ private:
     void DestroyPoseSpaces();
     void LoadInputClock();
     XrTime InputSampleTime(XrTime predicted_display_time) const;
-    bool AttachVirtualGamepad();
-    void DetachVirtualGamepad();
     // `withheld` publishes a remote at rest with nothing held and no pointer,
     // while still tracking motion so releasing it does not read as a jolt.
     void PublishWiiRemote(XrTime input_time, const OpenXRPointerScreen& screen,
@@ -197,8 +200,6 @@ private:
     bool m_panel_select_held = false;
     std::array<float, 2> m_horizon{1.0f, 0.0f};
     bool m_haptics_active[kHands]{};
-    uint32_t m_joystick_id = 0; // SDL_JoystickID; 0 when detached
-    void* m_joystick = nullptr; // SDL_Joystick*
     ClickToggle m_first_person_click;
     SteeringWheel m_wheel;
     WheelReferenceLatch m_wheel_reference;
@@ -262,8 +263,9 @@ private:
     std::string m_last_error;
 };
 
-// Game thread: writes the gamepad the pacing thread last published, if any.
-// Does nothing when no OpenXR controllers are attached.
+// Game thread: plugs the virtual gamepad in or out as the controller mode asks,
+// then writes the gamepad the pacing thread last published, if any. Does
+// nothing when no OpenXR controllers are attached.
 void OpenXRApplyVirtualGamepad() noexcept;
 
 } // namespace mkw::vr

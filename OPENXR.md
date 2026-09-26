@@ -246,8 +246,7 @@ Touch controllers. The port is served through KPAD like a Bluetooth remote
 | Right trigger | B |
 | Right B | C (look behind) |
 | Right stick up / down | 1 / 2 |
-| Left X | − |
-| Left menu | + |
+| Left X or left menu | + |
 | Left stick | Nunchuk stick |
 | Left trigger | Z |
 | Left Y | Settings panel (not a Wii button) |
@@ -257,7 +256,9 @@ Touch controllers. The port is served through KPAD like a Bluetooth remote
 | Left controller motion | Nunchuk accelerometer |
 
 Analog inputs count as pressed past half travel. The grips, right stick left / right and the left
-stick click press no Wii button, and nothing presses HOME. C sits on right B rather than a grip
+stick click press no Wii button, and nothing presses − or HOME: Mario Kart Wii never reads −. Left
+X presses + as well as the left menu because the PlayStation VR2's controllers give no usable left
+menu, so pause would otherwise be out of reach there. C sits on right B rather than a grip
 because hand steering holds a grip down for a whole corner, and C is the game's look-behind. The
 game's Wii Remote rumble vibrates both controllers, subject to the ordinary controller-vibration
 switch.
@@ -311,6 +312,15 @@ A/B → South/East, X/Y → West/North, index triggers → trigger axes, grips �
 → sticks (clicks → stick buttons), left menu → Start. Every binding in the F10 controller menu
 applies. Left Y is GameCube Y here, so clicking both thumbsticks together opens the settings panel
 instead. The right thumbstick click on its own still toggles the first-person camera.
+
+`"none"` makes the controllers nothing to the game, for playing with another controller (a desktop
+gamepad, a USB wheel or a Bluetooth Wii Remote). The virtual gamepad is unplugged, so it takes no
+port and the other controllers keep theirs; the game sees a switch to or from `"none"` as that
+controller disconnecting or connecting. The plugging follows the mode on the game thread, where the
+gamepad is already written, so the pacing thread never waits on SDL's joystick lock for it. The
+controllers still open the settings panel with left Y, point at it and toggle the first-person camera
+with a right thumbstick click; they press no game button, drive no Wii Remote, cannot take hold of
+the cockpit's wheel, and the game's rumble does not reach them.
 
 Bindings are suggested for `oculus/touch_controller` (Quest 2, 3 and Pro) and
 `khr/simple_controller`. `mkw_vr_wii_remote_tests` checks the accelerometer frame, the pointer

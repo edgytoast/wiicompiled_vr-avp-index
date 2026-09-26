@@ -203,10 +203,11 @@ int g_vrMirrorView = [] {
 }();
 // Config spellings and menu labels for the VR controllers, index-matched to
 // mkw::vr::OpenXRControllerMode.
-constexpr std::array<const char*, 2> kVrControllerModeNames{"wii_remote", "gamepad"};
-constexpr std::array<const char*, 2> kVrControllerModeLabels{"Wii Remote + Nunchuk", "Gamepad"};
+constexpr std::array<const char*, 3> kVrControllerModeNames{"wii_remote", "gamepad", "none"};
+constexpr std::array<const char*, 3> kVrControllerModeLabels{"Wii Remote + Nunchuk", "Gamepad", "None"};
 static_assert(static_cast<int>(mkw::vr::OpenXRControllerMode::WiiRemote) == 0);
 static_assert(static_cast<int>(mkw::vr::OpenXRControllerMode::Gamepad) == 1);
+static_assert(static_cast<int>(mkw::vr::OpenXRControllerMode::None) == 2);
 int g_vrControllerMode = [] {
     const std::string mode = RuntimeConfigFile::VrControllerMode();
     for (size_t i = 0; i < kVrControllerModeNames.size(); ++i) {
@@ -878,9 +879,11 @@ void DrawVrControllerSettings() {
             "Wii Remote + Nunchuk: the right controller is a Wii Remote, with motion and a pointer "
             "that lands where you aim on the virtual screen; the left one is the Nunchuk.\n"
             "  Right: A = A, trigger = B, B = C (look behind), stick up/down = 1/2\n"
-            "  Left: stick = Nunchuk stick, trigger = Z, X = -, menu = +, Y = settings panel\n"
+            "  Left: stick = Nunchuk stick, trigger = Z, X or menu = +, Y = settings panel\n"
             "  The grips press nothing; they take hold of the wheel with hand steering.\n"
             "Gamepad: both controllers are one ordinary controller, read as a GameCube pad.\n"
+            "None: the game does not see the VR controllers at all and they take no controller port,\n"
+            "so a desktop gamepad or a Wii Remote plays instead. Left Y still opens the settings panel.\n"
             "Applies immediately; the game sees the controller change as a reconnection.");
     }
     if (mkw::vr::OpenXRIsRunning() &&
@@ -2322,9 +2325,9 @@ void DrawVrSettingsPanelWindow() {
         }
         ImGui::TextDisabled("Aim and pull a trigger to change a setting, push a thumbstick to scroll.");
         ImGui::TextDisabled("%s to close. The game does not see the controllers meanwhile.",
-                            mkw::vr::OpenXRGetControllerMode() == mkw::vr::OpenXRControllerMode::WiiRemote
-                                ? "Press left Y or Menu"
-                                : "Click both thumbsticks or press Menu");
+                            mkw::vr::OpenXRGetControllerMode() == mkw::vr::OpenXRControllerMode::Gamepad
+                                ? "Click both thumbsticks or press Menu"
+                                : "Press left Y or Menu");
         ImGui::Separator();
         if (ImGui::BeginTabBar("Settings")) {
             const auto tab = [](const char* label, void (*draw)()) {

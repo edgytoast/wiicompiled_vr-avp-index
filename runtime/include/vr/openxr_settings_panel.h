@@ -77,10 +77,11 @@ struct Frame {
 };
 
 // Whether the button that opens and closes the panel is held. As a Wii Remote
-// that is left Y, which has no Wii button; as a gamepad left Y is GameCube Y, so
-// both thumbsticks clicked together stand in for it.
+// that is left Y, which has no Wii button, and with the controllers nothing to
+// the game it is left Y too; as a gamepad left Y is GameCube Y, so both
+// thumbsticks clicked together stand in for it.
 inline bool ToggleHeld(const std::array<HandInputs, 2>& hands, OpenXRControllerMode mode) noexcept {
-    if (mode == OpenXRControllerMode::WiiRemote) {
+    if (mode != OpenXRControllerMode::Gamepad) {
         return hands[0].secondary;
     }
     return hands[0].thumbstick_click && hands[1].thumbstick_click;

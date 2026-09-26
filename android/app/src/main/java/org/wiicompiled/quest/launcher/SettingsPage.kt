@@ -302,7 +302,7 @@ class SettingsPage(
         section(R.string.section_controls) {
             choice(
                 R.string.controls_mode, R.string.controls_mode_helper,
-                listOf(R.string.controls_mode_wii_remote, R.string.controls_mode_gamepad),
+                listOf(R.string.controls_mode_wii_remote, R.string.controls_mode_gamepad, R.string.controls_mode_none),
                 read = { stringIndex(it, "vr", "controller_mode", CONTROLLER_MODES) },
                 write = { c, index -> c.setString("vr", "controller_mode", CONTROLLER_MODES[index]) },
             )
@@ -316,7 +316,7 @@ class SettingsPage(
             info(R.string.controls_map_a, activity.getString(R.string.controls_map_a_value))
             info(R.string.controls_map_b, activity.getString(R.string.controls_map_b_value))
             info(R.string.controls_map_12, activity.getString(R.string.controls_map_12_value))
-            info(R.string.controls_map_minus_plus, activity.getString(R.string.controls_map_minus_plus_value))
+            info(R.string.controls_map_plus, activity.getString(R.string.controls_map_plus_value))
             info(R.string.controls_map_stick, activity.getString(R.string.controls_map_stick_value))
             info(R.string.controls_map_z, activity.getString(R.string.controls_map_z_value))
             info(R.string.controls_map_c, activity.getString(R.string.controls_map_c_value))
@@ -759,7 +759,7 @@ class SettingsPage(
         val PERFORMANCE_LEVELS = listOf("boost", "sustained_high", "sustained_low", "power_savings", "default")
         // runtime_config.h's kVrFoveationLevels, the default ("off") first.
         val FOVEATION_LEVELS = listOf("off", "low", "medium", "high")
-        val CONTROLLER_MODES = listOf("wii_remote", "gamepad")
+        val CONTROLLER_MODES = listOf("wii_remote", "gamepad", "none")
         val INTERPOLATION_FPS = listOf(0L, 1L, 72L, 90L, 120L)
         val RESOLUTIONS = listOf(1.0, 1.5, 2.0, 3.0, 4.0)
         val SUPPORTED_RESOLUTIONS = listOf(0.0, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0)

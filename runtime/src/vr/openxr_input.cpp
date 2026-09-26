@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -49,8 +50,15 @@ namespace {
 // slot that passes. So it leaves the gamepad here, and the game thread writes
 // it to SDL where it already polls controllers.
 //
-// m_sdl is the lock the SDL work runs under; the pacing thread only ever takes
-// m_state, and only for the copy. Both are taken in that order.
+// The relay also owns the virtual joystick. Attaching and detaching it take the
+// same lock, so a live switch to or from the None controller mode (which
+// unplugs it, so the VR controllers hold no port) is followed on the game
+// thread too; only the input's creation and destruction plug it in or out
+// where they run.
+//
+// m_sdl is the lock the SDL work, and the joystick, are under; the pacing
+// thread only ever takes m_state, and only for the copy. Both are taken in that
+// order.
 class VirtualGamepadRelay {
 public:
     struct Pad {
@@ -58,17 +66,28 @@ public:
         std::array<bool, SDL_GAMEPAD_BUTTON_COUNT> buttons{};
     };
 
-    void Attach(SDL_Joystick* joystick) {
+    // The controllers' input exists: plugs the joystick in unless the mode is
+    // None. `logger` reports a joystick SDL refuses, from whichever thread.
+    void Open(OpenXRLogCallback logger) {
         std::scoped_lock lock(m_sdl, m_state);
-        m_joystick = joystick;
+        m_logger = std::move(logger);
+        m_open = true;
+        m_attach_failed = false;
         m_pending = false;
+        FollowControllerMode();
     }
 
-    void Detach() {
+    // The controllers' input is going away: unplugs the joystick.
+    void Close() {
         std::scoped_lock lock(m_sdl, m_state);
-        m_joystick = nullptr;
+        m_open = false;
+        Detach();
         m_pending = false;
+        m_logger = {};
     }
+
+    // The plugged-in joystick's SDL_JoystickID, 0 while unplugged.
+    uint32_t JoystickId() const noexcept { return m_id.load(std::memory_order_relaxed); }
 
     // Pacing thread.
     void Publish(const Pad& pad) {
@@ -77,35 +96,106 @@ public:
         m_pending = true;
     }
 
-    // Game thread. Holding m_sdl here is what keeps Detach from closing the
+    // Game thread. Holding m_sdl here is what keeps Close from closing the
     // joystick underneath the writes.
     void Apply() {
         std::lock_guard sdl(m_sdl);
+        FollowControllerMode();
         Pad pad;
-        SDL_Joystick* joystick = nullptr;
         {
             std::lock_guard lock(m_state);
             if (!m_pending || m_joystick == nullptr) {
                 return;
             }
             pad = m_pad;
-            joystick = m_joystick;
             m_pending = false;
         }
         for (int axis = 0; axis < SDL_GAMEPAD_AXIS_COUNT; ++axis) {
-            SDL_SetJoystickVirtualAxis(joystick, static_cast<SDL_GamepadAxis>(axis),
+            SDL_SetJoystickVirtualAxis(m_joystick, static_cast<SDL_GamepadAxis>(axis),
                                        pad.axes[static_cast<size_t>(axis)]);
         }
         for (int button = 0; button < SDL_GAMEPAD_BUTTON_COUNT; ++button) {
-            SDL_SetJoystickVirtualButton(joystick, static_cast<SDL_GamepadButton>(button),
+            SDL_SetJoystickVirtualButton(m_joystick, static_cast<SDL_GamepadButton>(button),
                                          pad.buttons[static_cast<size_t>(button)]);
         }
     }
 
 private:
+    // m_sdl held. A joystick SDL refused is not asked for again until the mode
+    // unplugs it or the input is created anew.
+    void FollowControllerMode() {
+        if (!m_open) {
+            return;
+        }
+        if (OpenXRGetControllerMode() == OpenXRControllerMode::None) {
+            m_attach_failed = false;
+            Detach();
+        } else if (m_joystick == nullptr && !m_attach_failed) {
+            m_attach_failed = !Attach();
+        }
+    }
+
+    bool Attach() {
+        SDL_VirtualJoystickDesc desc;
+        SDL_INIT_INTERFACE(&desc);
+        desc.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+        desc.naxes = SDL_GAMEPAD_AXIS_COUNT;
+        desc.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+        desc.button_mask = (1u << SDL_GAMEPAD_BUTTON_SOUTH) | (1u << SDL_GAMEPAD_BUTTON_EAST) |
+                           (1u << SDL_GAMEPAD_BUTTON_WEST) | (1u << SDL_GAMEPAD_BUTTON_NORTH) |
+                           (1u << SDL_GAMEPAD_BUTTON_START) | (1u << SDL_GAMEPAD_BUTTON_LEFT_STICK) |
+                           (1u << SDL_GAMEPAD_BUTTON_RIGHT_STICK) |
+                           (1u << SDL_GAMEPAD_BUTTON_LEFT_SHOULDER) |
+                           (1u << SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+        desc.axis_mask = (1u << SDL_GAMEPAD_AXIS_LEFTX) | (1u << SDL_GAMEPAD_AXIS_LEFTY) |
+                         (1u << SDL_GAMEPAD_AXIS_RIGHTX) | (1u << SDL_GAMEPAD_AXIS_RIGHTY) |
+                         (1u << SDL_GAMEPAD_AXIS_LEFT_TRIGGER) | (1u << SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
+        desc.name = "OpenXR Touch Controllers";
+        const SDL_JoystickID id = SDL_AttachVirtualJoystick(&desc);
+        if (id == 0) {
+            Refused("SDL_AttachVirtualJoystick");
+            return false;
+        }
+        SDL_Joystick* joystick = SDL_OpenJoystick(id);
+        if (joystick == nullptr) {
+            Refused("SDL_OpenJoystick");
+            SDL_DetachVirtualJoystick(id);
+            return false;
+        }
+        m_joystick = joystick;
+        m_id.store(id, std::memory_order_relaxed);
+        return true;
+    }
+
+    void Detach() {
+        const SDL_JoystickID id = m_id.exchange(0, std::memory_order_relaxed);
+        if (m_joystick != nullptr) {
+            SDL_CloseJoystick(m_joystick);
+            m_joystick = nullptr;
+        }
+        if (id != 0) {
+            SDL_DetachVirtualJoystick(id);
+        }
+    }
+
+    void Refused(const char* operation) const {
+        if (!m_logger) {
+            return;
+        }
+        try {
+            m_logger(OpenXRLogLevel::Warning, std::string(operation) + " failed: " + SDL_GetError() +
+                                                  "; OpenXR controllers will not reach the game");
+        } catch (...) {
+        }
+    }
+
     std::mutex m_sdl;
     std::mutex m_state;
+    OpenXRLogCallback m_logger;
+    bool m_open = false;
+    bool m_attach_failed = false;
     SDL_Joystick* m_joystick = nullptr;
+    std::atomic<uint32_t> m_id{0};
     Pad m_pad;
     bool m_pending = false;
 };
@@ -273,13 +363,18 @@ bool OpenXRInput::Create(OpenXRRuntime& runtime) {
     CreatePoseSpaces();
     LoadInputClock();
     LoadHandTracking();
-    if (!AttachVirtualGamepad()) {
-        Log(OpenXRLogLevel::Warning,
-            "SDL refused the virtual gamepad; OpenXR controllers will not reach the game");
+    Relay().Open(m_logger);
+    switch (OpenXRGetControllerMode()) {
+    case OpenXRControllerMode::WiiRemote:
+        Log(OpenXRLogLevel::Info, "OpenXR controller actions attached (Wii Remote + Nunchuk)");
+        break;
+    case OpenXRControllerMode::Gamepad:
+        Log(OpenXRLogLevel::Info, "OpenXR controller actions attached (gamepad)");
+        break;
+    case OpenXRControllerMode::None:
+        Log(OpenXRLogLevel::Info, "OpenXR controller actions attached (none: the game does not see them)");
+        break;
     }
-    Log(OpenXRLogLevel::Info, OpenXRGetControllerMode() == OpenXRControllerMode::WiiRemote
-                                  ? "OpenXR controller actions attached (Wii Remote + Nunchuk)"
-                                  : "OpenXR controller actions attached (gamepad)");
     return true;
 }
 
@@ -739,54 +834,6 @@ void OpenXRApplyVirtualGamepad() noexcept {
     Relay().Apply();
 }
 
-bool OpenXRInput::AttachVirtualGamepad() {
-    SDL_VirtualJoystickDesc desc;
-    SDL_INIT_INTERFACE(&desc);
-    desc.type = SDL_JOYSTICK_TYPE_GAMEPAD;
-    desc.naxes = SDL_GAMEPAD_AXIS_COUNT;
-    desc.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
-    desc.button_mask = (1u << SDL_GAMEPAD_BUTTON_SOUTH) | (1u << SDL_GAMEPAD_BUTTON_EAST) |
-                       (1u << SDL_GAMEPAD_BUTTON_WEST) | (1u << SDL_GAMEPAD_BUTTON_NORTH) |
-                       (1u << SDL_GAMEPAD_BUTTON_START) | (1u << SDL_GAMEPAD_BUTTON_LEFT_STICK) |
-                       (1u << SDL_GAMEPAD_BUTTON_RIGHT_STICK) |
-                       (1u << SDL_GAMEPAD_BUTTON_LEFT_SHOULDER) |
-                       (1u << SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
-    desc.axis_mask = (1u << SDL_GAMEPAD_AXIS_LEFTX) | (1u << SDL_GAMEPAD_AXIS_LEFTY) |
-                     (1u << SDL_GAMEPAD_AXIS_RIGHTX) | (1u << SDL_GAMEPAD_AXIS_RIGHTY) |
-                     (1u << SDL_GAMEPAD_AXIS_LEFT_TRIGGER) | (1u << SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
-    desc.name = "OpenXR Touch Controllers";
-    const SDL_JoystickID id = SDL_AttachVirtualJoystick(&desc);
-    if (id == 0) {
-        m_last_error = std::string("SDL_AttachVirtualJoystick failed: ") + SDL_GetError();
-        Log(OpenXRLogLevel::Warning, m_last_error);
-        return false;
-    }
-    SDL_Joystick* joystick = SDL_OpenJoystick(id);
-    if (joystick == nullptr) {
-        m_last_error = std::string("SDL_OpenJoystick failed: ") + SDL_GetError();
-        Log(OpenXRLogLevel::Warning, m_last_error);
-        SDL_DetachVirtualJoystick(id);
-        return false;
-    }
-    m_joystick_id = id;
-    m_joystick = joystick;
-    Relay().Attach(joystick);
-    return true;
-}
-
-void OpenXRInput::DetachVirtualGamepad() {
-    // Before the handle goes: the game thread may be writing through it.
-    Relay().Detach();
-    if (m_joystick != nullptr) {
-        SDL_CloseJoystick(static_cast<SDL_Joystick*>(m_joystick));
-        m_joystick = nullptr;
-    }
-    if (m_joystick_id != 0) {
-        SDL_DetachVirtualJoystick(m_joystick_id);
-        m_joystick_id = 0;
-    }
-}
-
 void OpenXRInput::Destroy() {
     // The game must stop reading a remote whose controllers are going away.
     OpenXRWithdrawWiiRemote();
@@ -794,7 +841,7 @@ void OpenXRInput::Destroy() {
     if (m_created) {
         StopRumble();
     }
-    DetachVirtualGamepad();
+    Relay().Close();
     DestroyHandTrackers();
     m_create_hand_tracker = nullptr;
     m_destroy_hand_tracker = nullptr;
@@ -842,7 +889,7 @@ void OpenXRInput::Idle() {
     }
     m_pointer.Reset();
     m_horizon = {1.0f, 0.0f};
-    OpenXRPublishWiiRemote(m_joystick_id, OpenXRWiiRemoteSample{});
+    OpenXRPublishWiiRemote(Relay().JoystickId(), OpenXRWiiRemoteSample{});
     // The panel stays as it was; only what the controllers were holding is forgotten.
     m_panel_controls.Reset();
     m_last_input_time = 0;
@@ -855,9 +902,7 @@ void OpenXRInput::Idle() {
     ResetDriving();
     StopRumble();
     // Nothing stays held on the gamepad either while input is away.
-    if (m_joystick != nullptr) {
-        Relay().Publish({});
-    }
+    Relay().Publish({});
 }
 
 void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen& screen,
@@ -1015,8 +1060,11 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
     // is written back.
     const bool was_open = OpenXRSettingsPanelOpen();
     bool open = was_open;
-    const settings_panel::Frame panel =
-        m_panel_controls.Update(panel_hands, open, dt_seconds, OpenXRGetControllerMode());
+    const OpenXRControllerMode mode = OpenXRGetControllerMode();
+    const settings_panel::Frame panel = m_panel_controls.Update(panel_hands, open, dt_seconds, mode);
+    // While the panel has the controllers, and always when they are nothing to
+    // the game, the game sees them idle.
+    const bool withheld = panel.withheld || mode == OpenXRControllerMode::None;
     // Pointer first: the game thread reads it as soon as it sees the panel open.
     PublishSettingsPanel(input_time, settings_panel, panel);
     if (open != was_open) {
@@ -1036,7 +1084,7 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
 
     // The cockpit's wheel before the game reads the controllers: a held wheel
     // steers through the left stick and keeps its grips from the game.
-    UpdateDriving(predicted_display_time, seat, hands, panel.withheld);
+    UpdateDriving(predicted_display_time, seat, hands, withheld);
 
 #if defined(__ANDROID__)
     // Bare hands in the cockpit. While one of them holds the wheel it holds the
@@ -1044,7 +1092,7 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
     // pause menu, the results, coasting) a right pinch stays A. The game's own
     // pointer cannot tell the two apart: MKW keeps it on while driving.
     const bool cockpit_hands =
-        hand_tracking_on && m_driving.cockpit_active && m_driving.hand_steering && !panel.withheld;
+        hand_tracking_on && m_driving.cockpit_active && m_driving.hand_steering && !withheld;
     std::array<bool, kHands> bare_held{};
     for (uint32_t hand = 0; hand < kHands; ++hand) {
         bare_held[hand] = cockpit_hands && m_bare_latch[hand].Bare() && m_wheel_held[hand];
@@ -1069,7 +1117,7 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
             flick[hand] = {m_bare_latch[hand].Tracked(), m_wheel_held[hand],
                            m_joint_frame.seat_from_joint[hand][hand_tracking::kPalm][7]};
         }
-        if (m_flick.Update(flick, dt_seconds) && OpenXRGetControllerMode() == OpenXRControllerMode::WiiRemote) {
+        if (m_flick.Update(flick, dt_seconds) && mode == OpenXRControllerMode::WiiRemote) {
             m_flick_start = input_time;
         }
     } else {
@@ -1084,14 +1132,14 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
     m_injected_flick_held = injected_flick;
 #endif
 
-    // While the panel has the controllers, the game sees them idle.
+    // What the game sees of the controllers: nothing held while they are withheld.
     static const std::array<wii_remote::HandInputs, kHands> kIdleHands{};
-    const auto& game_hands = panel.withheld ? kIdleHands : hands;
+    const auto& game_hands = withheld ? kIdleHands : hands;
     const wii_remote::HandInputs& left = game_hands[0];
     const wii_remote::HandInputs& right = game_hands[1];
-    const auto injected = [&panel](const char* button) { return !panel.withheld && Injected(button); };
+    const auto injected = [withheld](const char* button) { return !withheld && Injected(button); };
 
-    if (m_joystick != nullptr) {
+    if (Relay().JoystickId() != 0) {
         VirtualGamepadRelay::Pad pad;
         // OpenXR thumbsticks report +Y up; SDL gamepads report +Y down.
         pad.axes[SDL_GAMEPAD_AXIS_LEFTX] = ToAxis(left.stick_x);
@@ -1113,8 +1161,8 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
         Relay().Publish(pad);
     }
 
-    PublishWiiRemote(input_time, screen, game_hands, panel.withheld ? 0u : InjectedWiiRemoteButtons(),
-                     panel.withheld);
+    PublishWiiRemote(input_time, screen, game_hands, withheld ? 0u : InjectedWiiRemoteButtons(),
+                     withheld);
     UpdateRumble();
 }
 
@@ -1215,7 +1263,7 @@ void OpenXRInput::PublishWiiRemote(XrTime input_time, const OpenXRPointerScreen&
         sample.nunchuk_acc = OpenXRWiiRemoteSample{}.nunchuk_acc;
         m_pointer.Reset();
         m_flick_start = 0;
-        OpenXRPublishWiiRemote(m_joystick_id, sample);
+        OpenXRPublishWiiRemote(Relay().JoystickId(), sample);
         return;
     }
     if (m_flick_start != 0) {
@@ -1252,7 +1300,7 @@ void OpenXRInput::PublishWiiRemote(XrTime input_time, const OpenXRPointerScreen&
             Log(OpenXRLogLevel::Info, "OpenXR Wii Remote pointer reached the virtual screen");
         }
     }
-    OpenXRPublishWiiRemote(m_joystick_id, sample);
+    OpenXRPublishWiiRemote(Relay().JoystickId(), sample);
 }
 
 void OpenXRInput::ResetDriving() {
@@ -1427,7 +1475,7 @@ void OpenXRInput::UpdateDriving(XrTime display_time, const driving::SeatFrame& s
 }
 
 void OpenXRInput::UpdateRumble() {
-    if (!OpenXRWiiRemoteRumbleRequested() || !OpenXRWiiRemoteOwnsGamepad(m_joystick_id)) {
+    if (!OpenXRWiiRemoteRumbleRequested() || !OpenXRWiiRemoteOwnsGamepad(Relay().JoystickId())) {
         StopRumble();
         return;
     }

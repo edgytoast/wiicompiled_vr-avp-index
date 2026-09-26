@@ -259,8 +259,12 @@ void TestButtons() {
 
     right = {};
     left.primary = true;
+    Check(RemoteButtons(left, right) == kButtonPlus, "left X is +, and nothing presses -");
+    left = {};
     left.menu = true;
-    Check(RemoteButtons(left, right) == (kButtonMinus | kButtonPlus), "left X and menu are - and +");
+    Check(RemoteButtons(left, right) == kButtonPlus, "left menu is + too");
+    left.primary = true;
+    Check(RemoteButtons(left, right) == kButtonPlus, "left X and menu together are one +");
     left = {};
     left.trigger = 0.7f;
     Check(RemoteButtons(left, right) == kButtonZ, "left trigger is Z");

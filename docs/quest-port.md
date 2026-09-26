@@ -233,7 +233,9 @@ aimed at the virtual screen; see "Controllers" in `OPENXR.md` for the mapping
 and the geometry. With `controller_mode = "gamepad"` it stays an ordinary pad:
 A/B → South/East, X/Y → West/North, index triggers → trigger axes, grips →
 shoulders, thumbsticks → sticks (clicks → stick buttons), left menu → Start,
-and every existing binding, dead zone and overlay setting applies. Bindings are
+and every existing binding, dead zone and overlay setting applies. With
+`controller_mode = "none"` the virtual joystick is unplugged, leaving the ports
+to a Bluetooth gamepad; left Y still opens the settings panel. Bindings are
 suggested for `oculus/touch_controller` and `khr/simple_controller`.
 
 The manifest declares hand tracking (`horizonos.permission.HAND_TRACKING`, the

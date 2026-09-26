@@ -285,11 +285,12 @@ inline bool IsSupportedVrMirrorView(std::string_view value) {
 }
 // What the tracked VR controllers are to the game: "wii_remote" is a Wii
 // Remote with a Nunchuk (motion and pointer included), "gamepad" one ordinary
-// controller read as a GameCube pad. Matches mkw::vr::OpenXRControllerMode.
+// controller read as a GameCube pad, "none" nothing at all (they only open the
+// settings panel). Matches mkw::vr::OpenXRControllerMode.
 inline constexpr const char* kVrControllerModeDefault = "wii_remote";
 
 inline bool IsSupportedVrControllerMode(std::string_view value) {
-    return value == "wii_remote" || value == "gamepad";
+    return value == "wii_remote" || value == "gamepad" || value == "none";
 }
 // SDL scancode name, spelled the way SDL_GetScancodeName produces it. An
 // empty string leaves the recenter hotkey unbound, menu button only.
@@ -510,8 +511,8 @@ inline void EnsureConfigFile() {
               "# What the headset's controllers are to the game: \"wii_remote\"\n"
               "# is a Wii Remote (right hand, with motion and a pointer aimed at\n"
               "# the virtual screen) plus a Nunchuk (left hand); \"gamepad\" is one\n"
-              "# ordinary controller read as a GameCube pad. Changeable live from\n"
-              "# the F10 menu.\n"
+              "# ordinary controller read as a GameCube pad; \"none\" leaves the game\n"
+              "# to other controllers. Changeable live from the F10 menu.\n"
               "controller_mode = \"wii_remote\"\n"
               "# VR interpolation: 0 = Off, 1 = Auto, or 72/90/120 FPS. Live.\n"
               "frame_interpolation_fps = 0\n"

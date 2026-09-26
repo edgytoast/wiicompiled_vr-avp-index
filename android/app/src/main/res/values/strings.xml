@@ -588,9 +588,10 @@
     <!-- Controls tab -->
     <string name="section_controls">Controllers</string>
     <string name="controls_mode">VR controllers</string>
-    <string name="controls_mode_helper">What the Touch controllers are to the game.</string>
+    <string name="controls_mode_helper">What the Touch controllers are to the game. None leaves it to another controller, such as a Bluetooth gamepad; left Y still opens the settings panel.</string>
     <string name="controls_mode_wii_remote">Wii Remote + Nunchuk</string>
     <string name="controls_mode_gamepad">Gamepad</string>
+    <string name="controls_mode_none">None</string>
     <string name="controls_rumble">Vibration</string>
     <string name="controls_rumble_helper">The game\'s rumble vibrates the controllers.</string>
     <string name="section_controls_mapping">Wii Remote + Nunchuk buttons</string>
@@ -600,8 +601,8 @@
     <string name="controls_map_b_value">Right trigger</string>
     <string name="controls_map_12">1 / 2</string>
     <string name="controls_map_12_value">Right stick up / down</string>
-    <string name="controls_map_minus_plus">− / +</string>
-    <string name="controls_map_minus_plus_value">Left X / left menu</string>
+    <string name="controls_map_plus">+</string>
+    <string name="controls_map_plus_value">Left X or left menu</string>
     <string name="controls_map_stick">Nunchuk stick</string>
     <string name="controls_map_stick_value">Left stick</string>
     <string name="controls_map_z">Z</string>
