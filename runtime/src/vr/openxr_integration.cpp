@@ -46,6 +46,14 @@
 #define XR_USE_TIMESPEC
 #include <openxr/openxr_platform.h>
 #define MKW_OPENXR_GRAPHICS_BACKEND 1
+#elif defined(MKW_PLATFORM_VISIONOS)
+// Apple Vision Pro: the private CompositorServices provider (vr/visionos) stands in for the
+// OpenXR loader and runtime; Aurora renders with Dawn's Metal backend into its IOSurfaces.
+#include "vr/openxr_metal.h"
+#include <time.h>
+#define XR_USE_TIMESPEC
+#include <openxr/openxr_platform.h>
+#define MKW_OPENXR_GRAPHICS_BACKEND 1
 #else
 #define MKW_OPENXR_GRAPHICS_BACKEND 0
 #endif
@@ -82,6 +90,9 @@ void ConfigurePolicy(bool enabled) noexcept {
 #if defined(_WIN32)
 using GraphicsBackend = OpenXRWindowsBackend;
 
+#elif defined(MKW_PLATFORM_VISIONOS)
+using GraphicsBackend = OpenXRMetalBackend;
+inline constexpr const char* kGraphicsBackendName = "Metal";
 #else
 using GraphicsBackend = OpenXRVulkanBackend;
 inline constexpr const char* kGraphicsBackendName = "Vulkan";
@@ -89,9 +100,10 @@ inline constexpr const char* kGraphicsBackendName = "Vulkan";
 
 // Whether the immersive window's eyes can be aimed through the window, so that only the window is
 // rendered: the backend has to show just the part of each eye image they fill. The Quest's shared
-// buffers and projection layer do; the PC backends copy whole eyes, so there the window's eyes stay
-// full size and are only masked.
-#if defined(__ANDROID__)
+// buffers and projection layer do, as does the Vision Pro's provider (the projection view's
+// imageRect is honoured); the PC backends copy whole eyes, so there the window's eyes stay full
+// size and are only masked.
+#if defined(__ANDROID__) || defined(MKW_PLATFORM_VISIONOS)
 inline constexpr bool kWindowShapedEyesSupported = true;
 #else
 inline constexpr bool kWindowShapedEyesSupported = false;
@@ -398,6 +410,12 @@ public:
         config.optional_extensions = {"XR_KHR_win32_convert_performance_counter_time",
                                       "XR_FB_display_refresh_rate", "XR_EXT_performance_settings"};
         AddHandMeshExtensions(config);
+#elif defined(MKW_PLATFORM_VISIONOS)
+        // The provider binds Metal through its own XrGraphicsBindingMetalMKW; no
+        // graphics extension exists for it to advertise.
+        config.required_extensions = {};
+        config.optional_extensions = {"XR_KHR_convert_timespec_time", "XR_FB_display_refresh_rate"};
+        AddHandMeshExtensions(config);
 #else
         // Either Vulkan binding extension is acceptable; the backend picks
         // whichever the runtime enabled, preferring enable2.
@@ -608,6 +626,8 @@ private:
 #if defined(_WIN32)
     AuroraBackend kRequiredAuroraBackend = BACKEND_D3D12;
     const char* kGraphicsBackendName = "D3D12";
+#elif defined(MKW_PLATFORM_VISIONOS)
+    static constexpr AuroraBackend kRequiredAuroraBackend = BACKEND_METAL;
 #else
     static constexpr AuroraBackend kRequiredAuroraBackend = BACKEND_VULKAN;
 #endif

@@ -29,6 +29,27 @@ if(MKW_PLATFORM_ANDROID AND EXISTS "${DATA_INIT_BLOB_ASM}")
         message(STATUS "Rewrote the PE/COFF blob assembly for ELF: ${DATA_INIT_BLOB_ASM}")
     endif()
 endif()
+# The same rewrite for Mach-O, which visionOS needs from a translation the Windows installer or a
+# Linux host produced (`generate-data-init --target-os macos` already emits this syntax). Mach-O C
+# symbols carry a leading underscore, so each blob label gets that spelling as an alias too.
+function(mkw_rewrite_blob_asm_for_macho input output_var)
+    set(${output_var} "${input}" PARENT_SCOPE)
+    file(READ "${input}" _text)
+    if(_text MATCHES "\\.section \\.rdata" OR _text MATCHES "\\.section \\.rodata")
+        string(REPLACE ".section .rdata,\"dr\"" ".section __TEXT,__const" _macho "${_text}")
+        string(REPLACE ".section .rodata,\"a\",@progbits" ".section __TEXT,__const" _macho "${_macho}")
+        string(REGEX REPLACE "\\.section \\.note\\.GNU-stack[^\n]*\n?" "" _macho "${_macho}")
+        string(REGEX REPLACE "\\.globl (k[A-Za-z0-9_]+)\n\\1:" ".globl \\1\n.globl _\\1\n\\1:\n_\\1:" _macho "${_macho}")
+        get_filename_component(_name "${input}" NAME_WE)
+        set(_rewritten "${CMAKE_CURRENT_BINARY_DIR}/${_name}_macho.S")
+        file(WRITE "${_rewritten}" "${_macho}")
+        message(STATUS "Rewrote the blob assembly for Mach-O: ${_rewritten}")
+        set(${output_var} "${_rewritten}" PARENT_SCOPE)
+    endif()
+endfunction()
+if(MKW_PLATFORM_VISIONOS AND EXISTS "${DATA_INIT_BLOB_ASM}")
+    mkw_rewrite_blob_asm_for_macho("${DATA_INIT_BLOB_ASM}" DATA_INIT_BLOB_ASM)
+endif()
 if(EXISTS "${DATA_INIT_FILE}")
     list(APPEND SOURCES "${DATA_INIT_FILE}")
 endif()
@@ -124,6 +145,12 @@ elseif(MKW_PLATFORM_ANDROID)
     # libvulkan for the OpenXR-side device, android/log for AHardwareBuffer,
     # JNI and logcat.
     target_link_libraries(mkw_runtime_common PRIVATE mkw::libco android log vulkan ${CMAKE_DL_LIBS})
+elseif(MKW_PLATFORM_VISIONOS)
+    # The Metal stereo backend (openxr_metal.mm) and the host bridge
+    # (platform/visionos/visionos_host.mm) talk to Metal and IOSurface directly.
+    foreach(framework Metal IOSurface QuartzCore Foundation CoreFoundation)
+        target_link_libraries(mkw_runtime_common PRIVATE "-framework ${framework}")
+    endforeach()
 endif()
 if(MKW_CPPWINRT_INCLUDE_DIR)
     if(NOT EXISTS "${MKW_CPPWINRT_INCLUDE_DIR}/winrt/base.h")
@@ -208,6 +235,17 @@ if(MKW_HAVE_RETRO_REWIND)
         target_precompile_headers(mkw_retro_sensitive REUSE_FROM mkw_base_shared)
     endif()
 
+    if(MKW_PLATFORM_VISIONOS)
+        # Same Mach-O rewrite as the base data blobs above.
+        set(MKW_VISIONOS_RETRO_EXTRA_SOURCES)
+        foreach(source IN LISTS MKW_RETRO_EXTRA_SOURCES)
+            if(source MATCHES "\\.S$")
+                mkw_rewrite_blob_asm_for_macho("${source}" source)
+            endif()
+            list(APPEND MKW_VISIONOS_RETRO_EXTRA_SOURCES "${source}")
+        endforeach()
+        set(MKW_RETRO_EXTRA_SOURCES ${MKW_VISIONOS_RETRO_EXTRA_SOURCES})
+    endif()
     if(MKW_PLATFORM_ANDROID)
         # Same PE/COFF-to-ELF rewrite as the base data blobs above.
         set(MKW_ANDROID_RETRO_EXTRA_SOURCES)
@@ -290,6 +328,14 @@ function(mkw_configure_product target)
     if(MKW_PLATFORM_MACOS)
         target_link_libraries(${target} PRIVATE
             "${MKW_IOKIT_FRAMEWORK}" "${MKW_COREFOUNDATION_FRAMEWORK}")
+    elseif(MKW_PLATFORM_VISIONOS)
+        # The product is a static library on visionOS (below); these are the frameworks its
+        # objects need beyond what SDL3 and Dawn carry in their own link interfaces, recorded
+        # here so the app that links the product inherits them.
+        foreach(framework Metal IOSurface QuartzCore Foundation CoreFoundation
+                          CompositorServices ARKit GameController AVFoundation AudioToolbox CoreAudio)
+            target_link_libraries(${target} PUBLIC "-framework ${framework}")
+        endforeach()
     endif()
     if(EXISTS "${MKW_AURORA_DIR}/cmake/AuroraCopyRuntimeDLLs.cmake")
         include("${MKW_AURORA_DIR}/cmake/AuroraCopyRuntimeDLLs.cmake")
@@ -351,6 +397,11 @@ function(mkw_configure_product target)
     if(NOT EXISTS "${MKW_WII_BOOTSTRAP_SOURCE_DIR}/shared2/wc24")
         message(FATAL_ERROR "Missing Wii first-run bootstrap payload: ${MKW_WII_BOOTSTRAP_SOURCE_DIR}")
     endif()
+    if(MKW_PLATFORM_VISIONOS)
+        # A static library has no directory to sit next to; the app bundles these resources
+        # itself (visionos/CMakeLists.txt) where ExecutableDirectory() finds them.
+        return()
+    endif()
     add_custom_command(TARGET ${target} POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${MKW_WII_BOOTSTRAP_SOURCE_DIR}" "$<TARGET_FILE_DIR:${target}>/wii_bootstrap")
 
@@ -385,6 +436,11 @@ endfunction()
 if(MKW_PLATFORM_ANDROID)
     add_library(WiiCompiled SHARED "${MKW_BASE_PRODUCT_SOURCE}" ${MKW_BASE_REGISTRATION_SOURCES})
     set_target_properties(WiiCompiled PROPERTIES OUTPUT_NAME main)
+elseif(MKW_PLATFORM_VISIONOS)
+    # visionOS ships each product as a static library the SwiftUI app links with -force_load,
+    # so no object of the runtime or the registration shards is dropped for want of a reference.
+    add_library(WiiCompiled STATIC "${MKW_BASE_PRODUCT_SOURCE}" ${MKW_BASE_REGISTRATION_SOURCES})
+    set_target_properties(WiiCompiled PROPERTIES OUTPUT_NAME WiiCompiledGame)
 else()
     add_executable(WiiCompiled "${MKW_BASE_PRODUCT_SOURCE}" ${MKW_BASE_REGISTRATION_SOURCES})
 endif()
@@ -411,6 +467,9 @@ if(MKW_HAVE_RETRO_REWIND)
     if(MKW_PLATFORM_ANDROID)
         add_library(RetroRewind SHARED "${MKW_RETRO_REWIND_PRODUCT_SOURCE}" ${MKW_RETRO_REGISTRATION_SOURCES})
         set_target_properties(RetroRewind PROPERTIES OUTPUT_NAME main_retro_rewind)
+    elseif(MKW_PLATFORM_VISIONOS)
+        add_library(RetroRewind STATIC "${MKW_RETRO_REWIND_PRODUCT_SOURCE}" ${MKW_RETRO_REGISTRATION_SOURCES})
+        set_target_properties(RetroRewind PROPERTIES OUTPUT_NAME RetroRewindGame)
     else()
         add_executable(RetroRewind "${MKW_RETRO_REWIND_PRODUCT_SOURCE}" ${MKW_RETRO_REGISTRATION_SOURCES})
     endif()
@@ -448,6 +507,11 @@ elseif(MKW_PLATFORM_ANDROID)
     # the Snapdragon XR2 Gen 1 (Quest 2) core; Quest 3 / Pro are supersets.
     set(MKW_ANDROID_CPU "cortex-a77" CACHE STRING "AArch64 -mcpu target for the Android products")
     set(MKW_BASELINE_ARCH_FLAG -mcpu=${MKW_ANDROID_CPU})
+elseif(MKW_PLATFORM_VISIONOS)
+    # Cross-compiled too. Apple Vision Pro carries an M2 (2024) or later, and the simulator runs
+    # on an Apple Silicon Mac, so the M1 feature set is the floor for both.
+    set(MKW_VISIONOS_CPU "apple-m1" CACHE STRING "AArch64 -mcpu target for the visionOS products")
+    set(MKW_BASELINE_ARCH_FLAG -mcpu=${MKW_VISIONOS_CPU})
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
     set(MKW_BASELINE_ARCH_FLAG -mcpu=native)
 else()

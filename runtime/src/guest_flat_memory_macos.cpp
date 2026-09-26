@@ -1,15 +1,23 @@
 #include "guest_flat_memory.h"
 
 #include <mach/mach.h>
+#if defined(MKW_PLATFORM_VISIONOS)
+// The iOS family's SDK refuses <mach/mach_vm.h>; the vm_map.h entry points
+// <mach/mach.h> brings in are the same calls with vm_address_t (64-bit here).
+#include <mach/vm_map.h>
+#else
 #include <mach/mach_vm.h>
+#endif
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace GuestFlat {
@@ -31,11 +39,33 @@ bool Same(const std::vector<RegionRequest>& a, const std::vector<RegionRequest>&
     return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(),
         [](const auto& x, const auto& y) { return x.base == y.base && x.size == y.size && x.backing == y.backing; });
 }
+// The store every alias of a region maps: an unlinked temporary file. /tmp is the only writable
+// scratch directory on macOS that needs no lookup; the iOS family (visionOS) sandboxes it away
+// and names the app's own temporary directory in TMPDIR instead.
 int BackingFile(size_t size) {
-    char name[] = "/tmp/wiicompiled-guest-XXXXXX";
-    const int fd = mkstemp(name);
-    if (fd >= 0) { unlink(name); if (ftruncate(fd, static_cast<off_t>(size)) != 0) { close(fd); return -1; } }
+    std::string name;
+#if defined(MKW_PLATFORM_VISIONOS)
+    if (const char* tmp = std::getenv("TMPDIR"); tmp && *tmp) {
+        name = tmp;
+        if (name.back() != '/') name += '/';
+    }
+    if (name.empty()) name = "./";
+#else
+    name = "/tmp/";
+#endif
+    name += "wiicompiled-guest-XXXXXX";
+    const int fd = mkstemp(name.data());
+    if (fd >= 0) { unlink(name.c_str()); if (ftruncate(fd, static_cast<off_t>(size)) != 0) { close(fd); return -1; } }
     return fd;
+}
+
+const char* ReserveFailureMessage() {
+#if defined(MKW_PLATFORM_VISIONOS)
+    return "unable to reserve the fixed 4 GiB guest address space at 16 GiB; the visionOS app needs "
+           "the com.apple.developer.kernel.extended-virtual-addressing entitlement (see visionos/)";
+#else
+    return "unable to reserve fixed 4 GiB macOS guest address space";
+#endif
 }
 } // namespace
 
@@ -44,9 +74,15 @@ void Initialize(const std::vector<RegionRequest>& regions) {
     std::lock_guard lock(g_mutex);
     g_requiresCheckedAccess = static_cast<size_t>(getpagesize()) > kGuestPageSize;
     if (g_active) { if (!Same(g_layout, regions)) throw std::runtime_error("flat guest layout cannot be remapped"); return; }
+#if defined(MKW_PLATFORM_VISIONOS)
+    vm_address_t address = kFixedFlatGuestBase;
+    if (vm_allocate(mach_task_self(), &address, kGuestSpaceSize, VM_FLAGS_FIXED) != KERN_SUCCESS || address != kFixedFlatGuestBase)
+        throw std::runtime_error(ReserveFailureMessage());
+#else
     mach_vm_address_t address = kFixedFlatGuestBase;
     if (mach_vm_allocate(mach_task_self(), &address, kGuestSpaceSize, VM_FLAGS_FIXED) != KERN_SUCCESS || address != kFixedFlatGuestBase)
-        throw std::runtime_error("unable to reserve fixed 4 GiB macOS guest address space");
+        throw std::runtime_error(ReserveFailureMessage());
+#endif
     g_base = reinterpret_cast<uint8_t*>(address);
     struct Store { Backing kind; uint32_t owned; uint64_t size; int fd; };
     std::vector<Store> stores;

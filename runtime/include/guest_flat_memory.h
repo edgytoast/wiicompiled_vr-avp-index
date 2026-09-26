@@ -19,6 +19,14 @@ inline constexpr size_t kGuestPageSize = 0x1000;
 // 16 TiB: clear of the Windows ASan shadow (32 TiB) and of the usual image/heap
 // placement.
 inline constexpr uintptr_t kFixedFlatGuestBase = 0x0000'1000'0000'0000ull;
+#elif defined(__aarch64__) && defined(__APPLE__) && defined(MKW_PLATFORM_VISIONOS)
+// The iOS family's user address space is far smaller than macOS's: 64 GiB by default and, with
+// the com.apple.developer.kernel.extended-virtual-addressing entitlement the visionOS app
+// carries, a little over 1 TiB on Apple Silicon (visionos/WiiCompiledVision.entitlements). 16 GiB
+// is inside even the default range and clear of the image, the shared cache and the heap, which
+// the dyld places in the low tens of GiB; the entitlement keeps mach_vm_allocate from refusing
+// the aliases that follow. Same idea as the KartPad iOS fork, which reserves its guest at 16 GiB.
+inline constexpr uintptr_t kFixedFlatGuestBase = 0x0000'0004'0000'0000ull;
 #elif defined(__aarch64__) && defined(__APPLE__)
 // Keep this well above the low address ranges that Darwin's ASLR may use for
 // a PIE executable and its shared cache. Apple Silicon's user VA is wider

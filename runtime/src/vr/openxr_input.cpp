@@ -35,6 +35,8 @@
 #if defined(__ANDROID__)
 #include <sys/system_properties.h>
 #include <time.h>
+#elif defined(__APPLE__)
+#include <time.h>
 #endif
 
 namespace mkw::vr {
@@ -181,6 +183,8 @@ bool Injected(const char*) { return false; }
 
 #if defined(_WIN32)
 using ConvertNowToXrTime = XrResult(XRAPI_PTR*)(XrInstance, const LARGE_INTEGER*, XrTime*);
+#elif defined(__APPLE__)
+using ConvertNowToXrTime = XrResult(XRAPI_PTR*)(XrInstance, const struct timespec*, XrTime*);
 #endif
 #endif
 
@@ -447,7 +451,7 @@ void OpenXRInput::LoadInputClock() {
     if (enabled("XR_KHR_win32_convert_performance_counter_time")) {
         m_runtime->GetInstanceProcAddress("xrConvertWin32PerformanceCounterToTimeKHR", &function);
     }
-#elif defined(__ANDROID__)
+#elif defined(__ANDROID__) || defined(__APPLE__)
     if (enabled("XR_KHR_convert_timespec_time")) {
         m_runtime->GetInstanceProcAddress("xrConvertTimespecTimeToTimeKHR", &function);
     }
@@ -473,7 +477,7 @@ XrTime OpenXRInput::InputSampleTime(XrTime predicted_display_time) const {
                                                                                   &counter, &now))) {
         return predicted_display_time;
     }
-#elif defined(__ANDROID__)
+#elif defined(__ANDROID__) || defined(__APPLE__)
     timespec spec{};
     if (clock_gettime(CLOCK_MONOTONIC, &spec) != 0 ||
         XR_FAILED(reinterpret_cast<ConvertNowToXrTime>(m_convert_now_to_xr_time)(m_runtime->Instance(),

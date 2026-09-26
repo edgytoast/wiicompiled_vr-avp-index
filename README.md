@@ -214,6 +214,10 @@ translation, generating the manifest and build graph, and compiling, see [`trans
 
 For a step-by-step guide on compiling both WiiCompiled and Retro Rewind from source on macOS (Apple Silicon), see the [macOS Build Guide](docs/building-macos.md).
 
+The Meta Quest build is described in [`docs/quest-port.md`](docs/quest-port.md) and the Apple Vision Pro
+build (experimental, hands and a Bluetooth controller for input) in
+[`docs/visionos-port.md`](docs/visionos-port.md).
+
 ## FAQ
 
 **Is this an emulator?**

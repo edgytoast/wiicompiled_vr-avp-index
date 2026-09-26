@@ -147,8 +147,12 @@ bool g_vrHudVirtualScreen = RuntimeConfigFile::VrHudVirtualScreen(true);
 int g_vrRaceView = static_cast<int>(RuntimeConfigFile::GetVrRaceView());
 bool g_vrFlatScreen = g_vrRaceView == static_cast<int>(RuntimeConfigFile::VrRaceView::FlatScreen);
 constexpr std::array<const char*, 3> kVrRaceViewLabels{"Immersive", "Immersive window", "Flat screen"};
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(MKW_PLATFORM_VISIONOS)
+// Headsets that show the room: the Quest through XR_FB_passthrough, the Vision Pro through a
+// mixed-immersion space (the provider blends the layers over the surroundings).
 bool g_vrPassthrough = RuntimeConfigFile::VrPassthrough();
+#endif
+#if defined(__ANDROID__)
 // Menu labels for the foveation levels, index-matched to RuntimeConfigFile::kVrFoveationLevels and to
 // aurora_set_stereo_foveation.
 constexpr std::array<const char*, 4> kVrFoveationLabels{"Off", "Low", "Medium", "High"};
@@ -1511,7 +1515,7 @@ void DrawVrSettings() {
             "does pitch the view, and looking sideways while it is set will roll the "
             "horizon the way a real recline would.");
     }
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(MKW_PLATFORM_VISIONOS)
     if (ImGui::Checkbox("Passthrough around the menu screen", &g_vrPassthrough)) {
         mkw::vr::OpenXRSetPassthrough(g_vrPassthrough);
         RuntimeConfigFile::SetVrPassthrough(g_vrPassthrough);
@@ -1523,6 +1527,8 @@ void DrawVrSettings() {
             "fully virtual; the immersive window and the Flat Screen race have the room "
             "around them too. Applies immediately.");
     }
+#endif
+#if defined(__ANDROID__)
     // Shows the live level, which debug.wiicompiled.foveation can override.
     g_vrFoveation = static_cast<int>(aurora_get_stereo_foveation());
     if (ImGui::Combo("Foveated rendering", &g_vrFoveation, kVrFoveationLabels.data(),

@@ -10,6 +10,10 @@ build; see [Windows Vulkan](#windows-vulkan).
 
 This is an experimental renderer, not yet a release-ready VR mode.
 
+Two standalone headsets share this same pacing thread and presentation policy behind their own
+graphics bindings: the Meta Quest (Android Vulkan, `docs/quest-port.md`) and the Apple Vision Pro
+(Metal, through a private OpenXR provider over CompositorServices and ARKit, `docs/visionos-port.md`).
+
 ## Requirements
 
 - A Windows OpenXR runtime selected as the system's active runtime.

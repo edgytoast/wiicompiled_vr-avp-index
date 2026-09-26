@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The guest's 4 GiB flat address space is reserved at a fixed 16 GiB address
+	     (runtime/include/guest_flat_memory.h); the default iOS-family address space
+	     has room for it, this entitlement makes sure the reservation is honoured. -->
+	<key>com.apple.developer.kernel.extended-virtual-addressing</key>
+	<true/>
+	<!-- Guest RAM, the texture and pipeline caches and Dawn together pass the
+	     default per-app memory limit. -->
+	<key>com.apple.developer.kernel.increased-memory-limit</key>
+	<true/>
+</dict>
+</plist>
