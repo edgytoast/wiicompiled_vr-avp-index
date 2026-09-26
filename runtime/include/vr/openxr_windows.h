@@ -21,6 +21,9 @@ public:
     bool BindAurora(OpenXRRuntime& runtime) {
         return std::visit([&](auto& backend) -> bool { return backend->BindAurora(runtime); }, backend_);
     }
+    void SetRenderScale(float scale) {
+        std::visit([&](auto& backend) { backend->SetRenderScale(scale); }, backend_);
+    }
     OpenXRBeginStatus BeginFrame(const OpenXRPresentation& presentation, OpenXRBackendFrame& frame) {
         return std::visit([&](auto& backend) -> OpenXRBeginStatus { return backend->BeginFrame(presentation, frame); }, backend_);
     }

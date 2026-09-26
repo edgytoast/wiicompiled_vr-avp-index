@@ -474,6 +474,13 @@ public:
             ResetPreparedObjects();
             return false;
         }
+        {
+            const OpenXRViewConfiguration& left = runtime_->ViewConfiguration()[0];
+            std::lock_guard lock(eye_view_mutex_);
+            eye_view_ = left.properties;
+            eye_width_.store(left.render_width, std::memory_order_relaxed);
+            eye_height_.store(left.render_height, std::memory_order_relaxed);
+        }
         input_ = std::make_unique<OpenXRInput>(logger_);
         if (!input_->Create(*runtime_)) {
             RT_LOG(RT_TAG_RUNTIME) << "OpenXR controller input unavailable: " << input_->LastError()
@@ -563,6 +570,12 @@ public:
         rendered_fps_.store(0, std::memory_order_relaxed);
         interpolation_available_.store(false, std::memory_order_release);
         hand_tracking_available_.store(false, std::memory_order_release);
+        {
+            std::lock_guard lock(eye_view_mutex_);
+            eye_view_ = {XR_TYPE_VIEW_CONFIGURATION_VIEW};
+            eye_width_.store(0, std::memory_order_relaxed);
+            eye_height_.store(0, std::memory_order_relaxed);
+        }
         ResetTrackingOrigin();
         applied_session_run_serial_ = 0;
         session_was_active_ = false;
@@ -605,6 +618,23 @@ public:
             std::memory_order_relaxed);
     }
 
+    void SetRenderScale(float scale) noexcept {
+        render_scale_.store(ClampRenderScale(scale), std::memory_order_relaxed);
+    }
+
+    OpenXREyeResolution EyeResolution(float scale) const noexcept {
+        OpenXREyeResolution resolution{};
+        std::lock_guard lock(eye_view_mutex_);
+        resolution.width = eye_width_.load(std::memory_order_relaxed);
+        resolution.height = eye_height_.load(std::memory_order_relaxed);
+        if (resolution.width != 0) {
+            const OpenXREyeSize scaled = OpenXRScaledEyeSize(eye_view_, ClampRenderScale(scale));
+            resolution.scaled_width = scaled.width;
+            resolution.scaled_height = scaled.height;
+        }
+        return resolution;
+    }
+
     void ServiceProducerFrameBoundary() noexcept {
         if (teardown_requested_.load(std::memory_order_acquire)) {
             Shutdown();
@@ -630,6 +660,17 @@ private:
     // Skipped eye copies tolerated back to back before the session is given up: a few seconds
     // at the headset's refresh rate.
     static constexpr uint32_t kMaxConsecutiveSkips = 300;
+
+    static float ClampRenderScale(float scale) noexcept {
+        return std::clamp(scale, RuntimeConfigFile::kVrRenderScaleMin, RuntimeConfigFile::kVrRenderScaleMax);
+    }
+
+    // The size the eyes are rendered at now, for the settings: the pair being written, before the
+    // immersive window may aim its eyes through the window.
+    void NoteEyeSize(const OpenXRBackendFrame& frame) noexcept {
+        eye_width_.store(frame.render_width[0], std::memory_order_relaxed);
+        eye_height_.store(frame.render_height[0], std::memory_order_relaxed);
+    }
 
     bool BackendMatchesConfiguredGraphicsApi(const AuroraConfig& aurora_config) {
 #if defined(_WIN32)
@@ -927,6 +968,8 @@ private:
                 RT_LOG(RT_TAG_RUNTIME) << "OpenXR " << kGraphicsBackendName << " pacing: "
                     << (render_first ? "render-first" : "frame-first (VR interpolation)") << std::endl;
             }
+            // A new scale rebuilds the eyes as the backend next prepares them.
+            backend_->SetRenderScale(render_scale_.load(std::memory_order_relaxed));
             if (render_first) {
                 if (!RenderFirstCycle(presentation, policy, immersive, consecutive_skips,
                                       immersive_submission_logged)) {
@@ -949,6 +992,7 @@ private:
                 fatal = true;
                 break;
             }
+            NoteEyeSize(frame);
 
             UpdateFrameTiming(frame.xr_frame);
             if (diagnostics::Enabled()) {
@@ -1140,6 +1184,7 @@ private:
             SetError(backend_->LastError());
             return false;
         }
+        NoteEyeSize(packet);
         // The head pose this packet was located with places the screens and aims the pointer.
         ServiceRecenterRequest();
         UpdateVirtualScreenPose(packet);
@@ -1917,6 +1962,13 @@ private:
     std::atomic_bool teardown_requested_{false};
     std::atomic_bool recenter_requested_{false};
     std::atomic<float> lean_back_degrees_{RuntimeConfigFile::VrLeanBackDegrees()};
+    std::atomic<float> render_scale_{RuntimeConfigFile::VrRenderScale()};
+    // The left eye for OpenXRGetEyeResolution: the runtime's description of it, set while a
+    // session runs, and the size it is rendered at now (0 without a session).
+    mutable std::mutex eye_view_mutex_;
+    XrViewConfigurationView eye_view_{XR_TYPE_VIEW_CONFIGURATION_VIEW};
+    std::atomic_uint32_t eye_width_{0};
+    std::atomic_uint32_t eye_height_{0};
     std::atomic_bool passthrough_{RuntimeConfigFile::VrPassthrough()};
     std::atomic_bool immersive_window_{RuntimeConfigFile::VrImmersiveWindow()};
     std::atomic_uint32_t frame_interpolation_fps_{RuntimeConfigFile::VrFrameInterpolationFps()};
@@ -2046,6 +2098,23 @@ void OpenXRSetImmersiveWindow(bool enabled) noexcept {
     OpenXRIntegration::Get().SetImmersiveWindow(enabled);
 #else
     (void)enabled;
+#endif
+}
+
+void OpenXRSetRenderScale(float scale) noexcept {
+#if MKW_OPENXR_GRAPHICS_BACKEND
+    OpenXRIntegration::Get().SetRenderScale(scale);
+#else
+    (void)scale;
+#endif
+}
+
+OpenXREyeResolution OpenXRGetEyeResolution(float scale) noexcept {
+#if MKW_OPENXR_GRAPHICS_BACKEND
+    return OpenXRIntegration::Get().EyeResolution(scale);
+#else
+    (void)scale;
+    return {};
 #endif
 }
 

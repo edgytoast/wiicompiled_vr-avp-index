@@ -17,6 +17,7 @@
 #define aurora_d3d12_set_stereo_targets aurora_vulkan_win32_set_targets
 #define aurora_d3d12_set_stereo_targets_with_panel aurora_vulkan_win32_set_targets_with_panel
 #define aurora_d3d12_cancel_stereo_targets aurora_vulkan_win32_cancel
+#define aurora_d3d12_forget_stereo_targets aurora_vulkan_win32_forget_targets
 #define aurora_d3d12_disable_stereo_bridge aurora_vulkan_win32_disable
 #else
 #define CINTERFACE
@@ -32,6 +33,7 @@
 
 #include "vr/openxr_wii_remote.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -51,6 +53,8 @@ void RequireAt(bool condition, int line, const char* expression) {
 struct Image { uint64_t content = 0; };
 struct Swapchain {
     Image image;
+    uint32_t width = 0;
+    uint32_t height = 0;
     bool acquired = false;
     bool waited = false;
     bool released = false;
@@ -74,6 +78,11 @@ uint64_t displayed_content = 0;
 uint32_t layer_count = 0;
 uint32_t releases = 0;
 uint32_t live_swapchains = 0;
+uint32_t create_attempts = 0;
+int creates_before_failure = -1; // xrCreateSwapchain fails once this reaches 0; -1 never
+bool bridge_enabled = false;
+std::vector<void*> forgotten; // images the backend had Aurora forget
+int32_t shown_width = 0;      // the scene layer's image width
 XrTime display_time = 0;
 XrStructureType layer_type = XR_TYPE_UNKNOWN;
 XrPosef quad_pose{};
@@ -160,6 +169,7 @@ bool aurora_d3d12_get_native_handles(AuroraD3D12NativeHandles* handles) {
 bool aurora_d3d12_enable_stereo_bridge(AuroraD3D12StereoSubmittedCallback cb, void* data) {
     callback = cb;
     callback_data = data;
+    bridge_enabled = true;
     return true;
 }
 bool aurora_d3d12_set_stereo_targets_with_panel(uint64_t token, const AuroraD3D12StereoTarget* data,
@@ -180,14 +190,26 @@ bool aurora_d3d12_cancel_stereo_targets(uint64_t token) {
     pending_token = 0;
     return true;
 }
+bool aurora_d3d12_forget_stereo_targets(void* const* resources, uint32_t count) {
+    Require(pending_token == 0); // Never while Aurora may be writing a target.
+    forgotten.insert(forgotten.end(), resources, resources + count);
+    return true;
+}
 bool aurora_d3d12_disable_stereo_bridge() {
     pending_token = 0;
     encoded = false;
+    bridge_enabled = false;
     return true; // Simulate a successful queue drain.
 }
 
-XrResult XRAPI_CALL xrCreateSwapchain(XrSession, const XrSwapchainCreateInfo*, XrSwapchain* out) {
-    *out = reinterpret_cast<XrSwapchain>(new Swapchain);
+XrResult XRAPI_CALL xrCreateSwapchain(XrSession, const XrSwapchainCreateInfo* info, XrSwapchain* out) {
+    ++create_attempts;
+    if (creates_before_failure == 0) return XR_ERROR_OUT_OF_MEMORY;
+    if (creates_before_failure > 0) --creates_before_failure;
+    auto* chain = new Swapchain;
+    chain->width = info->width;
+    chain->height = info->height;
+    *out = reinterpret_cast<XrSwapchain>(chain);
     ++live_swapchains;
     return XR_SUCCESS;
 }
@@ -236,6 +258,10 @@ XrResult XRAPI_CALL xrReleaseSwapchainImage(XrSwapchain handle,
 XrResult XRAPI_CALL xrDestroySwapchain(XrSwapchain handle) {
     auto* chain = reinterpret_cast<Swapchain*>(handle);
     Require(!chain->acquired);
+    // An image Aurora has written goes only once Aurora forgot it, or with the whole bridge.
+    if (bridge_enabled && chain->released) {
+        Require(std::find(forgotten.begin(), forgotten.end(), static_cast<void*>(&chain->image)) != forgotten.end());
+    }
     delete chain;
     --live_swapchains;
     return XR_SUCCESS;
@@ -250,6 +276,10 @@ OpenXRRuntime::OpenXRRuntime(OpenXRLogCallback) {
     m_swapchain_formats = {DXGI_FORMAT_R8G8B8A8_UNORM_SRGB};
 #endif
     for (auto& view : m_view_configuration) {
+        view.properties.recommendedImageRectWidth = 100;
+        view.properties.recommendedImageRectHeight = 80;
+        view.properties.maxImageRectWidth = 400;
+        view.properties.maxImageRectHeight = 320;
         view.render_width = 100;
         view.render_height = 80;
     }
@@ -325,11 +355,16 @@ bool OpenXRRuntime::EndFrame(const OpenXRFrame& frame,
         const auto check_image = [](const XrSwapchainSubImage& subimage) {
             const auto& chain = *reinterpret_cast<Swapchain*>(subimage.swapchain);
             Require(chain.released && !chain.acquired && chain.image.content != 0);
+            // The layer shows its own image's size, whichever size the other pair has.
+            Require(subimage.imageRect.offset.x == 0 && subimage.imageRect.offset.y == 0);
+            Require(subimage.imageRect.extent.width == static_cast<int32_t>(chain.width));
+            Require(subimage.imageRect.extent.height == static_cast<int32_t>(chain.height));
             return chain.image.content;
         };
         if (layer_type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
             auto& projection = *reinterpret_cast<const XrCompositionLayerProjection*>(layers[0]);
             Require(projection.viewCount == 2);
+            shown_width = projection.views[0].subImage.imageRect.extent.width;
             for (const auto& view : {projection.views[0], projection.views[1]}) {
                 displayed_content = check_image(view.subImage);
                 // Detect a new image paired with an old pose, or a repeated image
@@ -341,6 +376,7 @@ bool OpenXRRuntime::EndFrame(const OpenXRFrame& frame,
             Require(layer_type == XR_TYPE_COMPOSITION_LAYER_QUAD);
             const auto& quad = *reinterpret_cast<const XrCompositionLayerQuad*>(layers[0]);
             displayed_content = check_image(quad.subImage);
+            shown_width = quad.subImage.imageRect.extent.width;
             quad_pose = quad.pose;
         }
         if (count == 2) {
@@ -584,6 +620,111 @@ void TestPanelLayer() {
     display_time = 0;
 }
 
+// A new render scale rebuilds each swapchain pair the next time it is the one Aurora writes: the
+// pair on display is never touched, Aurora forgets the old images before they go (checked by
+// xrDestroySwapchain), and a size the runtime refuses keeps the eyes as they were.
+void TestRenderScale() {
+    display_time = 0;
+    forgotten.clear();
+    OpenXRRuntime runtime;
+    OpenXRD3D12Backend backend;
+    Require(backend.QueryGraphicsRequirements(runtime) && backend.BindAurora(runtime));
+    OpenXRPresentation presentation;
+    OpenXRBackendFrame frame;
+    const auto begin = [&](uint32_t width, uint32_t height) {
+        Require(backend.BeginFrame(presentation, frame) == OpenXRBeginStatus::Ready);
+        Require(frame.render_width[0] == width && frame.render_height[1] == height && targets.size() == 2);
+        for (const auto& target : targets) Require(target.width == width && target.height == height);
+        Require(live_swapchains == 4);
+    };
+    const auto finish = [&] {
+        Complete();
+        Require(backend.WaitForSubmission(frame, 0) == OpenXRSubmissionStatus::Success);
+        Require(backend.FinishFrame(frame, true));
+        Require(layer_count == 1 && displayed_content == frame.xr_frame.serial);
+    };
+
+    backend.SetRenderScale(1.0f); // The session's own scale rebuilds nothing.
+    begin(100, 80);
+    finish();
+    Require(forgotten.empty() && shown_width == 100);
+
+    backend.SetRenderScale(1.5f);
+    begin(150, 120); // The pair written next, while the one on display still shows the last frame.
+    Require(forgotten.size() == 2);
+    Require(backend.RepeatFrame(frame) && layer_count == 1 && shown_width == 100);
+    finish();
+    Require(shown_width == 150);
+    begin(150, 120); // Then the other pair, once it is the one written.
+    Require(forgotten.size() == 4);
+    finish();
+    begin(150, 120); // Both are the new size: nothing more is rebuilt.
+    finish();
+    Require(forgotten.size() == 4);
+
+    backend.SetRenderScale(5.0f); // Clamped to the runtime's maximum.
+    begin(400, 320);
+    finish();
+    begin(400, 320);
+    finish();
+    backend.SetRenderScale(1.5f);
+    begin(150, 120);
+    finish();
+    begin(150, 120);
+    finish();
+    const size_t forgotten_before_refusal = forgotten.size();
+
+    // A size the runtime cannot make keeps the eyes, and is not retried while it is still asked for.
+    creates_before_failure = 1; // One eye's swapchain is made, then the other's is refused.
+    const uint32_t attempts = create_attempts;
+    backend.SetRenderScale(3.0f);
+    begin(150, 120);
+    finish();
+    backend.SetRenderScale(3.0f);
+    begin(150, 120);
+    finish();
+    Require(create_attempts == attempts + 2 && forgotten.size() == forgotten_before_refusal);
+    creates_before_failure = -1;
+    backend.SetRenderScale(0.5f); // A new size is tried again.
+    begin(50, 40);
+    finish();
+    begin(50, 40);
+    finish();
+
+    // Refused for the second pair only: the first follows it back to the size it kept.
+    creates_before_failure = 2;
+    backend.SetRenderScale(2.0f);
+    begin(200, 160);
+    finish();
+    Require(shown_width == 200);
+    begin(50, 40);
+    finish();
+    Require(shown_width == 50);
+    creates_before_failure = -1;
+    begin(50, 40);
+    finish();
+    const size_t forgotten_settled = forgotten.size();
+    begin(50, 40);
+    finish();
+    Require(forgotten.size() == forgotten_settled);
+
+    // Render-first pacing rebuilds the pair its packet will be rendered into.
+    expect_render_first = true;
+    backend.SetRenderScale(1.0f);
+    OpenXRBackendFrame packet;
+    Require(backend.PreparePacket(presentation, packet) == OpenXRBeginStatus::Ready);
+    Require(packet.render_width[0] == 100 && targets.size() == 2 && targets[0].width == 100);
+    Complete();
+    Require(backend.WaitForSubmission(packet, 0) == OpenXRSubmissionStatus::Success);
+    Require(backend.BeginFrameForPacket(packet, frame) == OpenXRBeginStatus::Ready);
+    Require(backend.CopyRenderedEyes(frame) == OpenXRSubmissionStatus::Success);
+    Require(backend.FinishFrame(frame, true));
+    Require(layer_count == 1 && shown_width == 100);
+    expect_render_first = false;
+    Require(backend.Shutdown() && live_swapchains == 0);
+    display_time = 0;
+}
+
 bool SameRect(const XrRect2Di& rect, int32_t x, int32_t y, int32_t width, int32_t height) {
     return rect.offset.x == x && rect.offset.y == y && rect.extent.width == width && rect.extent.height == height;
 }
@@ -610,6 +751,7 @@ void TestVirtualScreenContentRect() {
 int main() {
     TestRenderFirst();
     TestPanelLayer();
+    TestRenderScale();
     TestVirtualScreenContentRect();
     OpenXRRuntime runtime;
     OpenXRD3D12Backend backend;

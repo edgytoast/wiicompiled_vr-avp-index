@@ -51,6 +51,9 @@ public:
     bool QueryGraphicsRequirements(OpenXRRuntime& runtime);
     bool BindAurora(OpenXRRuntime& runtime);
 
+    // As OpenXRD3D12Backend::SetRenderScale.
+    void SetRenderScale(float scale);
+
     OpenXRWindowsVulkanBeginStatus BeginFrame(const OpenXRWindowsVulkanPresentation& presentation,
                                       OpenXRWindowsVulkanFrame& frame);
 

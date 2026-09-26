@@ -195,6 +195,11 @@ public:
         }
         owns_session_ = true;
         aurora_format_ = static_cast<DXGI_FORMAT>(handles.colorDxgiFormat);
+        for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+            const auto& view = runtime.ViewConfiguration()[eye];
+            eye_size_[eye] = {view.render_width, view.render_height};
+        }
+        requested_eye_size_ = eye_size_;
 
         if (!SelectSwapchainFormat() || !CreateSwapchains()) {
             DestroySwapchains();
@@ -226,6 +231,21 @@ public:
         return true;
     }
 
+    void SetRenderScale(float scale) {
+        if (runtime_ == nullptr) {
+            return;
+        }
+        std::array<OpenXREyeSize, kOpenXREyeCount> requested{};
+        for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+            requested[eye] = OpenXRScaledEyeSize(runtime_->ViewConfiguration()[eye].properties, scale);
+        }
+        // Only a change: a refused size stays refused while it is still the one asked for.
+        if (requested != requested_eye_size_) {
+            requested_eye_size_ = requested;
+            eye_size_ = requested;
+        }
+    }
+
     OpenXRD3D12BeginStatus BeginFrame(const OpenXRD3D12Presentation& presentation,
                                       OpenXRD3D12Frame& frame) {
         frame = {};
@@ -236,6 +256,9 @@ public:
         }
         if (frame_active_ || pending_packet_serial_ != 0) {
             Fail("BeginFrame called while another OpenXR frame is active");
+            return OpenXRD3D12BeginStatus::Error;
+        }
+        if (!ResizeWritablePair()) {
             return OpenXRD3D12BeginStatus::Error;
         }
 
@@ -372,6 +395,7 @@ public:
             const auto status = KeepAliveCycle();
             if (status != OpenXRBeginStatus::Ready) return status;
         }
+        if (!ResizeWritablePair()) return OpenXRBeginStatus::Error;
         packet.xr_frame.serial = next_packet_serial_++;
         packet.xr_frame.predicted_display_time = last_display_time_ + 2 * last_display_period_;
         packet.xr_frame.predicted_display_period = last_display_period_;
@@ -814,12 +838,58 @@ private:
 
     bool CreateSwapchainPair(std::array<EyeSwapchain, kOpenXREyeCount>& pair) {
         for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
-            const auto& view = runtime_->ViewConfiguration()[eye];
-            if (!CreateSwapchain(pair[eye], view.render_width, view.render_height,
+            if (!CreateSwapchain(pair[eye], eye_size_[eye].width, eye_size_[eye].height,
                                  eye == 0 ? "left eye" : "right eye")) {
                 return false;
             }
         }
+        return true;
+    }
+
+    // Rebuilds the pair Aurora writes next at eye_size_ when it is another size. Only that pair,
+    // with none of its images acquired, never the one on display. The new swapchains are made
+    // before the old ones go, so a size the runtime cannot allocate leaves the pair as it was.
+    // False only on a failure that ends the session.
+    bool ResizeWritablePair() {
+        std::array<OpenXREyeSize, kOpenXREyeCount> current{};
+        for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+            if (eye_swapchains_[eye].acquired) {
+                return true;
+            }
+            current[eye] = {eye_swapchains_[eye].width, eye_swapchains_[eye].height};
+        }
+        if (current == eye_size_) {
+            return true;
+        }
+        std::array<EyeSwapchain, kOpenXREyeCount> replacement{};
+        if (!CreateSwapchainPair(replacement)) {
+            DestroySwapchainPair(replacement);
+            std::ostringstream message;
+            message << "OpenXR D3D12 eyes stay " << current[0].width << 'x' << current[0].height
+                    << ": the runtime could not make " << eye_size_[0].width << 'x' << eye_size_[0].height
+                    << " swapchains (" << last_error_ << ')';
+            Log(OpenXRLogLevel::Warning, message.str());
+            ClearError();
+            // Back to this pair's size, which also returns the other pair to it if it was rebuilt.
+            eye_size_ = current;
+            return true;
+        }
+        std::vector<void*> retired;
+        for (const EyeSwapchain& swapchain : eye_swapchains_) {
+            for (const auto& image : swapchain.images) {
+                retired.push_back(image.texture);
+            }
+        }
+        if (!aurora_d3d12_forget_stereo_targets(retired.data(), static_cast<uint32_t>(retired.size()))) {
+            DestroySwapchainPair(replacement);
+            return Fail("Aurora could not retire its copies into the old D3D12 eye swapchains");
+        }
+        DestroySwapchainPair(eye_swapchains_);
+        eye_swapchains_ = std::move(replacement);
+        std::ostringstream message;
+        message << "OpenXR D3D12 eyes resized: " << eye_size_[0].width << 'x' << eye_size_[0].height << " / "
+                << eye_size_[1].width << 'x' << eye_size_[1].height;
+        Log(OpenXRLogLevel::Info, message.str());
         return true;
     }
 
@@ -1063,6 +1133,10 @@ private:
     OpenXRD3D12GraphicsRequirements requirements_{};
     std::array<EyeSwapchain, kOpenXREyeCount> eye_swapchains_{};
     std::array<EyeSwapchain, kOpenXREyeCount> retained_swapchains_{};
+    // The size a rebuilt eye pair gets, and the one the render scale last asked
+    // for, which differ while a size the runtime refused is being kept.
+    std::array<OpenXREyeSize, kOpenXREyeCount> eye_size_{};
+    std::array<OpenXREyeSize, kOpenXREyeCount> requested_eye_size_{};
     // The settings panel's layer: written like the eyes into panel_swapchain_,
     // shown from retained_panel_swapchain_ (see FinishFrame).
     EyeSwapchain panel_swapchain_{};
@@ -1118,6 +1192,8 @@ bool OpenXRD3D12Backend::QueryGraphicsRequirements(OpenXRRuntime& runtime) {
 bool OpenXRD3D12Backend::BindAurora(OpenXRRuntime& runtime) {
     return m_impl->BindAurora(runtime);
 }
+
+void OpenXRD3D12Backend::SetRenderScale(float scale) { m_impl->SetRenderScale(scale); }
 
 OpenXRD3D12BeginStatus OpenXRD3D12Backend::BeginFrame(
     const OpenXRD3D12Presentation& presentation, OpenXRD3D12Frame& frame) {

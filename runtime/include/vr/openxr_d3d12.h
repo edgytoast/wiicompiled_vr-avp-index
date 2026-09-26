@@ -54,6 +54,14 @@ public:
     bool QueryGraphicsRequirements(OpenXRRuntime& runtime);
     bool BindAurora(OpenXRRuntime& runtime);
 
+    // The eyes' resolution, as a scale of the size the runtime recommends (the
+    // session starts at OpenXRConfig::resolution_scale). A new one applies from
+    // the next BeginFrame or PreparePacket: each swapchain pair is rebuilt at it
+    // the next time it is the pair Aurora writes, so the pair on display is
+    // never touched. A size the runtime cannot allocate keeps the one before,
+    // until the scale changes again.
+    void SetRenderScale(float scale);
+
     OpenXRD3D12BeginStatus BeginFrame(const OpenXRD3D12Presentation& presentation,
                                       OpenXRD3D12Frame& frame);
 

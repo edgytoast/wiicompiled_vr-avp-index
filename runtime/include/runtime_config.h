@@ -195,6 +195,10 @@ inline constexpr float kVrRenderScaleDefault = 0.8f;
 inline constexpr float kVrRenderScaleDefault = 1.0f;
 #define MKW_VR_RENDER_SCALE_DEFAULT_TEXT "1.0"
 #endif
+// The range the file accepts and the F10 bar's slider offers; the Quest
+// launcher's settings page (SettingsPage.kt) repeats it.
+inline constexpr float kVrRenderScaleMin = 0.25f;
+inline constexpr float kVrRenderScaleMax = 2.0f;
 
 // First-person camera defaults and the range its head offsets accept, in one
 // place: the config getters, the on-disk template and the F10 bar's reset all
@@ -773,7 +777,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     config.vrEnabled = FindConfigValue<bool>(document, "vr", "enabled");
     config.vrRequired = FindConfigValue<bool>(document, "vr", "required");
     if (auto value = FindConfigFloat(document, "vr", "render_scale");
-        value && *value >= 0.25f && *value <= 2.0f) {
+        value && *value >= kVrRenderScaleMin && *value <= kVrRenderScaleMax) {
         config.vrRenderScale = *value;
     }
     if (auto value = FindConfigFloat(document, "vr", "world_units_per_meter");
@@ -1180,6 +1184,14 @@ inline bool SetVrRecenterKey(std::string value) {
     return WriteSetting("vr", "recenter_key", FormatString(value));
 }
 
+inline bool SetVrRenderScale(float value) {
+    value = std::clamp(value, kVrRenderScaleMin, kVrRenderScaleMax);
+    Mutable().vrRenderScale = value;
+    std::ostringstream formatted;
+    formatted << value;
+    return WriteSetting("vr", "render_scale", formatted.str());
+}
+
 inline bool SetVrLeanBackDegrees(float value) {
     value = std::clamp(value, -kVrLeanBackDegreesLimit, kVrLeanBackDegreesLimit);
     Mutable().vrLeanBackDegrees = value;
@@ -1578,7 +1590,7 @@ inline bool VrRequired(bool fallback = false) {
 }
 
 inline float VrRenderScale(float fallback = kVrRenderScaleDefault) {
-    return std::clamp(Get().vrRenderScale.value_or(fallback), 0.25f, 2.0f);
+    return std::clamp(Get().vrRenderScale.value_or(fallback), kVrRenderScaleMin, kVrRenderScaleMax);
 }
 
 inline float VrWorldUnitsPerMeter(float fallback = 500.0f) {

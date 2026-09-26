@@ -135,8 +135,26 @@ The old Eager Frame Heartbeat option has been removed and existing `eager_frame_
 settings are ignored. Completed rendering wakes the XR thread immediately. A 50 ms keep-alive
 still protects pauses and window dragging without eager repeats during rendering.
 
-`render_scale` scales the per-eye size recommended by the OpenXR runtime. It defaults to 1.0 on PC
-and 0.8 on the Quest, whose mobile GPU needs the headroom.
+`render_scale` scales the per-eye size recommended by the OpenXR runtime (0.25 to 2, never above the
+runtime's maximum). It defaults to 1.0 on PC and 0.8 on the Quest, whose mobile GPU needs the
+headroom. It is live: **F10 → VR → Render resolution** (also on the headset panel's VR tab) sets it
+in percent, applies it when the slider is let go, and saves it. Below the slider, *Each eye* gives
+the left eye's size now and, while they differ, the size the slider's value gives.
+
+A new scale never interrupts the picture. Each backend keeps two swapchain pairs, one on display and
+one Aurora writes next, and rebuilds only the second, at the start of the frame that writes it; the
+other follows a frame later, once it is the one written. The new
+swapchains are created before the old ones go, and Aurora first forgets the old images: the D3D12
+bridge waits for any copy still writing them, the Windows Vulkan bridge drains Dawn's queue and drops
+its wraps of the old `VkImage`s (the runtime may hand the same handles to the new swapchains), and
+the Quest also replaces its shared eye buffers, whose Dawn imports are released
+(`aurora_vulkan_forget_stereo_buffers`). Those buffers are kept as large as both pairs, growing with
+the first pair rebuilt larger and shrinking once the second has followed it down, and each copy moves
+only what fits the image it writes. If the runtime cannot allocate a size, the log says so, the eyes
+keep the size they had (a pair already rebuilt goes back to it), and that size is not tried again
+until the scale changes; the saved value is still what the next launch asks for.
+`mkw_openxr_replay_tests` and `mkw_openxr_vulkan_replay_tests` cover the rebuild, the display pair
+left alone, the images forgotten before their swapchains are destroyed, and both kinds of refusal.
 `world_units_per_meter` controls the scale of headset translation in the game world.
 `hud_distance_meters` and `hud_width_meters` place and size the virtual screen. They are read at
 launch and govern both the menu screen and the in-race 2D screen, so 2D content keeps its place

@@ -181,6 +181,9 @@ public:
         // The settings panel's layer image follows the eyes.
         bool panel = false;
         std::array<VkImage, kMaxCopies> swapchain_images{};
+        // Each image's size. A shared buffer can be larger than the image while
+        // the render resolution is changing, and a copy moves only what fits.
+        std::array<VkExtent2D, kMaxCopies> swapchain_extents{};
 
         uint32_t Count() const noexcept { return target_count + (panel ? 1u : 0u); }
     };
@@ -291,6 +294,11 @@ public:
             return Fail("OpenXR rejected the Vulkan device binding");
         }
         owns_session_ = true;
+        for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+            const auto& view = runtime.ViewConfiguration()[eye];
+            eye_size_[eye] = {view.render_width, view.render_height};
+        }
+        requested_eye_size_ = eye_size_;
 
         if (!SelectSwapchainFormat() || !CreateSwapchains() || !AllocateSlots()) {
             DestroySwapchains();
@@ -329,6 +337,21 @@ public:
         return true;
     }
 
+    void SetRenderScale(float scale) {
+        if (runtime_ == nullptr) {
+            return;
+        }
+        std::array<OpenXREyeSize, kOpenXREyeCount> requested{};
+        for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+            requested[eye] = OpenXRScaledEyeSize(runtime_->ViewConfiguration()[eye].properties, scale);
+        }
+        // Only a change: a refused size stays refused while it is still the one asked for.
+        if (requested != requested_eye_size_) {
+            requested_eye_size_ = requested;
+            eye_size_ = requested;
+        }
+    }
+
     OpenXRBeginStatus BeginFrame(const OpenXRPresentation& presentation, OpenXRBackendFrame& frame) {
         frame = {};
         frame.presentation = presentation;
@@ -338,6 +361,9 @@ public:
         }
         if (frame_active_) {
             Fail("BeginFrame called while another OpenXR frame is active");
+            return OpenXRBeginStatus::Error;
+        }
+        if (!ResizeWritablePair()) {
             return OpenXRBeginStatus::Error;
         }
 
@@ -423,14 +449,7 @@ public:
                 panel_target = SlotTargetLocked(panel_slots_[slot]);
             }
             pending_copy_ = {frame.xr_frame.serial, slot, target_count, panel, {}};
-            for (uint32_t eye = 0; eye < target_count; ++eye) {
-                pending_copy_.swapchain_images[eye] =
-                    eye_swapchains_[eye].images[eye_swapchains_[eye].acquired_index].image;
-            }
-            if (panel) {
-                pending_copy_.swapchain_images[target_count] =
-                    panel_swapchain_.images[panel_swapchain_.acquired_index].image;
-            }
+            RecordCopyImagesLocked(target_count, panel);
         }
         {
             std::lock_guard lock(submission_mutex_);
@@ -542,6 +561,9 @@ public:
             if (primed != OpenXRBeginStatus::Ready) {
                 return primed;
             }
+        }
+        if (!ResizeWritablePair()) {
+            return OpenXRBeginStatus::Error;
         }
         packet.xr_frame.serial = next_packet_serial_++;
         // The eyes are ready after at most one game frame plus the encode and show at the first
@@ -774,14 +796,7 @@ public:
         diagnostics::OnSwapchainAcquire(acquire_timer);
         {
             std::lock_guard lock(vk_mutex_);
-            for (uint32_t eye = 0; eye < target_count; ++eye) {
-                pending_copy_.swapchain_images[eye] =
-                    eye_swapchains_[eye].images[eye_swapchains_[eye].acquired_index].image;
-            }
-            if (panel) {
-                pending_copy_.swapchain_images[target_count] =
-                    panel_swapchain_.images[panel_swapchain_.acquired_index].image;
-            }
+            RecordCopyImagesLocked(target_count, panel);
         }
         return OpenXRBeginStatus::Ready;
     }
@@ -1568,6 +1583,20 @@ private:
         self->submission_cv_.notify_all();
     }
 
+    // The acquired compositor images the pending copy writes: the eyes', then the panel's.
+    void RecordCopyImagesLocked(uint32_t target_count, bool panel) noexcept {
+        const auto record = [this](uint32_t n, const EyeSwapchain& swapchain) {
+            pending_copy_.swapchain_images[n] = swapchain.images[swapchain.acquired_index].image;
+            pending_copy_.swapchain_extents[n] = {swapchain.width, swapchain.height};
+        };
+        for (uint32_t eye = 0; eye < target_count; ++eye) {
+            record(eye, eye_swapchains_[eye]);
+        }
+        if (panel) {
+            record(target_count, panel_swapchain_);
+        }
+    }
+
     // The slot image `n` of a copy reads: an eye's, or after the eyes the panel's.
     EyeSlot& CopySlotLocked(const PendingCopy& copy, uint32_t n) noexcept {
         return n < copy.target_count ? slots_[n][copy.slot] : panel_slots_[copy.slot];
@@ -1670,7 +1699,8 @@ private:
             VkImageCopy region{};
             region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
             region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            region.extent = {slot.width, slot.height, 1};
+            region.extent = {std::min(slot.width, copy.swapchain_extents[n].width),
+                             std::min(slot.height, copy.swapchain_extents[n].height), 1};
             vkCmdCopyImage(cmd, slot.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, copy.swapchain_images[n],
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
@@ -1804,12 +1834,126 @@ private:
 
     bool CreateSwapchainPair(std::array<EyeSwapchain, kOpenXREyeCount>& pair) {
         for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
-            const auto& view = runtime_->ViewConfiguration()[eye];
-            if (!CreateSwapchain(pair[eye], view.render_width, view.render_height,
+            if (!CreateSwapchain(pair[eye], eye_size_[eye].width, eye_size_[eye].height,
                                  eye == 0 ? "left eye" : "right eye")) {
                 return false;
             }
         }
+        return true;
+    }
+
+    // As the D3D12 backend's, with the shared eye buffers, which hold whichever pair is written
+    // and so are kept as large as both pairs: they grow with the first pair rebuilt larger and
+    // shrink once the second has followed it down (each copy moves only what fits the image it
+    // writes). Everything new is allocated before anything old goes, so a size that cannot be had
+    // leaves the eyes as they were.
+    bool ResizeWritablePair() {
+        std::array<OpenXREyeSize, kOpenXREyeCount> current{};
+        for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+            if (eye_swapchains_[eye].acquired) {
+                return true;
+            }
+            current[eye] = {eye_swapchains_[eye].width, eye_swapchains_[eye].height};
+        }
+        if (current == eye_size_) {
+            return true;
+        }
+        const auto keep_current = [&](const char* what) {
+            std::ostringstream message;
+            message << "OpenXR Vulkan eyes stay " << current[0].width << 'x' << current[0].height
+                    << ": could not make " << eye_size_[0].width << 'x' << eye_size_[0].height << ' ' << what
+                    << " (" << last_error_ << ')';
+            Log(OpenXRLogLevel::Warning, message.str());
+            ClearError();
+            // Back to this pair's size, which also returns the other pair to it if it was rebuilt.
+            eye_size_ = current;
+        };
+        std::array<EyeSwapchain, kOpenXREyeCount> replacement{};
+        if (!CreateSwapchainPair(replacement)) {
+            DestroySwapchainPair(replacement);
+            keep_current("swapchains");
+            return true;
+        }
+
+        std::lock_guard lock(vk_mutex_);
+        std::array<OpenXREyeSize, kOpenXREyeCount> needed{};
+        std::array<bool, kOpenXREyeCount> new_slots{};
+        bool must_grow = false;
+        for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+            needed[eye] = {std::max(eye_size_[eye].width, retained_swapchains_[eye].width),
+                           std::max(eye_size_[eye].height, retained_swapchains_[eye].height)};
+            const OpenXREyeSize held{slots_[eye][0].width, slots_[eye][0].height};
+            new_slots[eye] = needed[eye] != held;
+            must_grow |= needed[eye].width > held.width || needed[eye].height > held.height;
+        }
+        decltype(slots_) slots{};
+        const auto discard_new_slots = [&] {
+            for (auto& eye : slots) {
+                for (EyeSlot& slot : eye) {
+                    DestroySlotLocked(slot);
+                }
+            }
+            new_slots = {};
+        };
+        bool allocated = true;
+        for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+            if (new_slots[eye]) {
+                for (EyeSlot& slot : slots[eye]) {
+                    allocated = allocated && AllocateSlot(slot, needed[eye].width, needed[eye].height);
+                }
+            }
+        }
+        if (!allocated) {
+            discard_new_slots();
+            if (must_grow) {
+                DestroySwapchainPair(replacement);
+                keep_current("shared buffers");
+                return true;
+            }
+            // Smaller buffers would only give memory back; the larger ones still hold both pairs.
+            Log(OpenXRLogLevel::Warning, "OpenXR Vulkan keeps its larger shared eye buffers: " + last_error_);
+            ClearError();
+        }
+        // This device's copies out of the old buffers and into the old images are done after this.
+        const VkResult idle = vkDeviceWaitIdle(vk_device_);
+        if (idle != VK_SUCCESS) {
+            discard_new_slots();
+            DestroySwapchainPair(replacement);
+            return Fail(VkFailure("vkDeviceWaitIdle failed before resizing the eyes", idle));
+        }
+        std::vector<AHardwareBuffer*> retired;
+        for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+            if (new_slots[eye]) {
+                for (EyeSlot& slot : slots_[eye]) {
+                    retired.push_back(slot.buffer);
+                }
+            }
+        }
+        if (!retired.empty()) {
+            if (!aurora_vulkan_forget_stereo_buffers(retired.data(), static_cast<uint32_t>(retired.size()))) {
+                discard_new_slots();
+                DestroySwapchainPair(replacement);
+                return Fail("Aurora could not release the old shared eye buffers");
+            }
+            for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+                if (!new_slots[eye]) {
+                    continue;
+                }
+                for (uint32_t slot = 0; slot < kSlotCount; ++slot) {
+                    DestroySlotLocked(slots_[eye][slot]);
+                    slots_[eye][slot] = slots[eye][slot];
+                }
+            }
+        }
+        DestroySwapchainPair(eye_swapchains_);
+        eye_swapchains_ = std::move(replacement);
+        std::ostringstream message;
+        message << "OpenXR Vulkan eyes resized: " << eye_size_[0].width << 'x' << eye_size_[0].height << " / "
+                << eye_size_[1].width << 'x' << eye_size_[1].height;
+        if (!retired.empty()) {
+            message << ", shared buffers " << slots_[0][0].width << 'x' << slots_[0][0].height;
+        }
+        Log(OpenXRLogLevel::Info, message.str());
         return true;
     }
 
@@ -2030,6 +2174,9 @@ private:
     OpenXRVulkanGraphicsRequirements requirements_{};
     std::array<EyeSwapchain, kOpenXREyeCount> eye_swapchains_{};
     std::array<EyeSwapchain, kOpenXREyeCount> retained_swapchains_{};
+    // As the D3D12 backend's.
+    std::array<OpenXREyeSize, kOpenXREyeCount> eye_size_{};
+    std::array<OpenXREyeSize, kOpenXREyeCount> requested_eye_size_{};
     // The settings panel's layer: written like the eyes into panel_swapchain_,
     // shown from retained_panel_swapchain_ (see FinishFrame).
     EyeSwapchain panel_swapchain_{};
@@ -2109,6 +2256,8 @@ bool OpenXRVulkanBackend::QueryGraphicsRequirements(OpenXRRuntime& runtime) {
 bool OpenXRVulkanBackend::BindAurora(OpenXRRuntime& runtime) {
     return m_impl->BindAurora(runtime);
 }
+
+void OpenXRVulkanBackend::SetRenderScale(float scale) { m_impl->SetRenderScale(scale); }
 
 OpenXRBeginStatus OpenXRVulkanBackend::BeginFrame(const OpenXRPresentation& presentation,
                                                   OpenXRBackendFrame& frame) {

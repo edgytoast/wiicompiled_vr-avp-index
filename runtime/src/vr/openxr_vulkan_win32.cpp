@@ -216,6 +216,11 @@ public:
         if (!runtime.CreateSession(&binding)) return Fail("OpenXR rejected Dawn's Vulkan device binding");
         owns_session_ = true;
         aurora_format_ = static_cast<VkFormat>(format);
+        for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+            const auto& view = runtime.ViewConfiguration()[eye];
+            eye_size_[eye] = {view.render_width, view.render_height};
+        }
+        requested_eye_size_ = eye_size_;
         const auto abandon_session = [&] {
             DestroySwapchains();
             runtime.DestroySession();
@@ -248,6 +253,21 @@ public:
         return true;
     }
 
+    void SetRenderScale(float scale) {
+        if (runtime_ == nullptr) {
+            return;
+        }
+        std::array<OpenXREyeSize, kOpenXREyeCount> requested{};
+        for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+            requested[eye] = OpenXRScaledEyeSize(runtime_->ViewConfiguration()[eye].properties, scale);
+        }
+        // Only a change: a refused size stays refused while it is still the one asked for.
+        if (requested != requested_eye_size_) {
+            requested_eye_size_ = requested;
+            eye_size_ = requested;
+        }
+    }
+
     OpenXRWindowsVulkanBeginStatus BeginFrame(const OpenXRWindowsVulkanPresentation& presentation,
                                       OpenXRWindowsVulkanFrame& frame) {
         frame = {};
@@ -258,6 +278,9 @@ public:
         }
         if (frame_active_ || pending_packet_serial_ != 0) {
             Fail("BeginFrame called while another OpenXR frame is active");
+            return OpenXRWindowsVulkanBeginStatus::Error;
+        }
+        if (!ResizeWritablePair()) {
             return OpenXRWindowsVulkanBeginStatus::Error;
         }
 
@@ -394,6 +417,7 @@ public:
             const auto status = KeepAliveCycle();
             if (status != OpenXRBeginStatus::Ready) return status;
         }
+        if (!ResizeWritablePair()) return OpenXRBeginStatus::Error;
         packet.xr_frame.serial = next_packet_serial_++;
         packet.xr_frame.predicted_display_time = last_display_time_ + 2 * last_display_period_;
         packet.xr_frame.predicted_display_period = last_display_period_;
@@ -841,12 +865,56 @@ private:
 
     bool CreateSwapchainPair(std::array<EyeSwapchain, kOpenXREyeCount>& pair) {
         for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
-            const auto& view = runtime_->ViewConfiguration()[eye];
-            if (!CreateSwapchain(pair[eye], view.render_width, view.render_height,
+            if (!CreateSwapchain(pair[eye], eye_size_[eye].width, eye_size_[eye].height,
                                  eye == 0 ? "left eye" : "right eye")) {
                 return false;
             }
         }
+        return true;
+    }
+
+    // As the D3D12 backend's. Aurora's bridge wraps each swapchain VkImage for Dawn, and the
+    // runtime may hand the old handles out again, so the wraps go with the swapchains.
+    bool ResizeWritablePair() {
+        std::array<OpenXREyeSize, kOpenXREyeCount> current{};
+        for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+            if (eye_swapchains_[eye].acquired) {
+                return true;
+            }
+            current[eye] = {eye_swapchains_[eye].width, eye_swapchains_[eye].height};
+        }
+        if (current == eye_size_) {
+            return true;
+        }
+        std::array<EyeSwapchain, kOpenXREyeCount> replacement{};
+        if (!CreateSwapchainPair(replacement)) {
+            DestroySwapchainPair(replacement);
+            std::ostringstream message;
+            message << "OpenXR Vulkan eyes stay " << current[0].width << 'x' << current[0].height
+                    << ": the runtime could not make " << eye_size_[0].width << 'x' << eye_size_[0].height
+                    << " swapchains (" << last_error_ << ')';
+            Log(OpenXRLogLevel::Warning, message.str());
+            ClearError();
+            // Back to this pair's size, which also returns the other pair to it if it was rebuilt.
+            eye_size_ = current;
+            return true;
+        }
+        std::vector<void*> retired;
+        for (const EyeSwapchain& swapchain : eye_swapchains_) {
+            for (const auto& image : swapchain.images) {
+                retired.push_back(reinterpret_cast<void*>(image.image));
+            }
+        }
+        if (!aurora_vulkan_win32_forget_targets(retired.data(), static_cast<uint32_t>(retired.size()))) {
+            DestroySwapchainPair(replacement);
+            return Fail("Aurora could not retire its copies into the old Vulkan eye swapchains");
+        }
+        DestroySwapchainPair(eye_swapchains_);
+        eye_swapchains_ = std::move(replacement);
+        std::ostringstream message;
+        message << "OpenXR Vulkan eyes resized: " << eye_size_[0].width << 'x' << eye_size_[0].height << " / "
+                << eye_size_[1].width << 'x' << eye_size_[1].height;
+        Log(OpenXRLogLevel::Info, message.str());
         return true;
     }
 
@@ -1102,6 +1170,9 @@ private:
     OpenXRWindowsVulkanGraphicsRequirements requirements_{};
     std::array<EyeSwapchain, kOpenXREyeCount> eye_swapchains_{};
     std::array<EyeSwapchain, kOpenXREyeCount> retained_swapchains_{};
+    // As the D3D12 backend's.
+    std::array<OpenXREyeSize, kOpenXREyeCount> eye_size_{};
+    std::array<OpenXREyeSize, kOpenXREyeCount> requested_eye_size_{};
     // The settings panel's layer: written like the eyes into panel_swapchain_,
     // shown from retained_panel_swapchain_ (see FinishFrame).
     EyeSwapchain panel_swapchain_{};
@@ -1157,6 +1228,8 @@ bool OpenXRWindowsVulkanBackend::QueryGraphicsRequirements(OpenXRRuntime& runtim
 bool OpenXRWindowsVulkanBackend::BindAurora(OpenXRRuntime& runtime) {
     return m_impl->BindAurora(runtime);
 }
+
+void OpenXRWindowsVulkanBackend::SetRenderScale(float scale) { m_impl->SetRenderScale(scale); }
 
 OpenXRWindowsVulkanBeginStatus OpenXRWindowsVulkanBackend::BeginFrame(
     const OpenXRWindowsVulkanPresentation& presentation, OpenXRWindowsVulkanFrame& frame) {

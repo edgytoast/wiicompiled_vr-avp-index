@@ -4,6 +4,7 @@
 
 #include <aurora/aurora.h>
 
+#include <cstdint>
 #include <string>
 
 namespace mkw::vr {
@@ -73,6 +74,24 @@ void OpenXRSetPassthrough(bool enabled) noexcept;
 // published frame. Flat Screen mode, which keeps races off the immersive path
 // altogether, makes it moot.
 void OpenXRSetImmersiveWindow(bool enabled) noexcept;
+
+// The headset's eye resolution, as a scale of the size the OpenXR runtime
+// recommends (clamped to RuntimeConfigFile::kVrRenderScaleMin..Max). Callable
+// from any thread. The pacing thread rebuilds the eye swapchains at it over the
+// next two frames, never touching the one on display; a size the runtime
+// cannot allocate keeps the eyes as they are.
+void OpenXRSetRenderScale(float scale) noexcept;
+
+// The left eye's image size: width x height is what the headset is shown now,
+// scaled_width x scaled_height what `scale` gives on this headset. All zero
+// while no OpenXR session runs.
+struct OpenXREyeResolution {
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t scaled_width = 0;
+    uint32_t scaled_height = 0;
+};
+OpenXREyeResolution OpenXRGetEyeResolution(float scale) noexcept;
 
 // Live scene interpolation at the headset's own display deadlines.
 // 0 = Off, 1 = Auto, otherwise 72/90/120 as a rendering-rate ceiling.

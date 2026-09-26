@@ -294,8 +294,9 @@ seat, hand steering, tracked hands, lean back, render scale, VR interpolation,
 virtual screen size and distance),
 Graphics (resolution, widescreen, bloom, shader stutter), Controls (controller
 mode, vibration, the Wii Remote mapping), Audio, and About (paths, OpenXR
-logging). The launch-time geometry (`render_scale`, `hud_distance_meters`,
-`hud_width_meters`) is only reachable here, not from the in-headset panel.
+logging). The launch-time geometry (`hud_distance_meters`, `hud_width_meters`)
+is only reachable here, not from the in-headset panel; `render_scale` is also the
+panel's live **VR → Render resolution** slider (OPENXR.md).
 
 **Patches**, between the two, is the PC launcher's mods page (`PatchesPage`,
 `ModLibrary`). Import takes one or more picked files, asks for a name and makes
@@ -1113,7 +1114,8 @@ or `EndAccess` errors); a black mirror too points at Aurora itself.
   profiled on the XR2. The first run compiles every bundled pipeline recipe
   (about half a minute); later runs load Dawn's pipeline cache from `Cache/`
   next to `DATA`. `render_scale` defaults to 0.8 here (1.0 on
-  PC); lower it further if the compositor reports missed frames.
+  PC); lower it further if the compositor reports missed frames. It can be
+  changed during a race from the headset panel (VR → Render resolution).
   Foveated rendering (above) is off by default: at `render_scale` 0.8 it saves
   nothing measurable, above that 8 to 22% of the eyes' GPU time.
 - **Lifecycle.** Backgrounding (the Quest menu, guardian) pauses the session

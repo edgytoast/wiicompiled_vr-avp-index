@@ -238,6 +238,8 @@ SDL_Scancode g_vrRecenterScancode = [] {
 }();
 bool g_vrRecenterRebinding = false;
 float g_vrLeanBackDegrees = RuntimeConfigFile::VrLeanBackDegrees();
+// [vr] render_scale as the slider shows it, in percent of the headset's recommended size.
+int g_vrRenderScalePercent = static_cast<int>(std::lround(RuntimeConfigFile::VrRenderScale() * 100.0f));
 uint32_t g_disabledPostProcessingPaths = RuntimeConfigFile::DisabledPostProcessingPaths();
 std::array<int32_t, PAD_MAX_CONTROLLERS> g_configuredControllerIndices = [] {
     std::array<int32_t, PAD_MAX_CONTROLLERS> indices{};
@@ -1416,6 +1418,35 @@ void DrawVrSettings() {
                 ImGui::TextDisabled("Pointer off screen | Remote %+.2f %+.2f %+.2f g", remote.acc[0],
                                     remote.acc[1], remote.acc[2]);
             }
+        }
+    }
+
+    // Live, and usable without a session like the mirror above. It applies when the slider is let
+    // go rather than at every step of a drag, since each new size means new eye swapchains.
+    ImGui::SliderInt("Render resolution", &g_vrRenderScalePercent,
+                     static_cast<int>(RuntimeConfigFile::kVrRenderScaleMin * 100.0f),
+                     static_cast<int>(RuntimeConfigFile::kVrRenderScaleMax * 100.0f), "%d%%",
+                     ImGuiSliderFlags_AlwaysClamp);
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        const float scale = static_cast<float>(g_vrRenderScalePercent) / 100.0f;
+        mkw::vr::OpenXRSetRenderScale(scale);
+        RuntimeConfigFile::SetVrRenderScale(scale);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "How many pixels each eye is rendered with, as a share of what your headset's OpenXR "
+            "runtime recommends. Lower is faster, higher is sharper, and the GPU's work grows with the "
+            "pixel count: 150%% draws about 2.25 times as many as 100%%.\n"
+            "Applies when you let go of the slider, without restarting; the headset keeps showing "
+            "the game while the eyes change size.");
+    }
+    if (const auto eyes = mkw::vr::OpenXRGetEyeResolution(static_cast<float>(g_vrRenderScalePercent) / 100.0f);
+        eyes.width != 0) {
+        if (eyes.width == eyes.scaled_width && eyes.height == eyes.scaled_height) {
+            ImGui::TextDisabled("Each eye: %u x %u", eyes.width, eyes.height);
+        } else {
+            ImGui::TextDisabled("Each eye: %u x %u now, %u x %u at %d%%", eyes.width, eyes.height, eyes.scaled_width,
+                                eyes.scaled_height, g_vrRenderScalePercent);
         }
     }
 

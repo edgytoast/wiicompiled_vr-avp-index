@@ -93,8 +93,9 @@ bool device_supports_bridge() noexcept {
 }
 
 // One AHardwareBuffer imported into Dawn. The import is created on first use
-// and kept until the bridge is disabled; the ring the OpenXR side recycles is
-// tiny (two buffers per eye), so this never grows beyond a handful of entries.
+// and kept until the bridge is disabled or the OpenXR side replaces the buffer
+// (a new render resolution); the ring it recycles is tiny (two buffers per
+// eye), so this never grows beyond a handful of entries.
 struct Import {
   AHardwareBuffer* buffer = nullptr;
   wgpu::SharedTextureMemory memory;
@@ -251,6 +252,30 @@ public:
       return false;
     }
     ClearFrameLocked();
+    return true;
+  }
+
+  bool ForgetBuffers(AHardwareBuffer* const* buffers, uint32_t count) noexcept {
+    std::lock_guard lock(m_mutex);
+    if (m_framePending) {
+      return false;
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+      const auto found = m_imports.find(buffers[i]);
+      if (found == m_imports.end()) {
+        continue;
+      }
+      auto& import = found->second;
+      if (import.accessBegun) {
+        // Only an abandoned frame leaves one open (see PrepareForDestruction).
+        wgpu::SharedTextureMemoryEndAccessState end{};
+        import.memory.EndAccess(import.texture, &end);
+      }
+      import.texture = nullptr;
+      import.memory = nullptr;
+      AHardwareBuffer_release(import.buffer);
+      m_imports.erase(found);
+    }
     return true;
   }
 
@@ -629,6 +654,14 @@ bool aurora_vulkan_cancel_stereo_targets(uint64_t frameToken) {
   return g_bridge && g_bridge->CancelBeforeEncode(frameToken);
 }
 
+bool aurora_vulkan_forget_stereo_buffers(AHardwareBuffer* const* buffers, uint32_t count) {
+  using namespace aurora::vulkan_interop;
+  if (!g_bridge) {
+    return true;
+  }
+  return buffers != nullptr && g_bridge->ForgetBuffers(buffers, count);
+}
+
 bool aurora_vulkan_disable_stereo_bridge() {
   using namespace aurora::vulkan_interop;
   if (!g_bridge) {
@@ -667,6 +700,8 @@ bool aurora_vulkan_set_stereo_targets_with_panel(uint64_t, const AuroraVulkanSte
 }
 
 bool aurora_vulkan_cancel_stereo_targets(uint64_t) { return false; }
+
+bool aurora_vulkan_forget_stereo_buffers(struct AHardwareBuffer* const*, uint32_t) { return true; }
 
 bool aurora_vulkan_disable_stereo_bridge() { return true; }
 
