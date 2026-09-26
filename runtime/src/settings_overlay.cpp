@@ -2261,11 +2261,20 @@ VrSettingsPanel g_vrSettingsPanel;
 
 ImGuiContext* CreateVrSettingsPanelContext() {
     ImGuiContext* const desktop = ImGui::GetCurrentContext();
+    const ImGuiIO& desktopIo = ImGui::GetIO();
     ImGuiContext* const context = ImGui::CreateContext();
     ImGui::SetCurrentContext(context);
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.LogFilename = nullptr;
+    // ImGui's current context is one process-wide pointer, and Aurora's frame
+    // worker renders draw data (the desktop overlay, this panel) while this
+    // thread may have switched to this context to draw the panel. The WebGPU
+    // backend finds its device objects through the current context's IO, so
+    // this context carries the desktop's: without them, a render on the worker
+    // during the switch reads through a null backend.
+    io.BackendRendererUserData = desktopIo.BackendRendererUserData;
+    io.BackendRendererName = desktopIo.BackendRendererName;
     // No platform backend draws a cursor for it, and nothing else shows where
     // the controller is aiming.
     io.MouseDrawCursor = true;

@@ -140,18 +140,26 @@ the left eye's size now and, while they differ, the size the slider's value give
 
 A new scale never interrupts the picture. Each backend keeps two swapchain pairs, one on display and
 one Aurora writes next, and rebuilds only the second, at the start of the frame that writes it; the
-other follows a frame later, once it is the one written. The new
-swapchains are created before the old ones go, and Aurora first forgets the old images: the D3D12
-bridge waits for any copy still writing them, the Windows Vulkan bridge drains Dawn's queue and drops
-its wraps of the old `VkImage`s (the runtime may hand the same handles to the new swapchains), and
-the Quest also replaces its shared eye buffers, whose Dawn imports are released
-(`aurora_vulkan_forget_stereo_buffers`). Those buffers are kept as large as both pairs, growing with
-the first pair rebuilt larger and shrinking once the second has followed it down, and each copy moves
-only what fits the image it writes. If the runtime cannot allocate a size, the log says so, the eyes
-keep the size they had (a pair already rebuilt goes back to it), and that size is not tried again
-until the scale changes; the saved value is still what the next launch asks for.
-`mkw_openxr_replay_tests` and `mkw_openxr_vulkan_replay_tests` cover the rebuild, the display pair
-left alone, the images forgotten before their swapchains are destroyed, and both kinds of refusal.
+other follows a frame later, once it is the one written. The new swapchains are created before the
+old ones go, and a replaced pair is not destroyed at once: the compositor may still be consuming the
+layer that last showed it (the spec lets a runtime use the images after `xrDestroySwapchain`, and
+destroying a pair straight after its last frame lost the Vulkan device on a PC runtime), so it lives
+on for `kOpenXRRetiredSwapchainCycles` (8) more pacing cycles, each of which ends another compositor
+frame, and goes with the session if it is still waiting then. Before a pair is destroyed Aurora
+forgets its images: the D3D12 bridge waits for any copy still writing them, and the Windows Vulkan
+bridge drains Dawn's queue and drops its wraps of the old `VkImage`s (the runtime may hand the same
+handles to the new swapchains); on the Quest the backend's own copy device is idled. The Windows
+Vulkan binding also takes Dawn's device guard around `xrCreateSwapchain` and `xrDestroySwapchain`,
+since mid-session Dawn's worker is submitting on the shared queue. The Quest also replaces its
+shared eye buffers, whose Dawn imports are released (`aurora_vulkan_forget_stereo_buffers`). Those
+buffers are kept as large as both pairs, growing with the first pair rebuilt larger and shrinking
+once the second has followed it down, and each copy moves only what fits the image it writes. If the
+runtime cannot allocate a size, the log says so, the eyes keep the size they had (a pair already
+rebuilt goes back to it), and that size is not tried again until the scale changes; the saved value
+is still what the next launch asks for. `mkw_openxr_replay_tests` and
+`mkw_openxr_vulkan_replay_tests` cover the rebuild, the display pair left alone, the replaced pairs
+outliving their last frame by exactly that many cycles and going with the session otherwise, the
+images forgotten before their swapchains are destroyed, and both kinds of refusal.
 `world_units_per_meter` controls the scale of headset translation in the game world.
 `hud_distance_meters` and `hud_width_meters` place and size the virtual screen. They are read at
 launch and govern both the menu screen and the in-race 2D screen, so 2D content keeps its place
@@ -336,7 +344,11 @@ of you.
 
 How it is drawn: `settings_overlay.cpp` builds the panel with a second Dear ImGui context of its own,
 a 1440 × 1080 canvas at twice the desktop menu's scale with its own font atlas, fed by the pointer
-that `openxr_input.cpp` publishes through `vr/openxr_settings_panel.h`. Aurora renders that draw data
+that `openxr_input.cpp` publishes through `vr/openxr_settings_panel.h`. That context shares the
+desktop context's renderer backend data: ImGui's current context is one process-wide pointer, and
+Aurora's frame worker renders draw data while the game thread may have switched to the panel
+context, so the WebGPU backend has to find its device objects through either (without this, a
+worker render during the switch crashed on a null backend, seen while dragging the panel's sliders). Aurora renders that draw data
 into a panel texture once per sealed frame (`aurora-main/lib/stereo_overlay.cpp`). The ImGui backend
 keeps a single projection uniform, so the panel's pass is submitted on its own command buffer before
 the desktop's ImGui pass of the same frame is recorded.

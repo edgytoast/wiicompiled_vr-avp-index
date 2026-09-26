@@ -1848,6 +1848,7 @@ private:
     // writes). Everything new is allocated before anything old goes, so a size that cannot be had
     // leaves the eyes as they were.
     bool ResizeWritablePair() {
+        ReapRetiredPairs(false);
         std::array<OpenXREyeSize, kOpenXREyeCount> current{};
         for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
             if (eye_swapchains_[eye].acquired) {
@@ -1945,7 +1946,8 @@ private:
                 }
             }
         }
-        DestroySwapchainPair(eye_swapchains_);
+        // The compositor may still be reading the old pair (kOpenXRRetiredSwapchainCycles).
+        retired_pairs_.push_back({std::move(eye_swapchains_), kOpenXRRetiredSwapchainCycles});
         eye_swapchains_ = std::move(replacement);
         std::ostringstream message;
         message << "OpenXR Vulkan eyes resized: " << eye_size_[0].width << 'x' << eye_size_[0].height << " / "
@@ -1955,6 +1957,31 @@ private:
         }
         Log(OpenXRLogLevel::Info, message.str());
         return true;
+    }
+
+    // As the D3D12 backend's. Only this device's copies write the images, so its idle is the
+    // completion the spec asks for before xrDestroySwapchain.
+    void ReapRetiredPairs(bool all) {
+        bool waited = false;
+        for (auto it = retired_pairs_.begin(); it != retired_pairs_.end();) {
+            if (!all && --it->cycles_left != 0) {
+                ++it;
+                continue;
+            }
+            if (!waited && vk_device_ != VK_NULL_HANDLE) {
+                std::lock_guard lock(vk_mutex_);
+                waited = vkDeviceWaitIdle(vk_device_) == VK_SUCCESS;
+                if (!waited) {
+                    Log(OpenXRLogLevel::Warning,
+                        "vkDeviceWaitIdle failed before destroying replaced Vulkan eye swapchains; "
+                        "deferring their destruction to xrDestroySession");
+                }
+            }
+            if (waited || vk_device_ == VK_NULL_HANDLE) {
+                DestroySwapchainPair(it->swapchains);
+            }
+            it = retired_pairs_.erase(it);
+        }
     }
 
     bool CreateSwapchain(EyeSwapchain& swapchain, uint32_t width, uint32_t height, const char* what) {
@@ -2115,6 +2142,7 @@ private:
 
     void DestroySwapchains() {
         DestroyPanelSwapchains();
+        ReapRetiredPairs(true);
         DestroySwapchainPair(eye_swapchains_);
         DestroySwapchainPair(retained_swapchains_);
         have_retained_frame_ = false;
@@ -2177,6 +2205,11 @@ private:
     // As the D3D12 backend's.
     std::array<OpenXREyeSize, kOpenXREyeCount> eye_size_{};
     std::array<OpenXREyeSize, kOpenXREyeCount> requested_eye_size_{};
+    struct RetiredPair {
+        std::array<EyeSwapchain, kOpenXREyeCount> swapchains;
+        uint32_t cycles_left;
+    };
+    std::vector<RetiredPair> retired_pairs_;
     // The settings panel's layer: written like the eyes into panel_swapchain_,
     // shown from retained_panel_swapchain_ (see FinishFrame).
     EyeSwapchain panel_swapchain_{};

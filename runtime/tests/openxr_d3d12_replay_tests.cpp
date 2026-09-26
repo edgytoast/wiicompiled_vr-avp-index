@@ -635,7 +635,6 @@ void TestRenderScale() {
         Require(backend.BeginFrame(presentation, frame) == OpenXRBeginStatus::Ready);
         Require(frame.render_width[0] == width && frame.render_height[1] == height && targets.size() == 2);
         for (const auto& target : targets) Require(target.width == width && target.height == height);
-        Require(live_swapchains == 4);
     };
     const auto finish = [&] {
         Complete();
@@ -643,35 +642,49 @@ void TestRenderScale() {
         Require(backend.FinishFrame(frame, true));
         Require(layer_count == 1 && displayed_content == frame.xr_frame.serial);
     };
+    // Enough cycles at one size for every replaced pair to be destroyed.
+    const auto settle = [&](uint32_t width, uint32_t height) {
+        for (uint32_t i = 0; i <= kOpenXRRetiredSwapchainCycles; ++i) {
+            begin(width, height);
+            finish();
+        }
+        Require(live_swapchains == 4);
+    };
 
     backend.SetRenderScale(1.0f); // The session's own scale rebuilds nothing.
     begin(100, 80);
     finish();
-    Require(forgotten.empty() && shown_width == 100);
+    Require(forgotten.empty() && live_swapchains == 4 && shown_width == 100);
 
     backend.SetRenderScale(1.5f);
     begin(150, 120); // The pair written next, while the one on display still shows the last frame.
-    Require(forgotten.size() == 2);
+    Require(live_swapchains == 6 && forgotten.empty()); // The old pair lives on for the compositor.
     Require(backend.RepeatFrame(frame) && layer_count == 1 && shown_width == 100);
     finish();
     Require(shown_width == 150);
     begin(150, 120); // Then the other pair, once it is the one written.
-    Require(forgotten.size() == 4);
+    Require(live_swapchains == 8 && forgotten.empty());
     finish();
-    begin(150, 120); // Both are the new size: nothing more is rebuilt.
+    // Each replaced pair is forgotten by Aurora, then destroyed, kOpenXRRetiredSwapchainCycles
+    // cycles after the one that replaced it: the first pair one cycle before the second.
+    for (uint32_t i = 1; i < kOpenXRRetiredSwapchainCycles; ++i) {
+        begin(150, 120); // Both are the new size: nothing more is rebuilt.
+        Require(live_swapchains == (i < kOpenXRRetiredSwapchainCycles - 1 ? 8u : 6u));
+        finish();
+    }
+    Require(forgotten.size() == 2);
+    begin(150, 120);
+    Require(live_swapchains == 4 && forgotten.size() == 4);
     finish();
-    Require(forgotten.size() == 4);
 
     backend.SetRenderScale(5.0f); // Clamped to the runtime's maximum.
     begin(400, 320);
     finish();
-    begin(400, 320);
-    finish();
+    settle(400, 320);
     backend.SetRenderScale(1.5f);
     begin(150, 120);
     finish();
-    begin(150, 120);
-    finish();
+    settle(150, 120);
     const size_t forgotten_before_refusal = forgotten.size();
 
     // A size the runtime cannot make keeps the eyes, and is not retried while it is still asked for.
@@ -683,13 +696,14 @@ void TestRenderScale() {
     backend.SetRenderScale(3.0f);
     begin(150, 120);
     finish();
-    Require(create_attempts == attempts + 2 && forgotten.size() == forgotten_before_refusal);
+    Require(create_attempts == attempts + 2 && live_swapchains == 4);
+    settle(150, 120);
+    Require(forgotten.size() == forgotten_before_refusal);
     creates_before_failure = -1;
     backend.SetRenderScale(0.5f); // A new size is tried again.
     begin(50, 40);
     finish();
-    begin(50, 40);
-    finish();
+    settle(50, 40);
 
     // Refused for the second pair only: the first follows it back to the size it kept.
     creates_before_failure = 2;
@@ -703,6 +717,7 @@ void TestRenderScale() {
     creates_before_failure = -1;
     begin(50, 40);
     finish();
+    settle(50, 40);
     const size_t forgotten_settled = forgotten.size();
     begin(50, 40);
     finish();
@@ -721,6 +736,8 @@ void TestRenderScale() {
     Require(backend.FinishFrame(frame, true));
     Require(layer_count == 1 && shown_width == 100);
     expect_render_first = false;
+    // A pair still retired at shutdown goes with the rest, forgotten first.
+    Require(live_swapchains == 6);
     Require(backend.Shutdown() && live_swapchains == 0);
     display_time = 0;
 }

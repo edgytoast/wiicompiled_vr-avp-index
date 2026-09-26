@@ -851,6 +851,7 @@ private:
     // before the old ones go, so a size the runtime cannot allocate leaves the pair as it was.
     // False only on a failure that ends the session.
     bool ResizeWritablePair() {
+        ReapRetiredPairs(false);
         std::array<OpenXREyeSize, kOpenXREyeCount> current{};
         for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
             if (eye_swapchains_[eye].acquired) {
@@ -874,23 +875,40 @@ private:
             eye_size_ = current;
             return true;
         }
-        std::vector<void*> retired;
-        for (const EyeSwapchain& swapchain : eye_swapchains_) {
-            for (const auto& image : swapchain.images) {
-                retired.push_back(image.texture);
-            }
-        }
-        if (!aurora_d3d12_forget_stereo_targets(retired.data(), static_cast<uint32_t>(retired.size()))) {
-            DestroySwapchainPair(replacement);
-            return Fail("Aurora could not retire its copies into the old D3D12 eye swapchains");
-        }
-        DestroySwapchainPair(eye_swapchains_);
+        // The compositor may still be reading the old pair (kOpenXRRetiredSwapchainCycles).
+        retired_pairs_.push_back({std::move(eye_swapchains_), kOpenXRRetiredSwapchainCycles});
         eye_swapchains_ = std::move(replacement);
         std::ostringstream message;
         message << "OpenXR D3D12 eyes resized: " << eye_size_[0].width << 'x' << eye_size_[0].height << " / "
                 << eye_size_[1].width << 'x' << eye_size_[1].height;
         Log(OpenXRLogLevel::Info, message.str());
         return true;
+    }
+
+    // Destroys the retired pairs whose time is up (every one of them at shutdown), once Aurora's
+    // copies into their images are known complete. A pair Aurora cannot vouch for is left to
+    // xrDestroySession rather than destroyed under a possibly live copy.
+    void ReapRetiredPairs(bool all) {
+        for (auto it = retired_pairs_.begin(); it != retired_pairs_.end();) {
+            if (!all && --it->cycles_left != 0) {
+                ++it;
+                continue;
+            }
+            std::vector<void*> images;
+            for (const EyeSwapchain& swapchain : it->swapchains) {
+                for (const auto& image : swapchain.images) {
+                    images.push_back(image.texture);
+                }
+            }
+            if (aurora_d3d12_forget_stereo_targets(images.data(), static_cast<uint32_t>(images.size()))) {
+                DestroySwapchainPair(it->swapchains);
+            } else {
+                Log(OpenXRLogLevel::Warning,
+                    "Aurora could not retire its copies into a replaced D3D12 eye swapchain pair; "
+                    "deferring its destruction to xrDestroySession");
+            }
+            it = retired_pairs_.erase(it);
+        }
     }
 
     bool CreateSwapchain(EyeSwapchain& swapchain, uint32_t width, uint32_t height, const char* what) {
@@ -1058,6 +1076,7 @@ private:
 
     void DestroySwapchains() {
         DestroyPanelSwapchains();
+        ReapRetiredPairs(true);
         DestroySwapchainPair(eye_swapchains_);
         DestroySwapchainPair(retained_swapchains_);
         have_retained_frame_ = false;
@@ -1137,6 +1156,12 @@ private:
     // for, which differ while a size the runtime refused is being kept.
     std::array<OpenXREyeSize, kOpenXREyeCount> eye_size_{};
     std::array<OpenXREyeSize, kOpenXREyeCount> requested_eye_size_{};
+    // Pairs replaced by a new size, destroyed once the compositor has moved on from them.
+    struct RetiredPair {
+        std::array<EyeSwapchain, kOpenXREyeCount> swapchains;
+        uint32_t cycles_left;
+    };
+    std::vector<RetiredPair> retired_pairs_;
     // The settings panel's layer: written like the eyes into panel_swapchain_,
     // shown from retained_panel_swapchain_ (see FinishFrame).
     EyeSwapchain panel_swapchain_{};
