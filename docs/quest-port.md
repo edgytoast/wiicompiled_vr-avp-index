@@ -680,9 +680,12 @@ creates that folder itself so it owns it, and imports the newest package the nex
 once per package. An import selects the game it just installed.
 
 Players get the same build from WheelWizard VR: Settings → WiiCompiled → Meta Quest → **Build**.
-WheelWizard asks which game, whether to include the game files, for Retro Rewind whether to
-include its pack, for the Quest app's APK and where to save the package, then runs the installed
-setup:
+WheelWizard asks which Quest (Quest 2, 3, 3S and Pro, or the original Quest, whose app it fetches
+from the installed release under its `Quest1` name), whether to include the game files, whether to
+build Retro Rewind with its pack (off builds the base game; the pack only travels with the mod, so
+one switch decides both) and where to save the package. The APK is downloaded from the GitHub
+release the installation came from, or chosen by hand for an unpublished build; it then runs the
+installed setup:
 
 ```
 WiiCompiled-Setup.exe --build-quest --install-dir <install> --quest-apk <app.apk> --output <file.wcgame>
