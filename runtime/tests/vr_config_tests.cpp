@@ -30,11 +30,6 @@ int main() {
     Require(RuntimeConfigFile::VrFoveationLevelIndex("high") == 3);
     Require(RuntimeConfigFile::VrFoveationLevelIndex("ultra") == 0);
 
-    // [vr] single_pass_eyes: each eye replayed in one render pass.
-    Require(Parse("[vr]\nsingle_pass_eyes = true\n").vrSinglePassEyes == true);
-    Require(Parse("[vr]\nsingle_pass_eyes = false\n").vrSinglePassEyes == false);
-    Require(!Parse("[vr]\n").vrSinglePassEyes.has_value());
-
     // [vr] hand_tracking: the cockpit hands follow the headset's hand tracking.
     Require(Parse("[vr]\nhand_tracking = true\n").vrHandTracking == true);
     Require(Parse("[vr]\nhand_tracking = false\n").vrHandTracking == false);

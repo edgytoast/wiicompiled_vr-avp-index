@@ -498,6 +498,13 @@ public:
             interpolation_stopping_ = false;
         }
         teardown_requested_.store(false, std::memory_order_release);
+        // How every eye is replayed, fixed: it ends at the frame's final GXCopyDisp, so it holds the
+        // image the game presented; it keeps the EFB reset after a display copy, which can only be
+        // an earlier one's and erases what that last copy did not show; and it is drawn in one
+        // render pass (the Quest's debug.wiicompiled.eye_passes splits it again, for A/B timing).
+        aurora_set_stereo_stop_at_display_copy(true);
+        aurora_set_stereo_skip_copy_clears(false);
+        aurora_set_stereo_single_pass_eyes(true);
         WithdrawPublishedFrame();
         aurora_set_stereo_frame_provider(&OpenXRIntegration::ProvideStereoFrame, this);
         provider_registered_ = true;
@@ -1640,7 +1647,8 @@ private:
 
     // Android: `adb shell setprop debug.wiicompiled.eye_passes 0` replays each eye in one render
     // pass per recorded pass again, and 1 forces the single pass, to compare the two within one
-    // session. An empty value hands the switch back to the settings. Read about once a second.
+    // session. An empty value restores the single pass every eye has otherwise. Read about once a
+    // second.
     void PollEyePassesOverride() noexcept {
 #if defined(__ANDROID__)
         if (eye_passes_poll_ != 0) {
@@ -1658,8 +1666,7 @@ private:
             return;
         }
         eye_passes_override_ = override_value;
-        const bool single =
-            override_value >= 0 ? override_value == 1 : RuntimeConfigFile::VrSinglePassEyes();
+        const bool single = override_value != 0;
         aurora_set_stereo_single_pass_eyes(single);
         RT_LOG(RT_TAG_RUNTIME) << "OpenXR: eyes replayed in "
                                << (single ? "one render pass" : "one render pass per recorded pass")

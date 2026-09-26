@@ -139,9 +139,6 @@ bool g_showFps = RuntimeConfigFile::ShowFps();
 // The same default the VR path itself takes (kVrEnabledDefault), so the F10 switch
 // shows what an unconfigured installation actually starts in.
 bool g_vrEnabled = RuntimeConfigFile::VrEnabled(true);
-bool g_vrStopAtDisplayCopy = RuntimeConfigFile::VrStopAtDisplayCopy(true);
-bool g_vrSkipCopyClears = RuntimeConfigFile::VrSkipCopyClears(true);
-bool g_vrSinglePassEyes = RuntimeConfigFile::VrSinglePassEyes(true);
 bool g_vrHudVirtualScreen = RuntimeConfigFile::VrHudVirtualScreen(true);
 // Race view: Immersive, Immersive window or Flat screen (RuntimeConfigFile::VrRaceView), and
 // Flat Screen mode as the flag the race view rows below are disabled by.
@@ -868,7 +865,43 @@ void DrawRumbleSettings() {
     }
 }
 
+// What the headset's controllers are to the game. One choice for the pair, whichever port they
+// land on, and live like the rest of the VR settings: without a session it is what the next starts on.
+void DrawVrControllerSettings() {
+    if (ImGui::Combo("VR controllers", &g_vrControllerMode, kVrControllerModeLabels.data(),
+                     static_cast<int>(kVrControllerModeLabels.size()))) {
+        mkw::vr::OpenXRSetControllerMode(static_cast<mkw::vr::OpenXRControllerMode>(g_vrControllerMode));
+        RuntimeConfigFile::SetVrControllerMode(kVrControllerModeNames[static_cast<size_t>(g_vrControllerMode)]);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Wii Remote + Nunchuk: the right controller is a Wii Remote, with motion and a pointer "
+            "that lands where you aim on the virtual screen; the left one is the Nunchuk.\n"
+            "  Right: A = A, trigger = B, B = C (look behind), stick up/down = 1/2\n"
+            "  Left: stick = Nunchuk stick, trigger = Z, X = -, menu = +, Y = settings panel\n"
+            "  The grips press nothing; they take hold of the wheel with hand steering.\n"
+            "Gamepad: both controllers are one ordinary controller, read as a GameCube pad.\n"
+            "Applies immediately; the game sees the controller change as a reconnection.");
+    }
+    if (mkw::vr::OpenXRIsRunning() &&
+        mkw::vr::OpenXRGetControllerMode() == mkw::vr::OpenXRControllerMode::WiiRemote) {
+        mkw::vr::OpenXRWiiRemoteSample remote;
+        if (mkw::vr::OpenXRReadWiiRemote(remote)) {
+            if (remote.pointer_valid) {
+                ImGui::TextDisabled("Pointer %+.2f %+.2f | Remote %+.2f %+.2f %+.2f g", remote.pointer[0],
+                                    remote.pointer[1], remote.acc[0], remote.acc[1], remote.acc[2]);
+            } else {
+                ImGui::TextDisabled("Pointer off screen | Remote %+.2f %+.2f %+.2f g", remote.acc[0],
+                                    remote.acc[1], remote.acc[2]);
+            }
+        }
+    }
+}
+
 void DrawControllerSettings() {
+    // First, since the per-port settings below stop early when a port has nothing to show.
+    DrawVrControllerSettings();
+    ImGui::Separator();
     if (ImGui::CollapsingHeader("USB wheel and pedals (player 1)")) {
         physical_wheel::DrawSettings();
         ImGui::Separator();
@@ -1364,65 +1397,30 @@ void DrawVrSettings() {
         RuntimeConfigFile::SetVrEnabled(g_vrEnabled);
     }
     ImGui::TextDisabled("OpenXR mode changes take effect after restarting the game.");
-    // Live, unlike the enable toggle above, so it is left usable either way:
-    // set before a restart it is simply what the next session starts on.
-    if (ImGui::Combo("Desktop view", &g_vrMirrorView, kVrMirrorViewLabels.data(),
-                     static_cast<int>(kVrMirrorViewLabels.size()))) {
-        aurora_set_stereo_mirror_view(static_cast<AuroraStereoMirrorView>(g_vrMirrorView));
-        RuntimeConfigFile::SetVrMirrorView(kVrMirrorViewNames[static_cast<size_t>(g_vrMirrorView)]);
+    // Everything below is live, unlike the enable toggle, so it is left usable either way: set
+    // before a restart it is simply what the next session starts on.
+    if (ImGui::Combo("Race view", &g_vrRaceView, kVrRaceViewLabels.data(),
+                     static_cast<int>(kVrRaceViewLabels.size()))) {
+        const auto view = static_cast<RuntimeConfigFile::VrRaceView>(g_vrRaceView);
+        g_vrFlatScreen = view == RuntimeConfigFile::VrRaceView::FlatScreen;
+        RuntimeConfigFile::SetVrRaceView(view);
+        mkw::vr::MkwVRPolicySetImmersiveRaces(!g_vrFlatScreen);
+        mkw::vr::OpenXRSetImmersiveWindow(view == RuntimeConfigFile::VrRaceView::ImmersiveWindow);
+        mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
-            "What this window shows while the headset is running. Normal keeps the ordinary "
-            "desktop view, the eye choices mirror what you are actually seeing in the headset, "
-            "and None leaves the window black. Menus reach the headset as a screen showing this "
-            "same desktop image, so the eye choices only differ from Normal during a race.");
-    }
-    ImGui::BeginDisabled(!mkw::vr::OpenXRIsRunning());
-    bool settingsPanelOpen = mkw::vr::OpenXRSettingsPanelOpen();
-    if (ImGui::Checkbox("Show these settings in the headset", &settingsPanelOpen)) {
-        mkw::vr::OpenXRSetSettingsPanelOpen(settingsPanelOpen);
-    }
-    ImGui::EndDisabled();
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-        ImGui::SetTooltip(
-            "Opens these settings on a panel in front of you, in menus and races alike.\n"
-            "In the headset, left Y opens and closes it too (with Gamepad VR controllers,\n"
-            "click both thumbsticks together instead).\n"
-            "Aim at it and pull a trigger to change a setting; push a thumbstick to scroll.\n"
-            "While it is open the game does not see the VR controllers.");
-    }
-    if (ImGui::Combo("VR controllers", &g_vrControllerMode, kVrControllerModeLabels.data(),
-                     static_cast<int>(kVrControllerModeLabels.size()))) {
-        mkw::vr::OpenXRSetControllerMode(static_cast<mkw::vr::OpenXRControllerMode>(g_vrControllerMode));
-        RuntimeConfigFile::SetVrControllerMode(kVrControllerModeNames[static_cast<size_t>(g_vrControllerMode)]);
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(
-            "Wii Remote + Nunchuk: the right controller is a Wii Remote, with motion and a pointer "
-            "that lands where you aim on the virtual screen; the left one is the Nunchuk.\n"
-            "  Right: A = A, trigger = B, B = C (look behind), stick up/down = 1/2\n"
-            "  Left: stick = Nunchuk stick, trigger = Z, X = -, menu = +, Y = settings panel\n"
-            "  The grips press nothing; they take hold of the wheel with hand steering.\n"
-            "Gamepad: both controllers are one ordinary controller, read as a GameCube pad.\n"
-            "Applies immediately; the game sees the controller change as a reconnection.");
-    }
-    if (mkw::vr::OpenXRIsRunning() &&
-        mkw::vr::OpenXRGetControllerMode() == mkw::vr::OpenXRControllerMode::WiiRemote) {
-        mkw::vr::OpenXRWiiRemoteSample remote;
-        if (mkw::vr::OpenXRReadWiiRemote(remote)) {
-            if (remote.pointer_valid) {
-                ImGui::TextDisabled("Pointer %+.2f %+.2f | Remote %+.2f %+.2f %+.2f g", remote.pointer[0],
-                                    remote.pointer[1], remote.acc[0], remote.acc[1], remote.acc[2]);
-            } else {
-                ImGui::TextDisabled("Pointer off screen | Remote %+.2f %+.2f %+.2f g", remote.acc[0],
-                                    remote.acc[1], remote.acc[2]);
-            }
-        }
+            "Immersive plays races all around you in stereo. Immersive window keeps that "
+            "stereo view but shows it only through a window where the menu screen sits, with "
+            "your room around it on the Quest (black elsewhere); look through it from another "
+            "angle and the view shifts as through a real window. Flat screen plays races on "
+            "the menu screen through the game's own camera; the Camera settings and the lean-back "
+            "angle do not apply to it. Applies immediately.");
     }
 
-    // Live, and usable without a session like the mirror above. It applies when the slider is let
-    // go rather than at every step of a drag, since each new size means new eye swapchains.
+    ImGui::Separator();
+    // Applied when the slider is let go rather than at every step of a drag, since each new size
+    // means new eye swapchains.
     ImGui::SliderInt("Render resolution", &g_vrRenderScalePercent,
                      static_cast<int>(RuntimeConfigFile::kVrRenderScaleMin * 100.0f),
                      static_cast<int>(RuntimeConfigFile::kVrRenderScaleMax * 100.0f), "%d%%",
@@ -1449,7 +1447,38 @@ void DrawVrSettings() {
                                 eyes.scaled_height, g_vrRenderScalePercent);
         }
     }
-
+#if defined(__ANDROID__)
+    if (ImGui::Checkbox("Passthrough around the menu screen", &g_vrPassthrough)) {
+        mkw::vr::OpenXRSetPassthrough(g_vrPassthrough);
+        RuntimeConfigFile::SetVrPassthrough(g_vrPassthrough);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Shows your room through the headset's cameras around the menu screen and every "
+            "other screen outside an immersive race, instead of black. Immersive races stay "
+            "fully virtual; the immersive window and the Flat Screen race have the room "
+            "around them too. Applies immediately.");
+    }
+    // Shows the live level, which debug.wiicompiled.foveation can override.
+    g_vrFoveation = static_cast<int>(aurora_get_stereo_foveation());
+    if (ImGui::Combo("Foveated rendering", &g_vrFoveation, kVrFoveationLabels.data(),
+                     static_cast<int>(kVrFoveationLabels.size()))) {
+        aurora_set_stereo_foveation(static_cast<uint32_t>(g_vrFoveation));
+        RuntimeConfigFile::SetVrFoveation(
+            std::string(RuntimeConfigFile::kVrFoveationLevels[static_cast<size_t>(g_vrFoveation)]));
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "%s", aurora_stereo_foveation_available()
+                      ? "Shades the edges of the race view in 2x2, then 4x4 pixel blocks, where the "
+                        "lenses blur the picture anyway, to free GPU time for a higher render scale or a "
+                        "steadier frame rate. Higher levels start closer to the centre; High also "
+                        "coarsens the corners of the HUD. Menus are never foveated. Applies immediately."
+                      : "Shades the edges of the race view in 2x2, then 4x4 pixel blocks, where the "
+                        "lenses blur the picture anyway, to free GPU time. This session started with it "
+                        "off, or without a GPU that supports it: a new level applies after a restart.");
+    }
+#endif
     if (ImGui::Combo("VR frame interpolation (experimental)", &g_vrFrameInterpolationMode,
                      kVrInterpolationLabels.data(), static_cast<int>(kVrInterpolationLabels.size()))) {
         const auto target = kVrInterpolationFps[static_cast<size_t>(g_vrFrameInterpolationMode)];
@@ -1471,65 +1500,21 @@ void DrawVrSettings() {
         }
     }
 
-    // Like the mirror above and unlike the enable toggle, these two apply to the
-    // very next frame, so they can be compared from inside a running race.
     ImGui::Separator();
-    ImGui::Text("VR eye replay (EFB)");
-    if (ImGui::Checkbox("Stop eye at display copy", &g_vrStopAtDisplayCopy)) {
-        aurora_set_stereo_stop_at_display_copy(g_vrStopAtDisplayCopy);
-        RuntimeConfigFile::SetVrStopAtDisplayCopy(g_vrStopAtDisplayCopy);
+    if (ImGui::Combo("Desktop view", &g_vrMirrorView, kVrMirrorViewLabels.data(),
+                     static_cast<int>(kVrMirrorViewLabels.size()))) {
+        aurora_set_stereo_mirror_view(static_cast<AuroraStereoMirrorView>(g_vrMirrorView));
+        RuntimeConfigFile::SetVrMirrorView(kVrMirrorViewNames[static_cast<size_t>(g_vrMirrorView)]);
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
-            "Ends each eye at the frame's final GXCopyDisp, so an eye holds exactly the "
-            "image the game presented. Turn off to replay the whole pass list.");
+            "What this window shows while the headset is running. Normal keeps the ordinary "
+            "desktop view, the eye choices mirror what you are actually seeing in the headset, "
+            "and None leaves the window black. Menus reach the headset as a screen showing this "
+            "same desktop image, so the eye choices only differ from Normal during a race.");
     }
-    if (ImGui::Checkbox("Skip EFB copy clears", &g_vrSkipCopyClears)) {
-        aurora_set_stereo_skip_copy_clears(g_vrSkipCopyClears);
-        RuntimeConfigFile::SetVrSkipCopyClears(g_vrSkipCopyClears);
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(
-            "Drops the EFB reset a GX copy performs after copying. That reset prepares the "
-            "Wii's reused EFB for the next frame; an eye attachment is built fresh, so "
-            "replaying it only erases the eye.");
-    }
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + Scaled(380.0f));
-    ImGui::TextDisabled(
-        "Both apply on the next frame. Turning either off restores the raw replay and is "
-        "expected to black out the eyes.");
-    ImGui::PopTextWrapPos();
-    // Shows the live state, which the Quest's debug.wiicompiled.eye_passes can override.
-    g_vrSinglePassEyes = aurora_get_stereo_single_pass_eyes();
-    if (ImGui::Checkbox("One render pass per eye", &g_vrSinglePassEyes)) {
-        aurora_set_stereo_single_pass_eyes(g_vrSinglePassEyes);
-        RuntimeConfigFile::SetVrSinglePassEyes(g_vrSinglePassEyes);
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(
-            "Keeps drawing each eye in the render pass it has open across the frame's GX "
-            "copies, which only the desktop image performs, and skips what a later clear "
-            "erases. Same picture, less GPU memory traffic; turn off to compare.");
-    }
+
     ImGui::Separator();
-    ImGui::Text("VR 2D layer");
-    ImGui::BeginDisabled(
-        g_vrFlatScreen || g_vrRaceView == static_cast<int>(RuntimeConfigFile::VrRaceView::ImmersiveWindow));
-    if (ImGui::Checkbox("2D layer on a virtual screen", &g_vrHudVirtualScreen)) {
-        ApplyVrHudVirtualScreen();
-        RuntimeConfigFile::SetVrHudVirtualScreen(g_vrHudVirtualScreen);
-    }
-    ImGui::EndDisabled();
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-        ImGui::SetTooltip(
-            "Puts the minimap, race position, item roulette and the rest of the race HUD on a "
-            "screen fixed ahead of the kart camera. Turn off to leave them stretched across "
-            "the whole view. Its size and distance are the [vr] hud_width_meters and "
-            "hud_distance_meters read at launch. The immersive window is that screen, and "
-            "always carries them.");
-    }
-    ImGui::Separator();
-    ImGui::Text("VR view");
     if (ImGui::Button("Recenter view")) {
         mkw::vr::OpenXRRequestRecenter();
     }
@@ -1576,59 +1561,46 @@ void DrawVrSettings() {
             "does pitch the view, and looking sideways while it is set will roll the "
             "horizon the way a real recline would.");
     }
-#if defined(__ANDROID__)
-    if (ImGui::Checkbox("Passthrough around the menu screen", &g_vrPassthrough)) {
-        mkw::vr::OpenXRSetPassthrough(g_vrPassthrough);
-        RuntimeConfigFile::SetVrPassthrough(g_vrPassthrough);
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(
-            "Shows your room through the headset's cameras around the menu screen and every "
-            "other screen outside an immersive race, instead of black. Immersive races stay "
-            "fully virtual; the immersive window and the Flat Screen race have the room "
-            "around them too. Applies immediately.");
-    }
-    // Shows the live level, which debug.wiicompiled.foveation can override.
-    g_vrFoveation = static_cast<int>(aurora_get_stereo_foveation());
-    if (ImGui::Combo("Foveated rendering", &g_vrFoveation, kVrFoveationLabels.data(),
-                     static_cast<int>(kVrFoveationLabels.size()))) {
-        aurora_set_stereo_foveation(static_cast<uint32_t>(g_vrFoveation));
-        RuntimeConfigFile::SetVrFoveation(
-            std::string(RuntimeConfigFile::kVrFoveationLevels[static_cast<size_t>(g_vrFoveation)]));
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(
-            "%s", aurora_stereo_foveation_available()
-                      ? "Shades the edges of the race view in 2x2, then 4x4 pixel blocks, where the "
-                        "lenses blur the picture anyway, to free GPU time for a higher render scale or a "
-                        "steadier frame rate. Higher levels start closer to the centre; High also "
-                        "coarsens the corners of the HUD. Menus are never foveated. Applies immediately."
-                      : "Shades the edges of the race view in 2x2, then 4x4 pixel blocks, where the "
-                        "lenses blur the picture anyway, to free GPU time. This session started with it "
-                        "off, or without a GPU that supports it: a new level applies after a restart.");
-    }
-#endif
+
     ImGui::Separator();
-    ImGui::Text("VR camera");
-    if (ImGui::Combo("Race view", &g_vrRaceView, kVrRaceViewLabels.data(),
-                     static_cast<int>(kVrRaceViewLabels.size()))) {
-        const auto view = static_cast<RuntimeConfigFile::VrRaceView>(g_vrRaceView);
-        g_vrFlatScreen = view == RuntimeConfigFile::VrRaceView::FlatScreen;
-        RuntimeConfigFile::SetVrRaceView(view);
-        mkw::vr::MkwVRPolicySetImmersiveRaces(!g_vrFlatScreen);
-        mkw::vr::OpenXRSetImmersiveWindow(view == RuntimeConfigFile::VrRaceView::ImmersiveWindow);
-        mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
+    ImGui::BeginDisabled(
+        g_vrFlatScreen || g_vrRaceView == static_cast<int>(RuntimeConfigFile::VrRaceView::ImmersiveWindow));
+    if (ImGui::Checkbox("2D layer on a virtual screen", &g_vrHudVirtualScreen)) {
+        ApplyVrHudVirtualScreen();
+        RuntimeConfigFile::SetVrHudVirtualScreen(g_vrHudVirtualScreen);
     }
-    if (ImGui::IsItemHovered()) {
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
         ImGui::SetTooltip(
-            "Immersive plays races all around you in stereo. Immersive window keeps that "
-            "stereo view but shows it only through a window where the menu screen sits, with "
-            "your room around it on the Quest (black elsewhere); look through it from another "
-            "angle and the view shifts as through a real window. Flat screen plays races on "
-            "the menu screen through the game's own camera; the first-person camera, hand "
-            "steering and the race view settings do not apply to it. Applies immediately.");
+            "Puts the minimap, race position, item roulette and the rest of the race HUD on a "
+            "screen fixed ahead of the kart camera. Turn off to leave them stretched across "
+            "the whole view. Its size and distance are the [vr] hud_width_meters and "
+            "hud_distance_meters read at launch. The immersive window is that screen, and "
+            "always carries them.");
     }
-    // Everything below shapes the immersive race view, which Flat Screen mode replaces.
+    ImGui::BeginDisabled(!mkw::vr::OpenXRIsRunning());
+    bool settingsPanelOpen = mkw::vr::OpenXRSettingsPanelOpen();
+    if (ImGui::Checkbox("Show these settings in the headset", &settingsPanelOpen)) {
+        mkw::vr::OpenXRSetSettingsPanelOpen(settingsPanelOpen);
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip(
+            "Opens these settings on a panel in front of you, in menus and races alike.\n"
+            "In the headset, left Y opens and closes it too (with Gamepad VR controllers,\n"
+            "click both thumbsticks together instead).\n"
+            "Aim at it and pull a trigger to change a setting; push a thumbstick to scroll.\n"
+            "While it is open the game does not see the VR controllers.");
+    }
+}
+
+// The first-person camera and its cockpit's steering wheel: the F10 bar's Camera menu and the
+// headset panel's Camera tab.
+void DrawVrCameraSettings() {
+    // All of it shapes the immersive race view, which Flat Screen mode (VR > Race view) replaces.
+    if (g_vrFlatScreen) {
+        ImGui::TextDisabled("Race view (under VR) is Flat screen: these apply to the immersive views.");
+    }
     ImGui::BeginDisabled(g_vrFlatScreen);
     if (ImGui::Checkbox("First-person camera", &g_vrFirstPerson)) {
         RuntimeConfigFile::SetVrFirstPerson(g_vrFirstPerson);
@@ -2155,6 +2127,11 @@ void DrawTopBar() {
         ImGui::EndMenu();
     }
 
+    if (ImGui::BeginMenu("Camera")) {
+        DrawVrCameraSettings();
+        ImGui::EndMenu();
+    }
+
     if (ImGui::BeginMenu("Controller settings")) {
         DrawControllerSettings();
         // Nest capture under this menu so opening/closing the modal preserves
@@ -2351,6 +2328,7 @@ void DrawVrSettingsPanelWindow() {
                 }
             };
             tab("VR", DrawVrSettings);
+            tab("Camera", DrawVrCameraSettings);
             tab("Graphics", [] {
                 DrawResolutionMenu();
                 ImGui::Separator();
@@ -2435,9 +2413,6 @@ void InitializeRuntimeSettings() noexcept {
     aurora_set_display_mode(static_cast<AuroraDisplayMode>(g_displayMode));
     g_displayMode = static_cast<int>(aurora_get_display_mode());
     aurora_set_disable_copy_filter(g_disableCopyFilter);
-    aurora_set_stereo_stop_at_display_copy(g_vrStopAtDisplayCopy);
-    aurora_set_stereo_skip_copy_clears(g_vrSkipCopyClears);
-    aurora_set_stereo_single_pass_eyes(g_vrSinglePassEyes);
 #if defined(__ANDROID__)
     aurora_set_stereo_foveation(static_cast<uint32_t>(g_vrFoveation));
 #endif

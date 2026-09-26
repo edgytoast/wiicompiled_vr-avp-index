@@ -47,9 +47,6 @@ hud_width_meters = 2.4
 hud_virtual_screen = true
 flat_screen = false
 immersive_window = false
-stop_at_display_copy = true
-skip_copy_clears = true
-single_pass_eyes = true
 first_person = false
 first_person_toggle_click = true
 first_person_seat = "cockpit"
@@ -187,16 +184,17 @@ panel's rectangle), at the same size per pixel, so nothing moves.
 `hand_tracking` (Quest only, default off) makes the first-person cockpit's hands follow the
 headset's hand tracking; see "Tracked hands" under
 [Steering wheel and hand steering](#steering-wheel-and-hand-steering).
-`stop_at_display_copy` ends eye replay at the final `GXCopyDisp`, matching the frame shown on the
-desktop. `skip_copy_clears` independently suppresses the EFB reset performed after a copy. Both
-default on and can be changed live from the F10 settings bar for diagnostics.
-`single_pass_eyes` draws each eye in one render pass. The desktop image ends a render pass at every
-GX copy, because the copy reads what was drawn before it; an eye samples the copies the desktop
-image made and never performs them, so it keeps drawing in the pass it has open, and it leaves out
-whatever a later clear of the whole color and depth erases. The picture is the same with less GPU
-memory traffic, which a tiled mobile GPU pays for at every split (the "Eye replay plan" log line
-reports each new pass structure). It defaults on and is live; turning it off replays one render pass
-per recorded pass.
+How each eye is replayed is fixed; the former `stop_at_display_copy`, `skip_copy_clears` and
+`single_pass_eyes` settings are ignored. An eye ends at the frame's final `GXCopyDisp`, so it holds
+the frame shown on the desktop. It keeps the EFB reset that follows a display copy: Aurora marks
+only a display copy's reset, the final one lies past the replay's end, and an earlier one erases
+exactly what the final copy did not show. And it is drawn in one render pass. The desktop image ends
+a render pass at every GX copy, because the copy reads what was drawn before it; an eye samples the
+copies the desktop image made and never performs them, so it keeps drawing in the pass it has open,
+and it leaves out whatever a later clear of the whole color and depth erases. The picture is the
+same with less GPU memory traffic, which a tiled mobile GPU pays for at every split (the "Eye replay
+plan" log line reports each new pass structure). On the Quest, `debug.wiicompiled.eye_passes 0`
+replays one render pass per recorded pass again, for A/B timing (`docs/quest-port.md`).
 `first_person` and the `first_person_*` values are the first-person camera described below. All
 four are live and are also exposed in the F10 settings bar.
 `performance_level` is the level asked of the runtime through `XR_EXT_performance_settings` for
@@ -216,7 +214,7 @@ Settings page has it too.
 The headset's tracked controllers reach the game through an OpenXR action set synced on the pacing
 thread (`runtime/src/vr/openxr_input.cpp`), which feeds a virtual SDL gamepad that Aurora assigns
 to a port like any other. `controller_mode` decides what the game finds on that port, and is live
-from **F10 > VR > VR controllers**; the game sees a change as a controller reconnection.
+from **F10 > Controller settings > VR controllers**; the game sees a change as a controller reconnection.
 
 The pacing thread only publishes that gamepad; the game thread writes it to SDL where it already
 polls controllers (`OpenXRApplyControllerState`, called from `PAD__Read_HLE` and the overlay's
@@ -319,7 +317,7 @@ thumbsticks together** instead); the left controller's menu button and the panel
 also close it. It can be opened from the desktop as well, with
 **F10 → VR → Show these settings in the headset**.
 
-The panel has the F10 bar's menus as tabs (VR, Graphics, Controllers, Audio, Diagnostics) and a
+The panel has the F10 bar's menus as tabs (VR, Camera, Graphics, Controllers, Audio, Diagnostics) and a
 *Recenter view* button. Aim a controller at it: the cursor goes where you aim, a trigger (or A / X)
 selects and drags sliders, and a thumbstick scrolls. Whichever hand last pulled its trigger does the
 pointing. Changes apply exactly as they do from the F10 bar, and the two stay in step.
@@ -540,7 +538,7 @@ full-lock angle as the stick (`wheel_kart_degrees`, `wheel_bike_degrees`), and h
 aside while it drives.
 
 **Tracked hands.** `hand_tracking` (Quest only for now, default off; the Quest launcher's
-Settings > VR and the headset panel's VR tab, under hand steering, which it needs) poses the
+Settings > VR and the headset panel's Camera tab, under hand steering, which it needs) poses the
 cockpit hands from the headset's hand tracking instead of curling them with the grip. Two hand
 trackers (`XR_EXT_hand_tracking`) are located every XR frame at the display time. While the
 controllers are held the Quest builds the joints from their touch sensors
@@ -769,8 +767,9 @@ eye's last draw Aurora covers the eye with one full-screen triangle (`aurora-mai
 that keeps the colour inside the window with alpha 1 and leaves transparent black outside it, with a
 one-pixel ramp at the edge. The triangle carries, at each corner, where that pixel's ray meets the
 window's plane in homogeneous window coordinates (`stereo_replay::window_mask`), which interpolate
-exactly across the image. With `single_pass_eyes` it is drawn in the eye's own last render pass, so it
-adds no pass and no tile load; otherwise it takes a pass of its own, as the cockpit overlay does. On
+exactly across the image. It is drawn in the eye's own last render pass, so it adds no pass and no
+tile load; an eye replayed one render pass per recorded pass (`debug.wiicompiled.eye_passes 0`)
+gives it a pass of its own, as the cockpit overlay has. On
 the Quest the backend submits the passthrough layer, then the projection layer with
 `XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT` (premultiplied alpha), then the settings panel.
 The flag travels with the packet, so the eyes Aurora masked and the layer that blends them always
@@ -848,7 +847,7 @@ pipeline flag. That is why the launch decides.
 A density map forces Adreno into binned rendering, where every extra render pass in an eye stores
 and reloads the whole eye. DolphinXR measured foveation as a net loss on Mario Kart Wii for exactly
 that reason (its bloom chain splits the frame about 20 times). An eye is therefore foveated only
-when it is drawn in a single render pass (`single_pass_eyes`); an eye that a partial clear still
+when it is drawn in a single render pass, as every eye is by default; an eye that a partial clear still
 splits is drawn at full rate. The session log reports what happened: "Fragment density maps:
 enabled" at startup, one "eye foveation" line per eye and level with the map's size, and the "Eye
 replay plan" lines. `debug.wiicompiled.foveation <0-3>` overrides the level for A/B timing, and
@@ -858,7 +857,7 @@ What it saves depends on how much of an eye's cost is shading pixels. The number
 Quest 3 at Luigi Circuit's Grand Prix start: GPU time of both eyes per frame, all settings
 interleaved within one session (`docs/quest-port.md` has the method).
 
-| `render_scale` (eye size) | One pass per recorded pass | `single_pass_eyes` | `low` | `medium` | `high` |
+| `render_scale` (eye size) | One pass per recorded pass | One pass per eye | `low` | `medium` | `high` |
 | --- | --- | --- | --- | --- | --- |
 | 0.8 (1344x1408) | 5.82 ms | 5.11 ms | 5.09 ms | 5.36 ms | 5.11 ms |
 | 1.3 (2184x2288) | 6.32 ms | 5.81 ms | 5.33 ms | 5.00 ms | 4.56 ms |

@@ -144,7 +144,7 @@ Aurora (`lib/webgpu/fdm.cpp`, `lib/gfx/foveation.hpp`) builds one map per eye,
 32 pixels per texel (42x44 for 1344x1408 eyes). The map is centred on that eye's
 forward direction and rebuilt when the eye's size, field of view or level
 changes. It is bound to a second view of the eye texture that only a
-single-render-pass immersive eye renders through (`single_pass_eyes`). Density
+single-render-pass immersive eye renders through (every eye, by default). Density
 bytes are 255, 127 and 63: a fragment covers 1/density pixels rounded down to a
 supported size, so a half written as 128 could round back to one pixel.
 Changing the level is live. The launch decides whether the device has density
@@ -919,7 +919,7 @@ the app:
 | `debug.wiicompiled.vtxpad 0` | Turns the stride padding off, to re-check a driver update |
 | `debug.wiicompiled.validation 1` | Keeps WebGPU validation and robustness on in release builds |
 | `debug.wiicompiled.panel_layer 0` | Draws the headset settings panel into the eye images instead of on its own quad layer (`OPENXR.md`, Settings in the headset); read about once a second, so it can be switched while the panel is open |
-| `debug.wiicompiled.eye_passes 0` | Replays each eye in one render pass per recorded pass, as before `single_pass_eyes` (`OPENXR.md`); `1` forces the single pass and an empty value restores the setting. Read about once a second, for A/B timing inside one session |
+| `debug.wiicompiled.eye_passes 0` | Replays each eye in one render pass per recorded pass, as before eyes were drawn in a single pass (`OPENXR.md`); `1` or an empty value restores the single pass. Read about once a second, for A/B timing inside one session |
 | `debug.wiicompiled.foveation <0-3>` | Overrides the foveation level (off, low, medium, high) within one session; an empty value restores the setting. Needs a session launched with foveation on. Read about once a second |
 | `debug.wiicompiled.fdm 0` | Launches without fragment density maps at all, whatever `foveation` says, which also drops their flag from every pipeline; `1` asks for them even with `foveation = "off"` |
 | `debug.wiicompiled.inject <n>:<button>` | Presses `a`, `b`, `x`, `y`, `start`, `up`, `down`, `left` or `right` for 12 XR frames each time `<n>` changes. As a Wii Remote, `x`/`y`/`start` are 1/2/+, the directions push the Nunchuk stick, and `home`, `c` and `z` also exist. `panel` presses the settings panel's button (left Y, or both thumbsticks as a gamepad), opening or closing it (see `OPENXR.md`). `flick` plays the bare hands' flick, one 150 ms shake of the remote (a trick off a ramp, a wheelie on a bike), with the controllers or none |
