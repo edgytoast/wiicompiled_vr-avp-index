@@ -761,7 +761,12 @@ off by the eye's own ground. An eye therefore skips the perspective draws of the
 produced the depth copy where they were recorded and re-issues them in the composite's place,
 with this eye's transforms, a constant-alpha blend (`kCompositeSourceAlpha`, about the strength of
 the game's own composite) and a depth test against the world the eye has drawn by then: the ghost
-in stereo, translucent, where the game put it. The desktop image is unchanged. The link is logged
+in stereo, translucent, where the game put it. The desktop image is unchanged. The link is made as
+the composite is recorded, so frames without a composite do no work for it, and a draw only
+costs one comparison. The constant-alpha pipeline variants exist only for pipelines seen among
+a composite's source draws: such a pipeline gets them from its next draw, and until then the
+eye leaves that draw out, so a ghost first drawn in a session is missing from the eyes for that
+one frame. The link is logged
 once (`Immersive replay: pass N ... is re-issued by each eye`).
 
 A reprojected 2D draw

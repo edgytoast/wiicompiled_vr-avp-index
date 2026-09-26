@@ -209,7 +209,7 @@ struct RenderPass {
   bool snapshotColorResolveSource = false;
   bool efbTarget = false;
   // This pass's perspective draws are re-issued by an eye at the composite that samples its
-  // depth copy (link_composite_sources), and skipped where they were recorded.
+  // depth copy (link_composite_source), and skipped where they were recorded.
   bool compositeSource = false;
   std::vector<tex_palette_conv::ConvRequest> paletteConvs;
 };
@@ -954,8 +954,57 @@ void end_offscreen() {
   push_command(CommandType::SetScissor, Command::Data{.setScissor = g_cachedScissor});
 }
 
+// Mario Kart Wii draws a ghost kart by rendering it alone into the cleared EFB, copying the
+// frame's colour and depth out, drawing the race, and blending the copies back with one
+// orthographic quad whose depth comes from the depth copy. That quad is a native effect, so an
+// eye would stamp the desktop's flat image of the ghost over its own view, following the head
+// and cut by the eye's ground. Instead the eye skips the draws of the pass that resolved the
+// depth copy where they were recorded and re-issues them in the composite's place, blended
+// with kCompositeSourceAlpha and depth-tested against its own world: the ghost in stereo,
+// translucent, where the game put it.
+//
+// Linked as the composite is recorded, so a frame without one does no work for it. The source
+// pass is complete by then, and only the current pass ever moves (offscreen suspension), so it
+// is found by the copy it resolved. A source draw without constant-alpha siblings asks for them
+// here; its pipeline's next draw brings them, and until then the eye leaves that draw out.
+static void link_composite_source(const gx::DrawData& composite) noexcept {
+  if (g_currentRenderPass >= g_renderPasses.size()) {
+    return;
+  }
+  static bool linkLogged = false;
+  for (size_t p = g_currentRenderPass; p-- > 0;) {
+    auto& source = g_renderPasses[p];
+    if (!source.efbTarget || source.resolveTarget.get() != composite.uniformReplayLayout.compositeDepthCopy) {
+      continue;
+    }
+    size_t draws = 0;
+    for (const auto& command : source.commands) {
+      if (command.type != CommandType::Draw || command.data.draw.type != ShaderType::GX ||
+          !command.data.draw.gx.uniformReplayLayout.perspective) {
+        continue;
+      }
+      ++draws;
+      if (command.data.draw.gx.stereoCompositeSourcePipeline == 0) {
+        gx::note_composite_source_pipeline(command.data.draw.gx.pipeline);
+      }
+    }
+    if (draws > 0) {
+      source.compositeSource = true;
+      if (!linkLogged) {
+        linkLogged = true;
+        Log.info("Immersive replay: pass {} ({} perspective draws) is re-issued by each eye in place of a "
+                 "composite that samples its depth copy",
+                 p, draws);
+      }
+    }
+    return;
+  }
+}
+
 template <>
 void push_draw_command(gx::DrawData data) {
+  if (data.uniformReplayLayout.compositeDepthCopy != nullptr && stereo_frame_provider_active())
+    UNLIKELY { link_composite_source(data); }
   push_draw_command(ShaderDrawCommand{.type = ShaderType::GX, .gx = data});
 }
 
@@ -1650,66 +1699,6 @@ static bool prepare_stereo_replay_uniforms(const StereoReplayFrame& stereoFrame,
   return true;
 }
 
-// Mario Kart Wii draws a ghost kart by rendering it alone into the cleared EFB, copying the
-// frame's colour and depth out, drawing the race, and blending the copies back with one
-// orthographic quad whose depth comes from the depth copy. That quad is a native effect, so an
-// eye would stamp the desktop's flat image of the ghost over its own view, following the head
-// and cut by the eye's ground. Instead the eye skips the draws of the pass that produced the
-// depth copy where they were recorded and re-issues them in the composite's place, blended
-// with kCompositeSourceAlpha and depth-tested against the eye's own world: the ghost in stereo,
-// translucent, where the game put it. Runs once the frame's passes are complete, on the
-// producer, before the frame is sealed.
-static void link_composite_sources() noexcept {
-  if (g_stereoLocalPlayerCount > 1) {
-    return;
-  }
-  static bool linkLogged = false;
-  for (size_t i = 0; i < g_renderPasses.size(); ++i) {
-    if (!g_renderPasses[i].efbTarget) {
-      continue;
-    }
-    for (auto& command : g_renderPasses[i].commands) {
-      if (command.type != CommandType::Draw || command.data.draw.type != ShaderType::GX) {
-        continue;
-      }
-      auto& layout = command.data.draw.gx.uniformReplayLayout;
-      layout.compositeSourcePass = -1;
-      if (!layout.nativeEfbEffect || layout.perspective || layout.compositeDepthCopy == nullptr) {
-        continue;
-      }
-      for (size_t p = i; p-- > 0;) {
-        auto& source = g_renderPasses[p];
-        if (!source.efbTarget || source.resolveTarget.get() != layout.compositeDepthCopy) {
-          continue;
-        }
-        size_t draws = 0;
-        for (auto& sourceCommand : source.commands) {
-          if (sourceCommand.type != CommandType::Draw || sourceCommand.data.draw.type != ShaderType::GX) {
-            continue;
-          }
-          auto& sourceDraw = sourceCommand.data.draw.gx;
-          if (sourceDraw.uniformReplayLayout.perspective &&
-              gx::resolve_composite_source_pipelines(sourceDraw.configHash, sourceDraw.stereoGhostPipeline,
-                                                     sourceDraw.stereoGhostStencilPipeline)) {
-            ++draws;
-          }
-        }
-        if (draws > 0) {
-          source.compositeSource = true;
-          layout.compositeSourcePass = static_cast<int32_t>(p);
-          if (!linkLogged) {
-            linkLogged = true;
-            Log.info("Immersive replay: pass {} ({} perspective draws) is re-issued by each eye in place of the "
-                     "composite in pass {} that samples its depth copy",
-                     p, draws, i);
-          }
-        }
-        break;
-      }
-    }
-  }
-}
-
 static bool end_batch_impl(const wgpu::CommandEncoder& cmd, bool advanceFrame,
                            const StereoReplayFrame* stereoFrame = nullptr) {
   ZoneScoped;
@@ -1729,9 +1718,6 @@ static bool end_batch_impl(const wgpu::CommandEncoder& cmd, bool advanceFrame,
   const bool stereoPrepared = (stereoFrame == nullptr && !captureStereo) ||
                               prepare_stereo_replay_uniforms(stereoFrame != nullptr ? *stereoFrame : placeholder,
                                                              captureStereo ? &g_pendingLateStereo : nullptr);
-  if (stereoPrepared && (stereoFrame != nullptr || captureStereo)) {
-    link_composite_sources();
-  }
   if (captureStereo && stereoPrepared) {
     g_pendingLateStereo.generation = g_replayBufferGeneration.load(std::memory_order_acquire);
   } else {
@@ -2697,9 +2683,20 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
                    static_cast<int32_t>(top), static_cast<int32_t>(targetSize.height)));
     return std::array<uint32_t, 4>{left, top, right - left, bottom - top};
   };
+  // Composites serve one camera; a multiplayer eye keeps every draw where it was recorded.
+  const bool compositeReplay = overrideTarget && !multiplayer;
+  const bool skipCompositeSource = compositeReplay && renderPasses[idx].compositeSource;
+  const auto find_composite_source = [&](const TextureRef* depthCopy) -> const RenderPass* {
+    for (u32 p = 0; p < idx; ++p) {
+      if (renderPasses[p].compositeSource && renderPasses[p].resolveTarget.get() == depthCopy) {
+        return &renderPasses[p];
+      }
+    }
+    return nullptr;
+  };
   // The perspective draws of a composite's source pass, in the composite's place: their own
   // recorded viewport and scissor, this eye's uniforms, the constant-alpha pipeline sibling,
-  // depth-tested against the world the eye has drawn by now (see link_composite_sources).
+  // depth-tested against the world the eye has drawn by now (see link_composite_source).
   const auto replay_composite_source = [&](const RenderPass& source) {
     const wgpu::Color alpha{stereo_replay::kCompositeSourceAlpha, stereo_replay::kCompositeSourceAlpha,
                             stereo_replay::kCompositeSourceAlpha, stereo_replay::kCompositeSourceAlpha};
@@ -2721,7 +2718,7 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
       if (!draw.uniformReplayLayout.perspective) {
         continue;
       }
-      const gfx::PipelineRef pipeline = stencilTarget ? draw.stereoGhostStencilPipeline : draw.stereoGhostPipeline;
+      const gfx::PipelineRef pipeline = stencilTarget ? draw.stereoCompositeSourcePipeline : draw.compositeSourcePipeline;
       if (pipeline == 0) {
         continue;
       }
@@ -2795,14 +2792,15 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
                             !stereo_replay::subviews_overlap(sourceScissor, playerRegion))) {
           break;
         }
-        // A composite's source pass is drawn at the composite instead (link_composite_sources).
-        if (overrideTarget && renderPasses[idx].compositeSource) {
+        // A composite's source pass is drawn at the composite instead (link_composite_source).
+        if (skipCompositeSource) {
           break;
         }
-        if (overrideTarget && draw.gx.uniformReplayLayout.compositeSourcePass >= 0 &&
-            static_cast<size_t>(draw.gx.uniformReplayLayout.compositeSourcePass) < renderPasses.size()) {
-          replay_composite_source(renderPasses[static_cast<size_t>(draw.gx.uniformReplayLayout.compositeSourcePass)]);
-          break;
+        if (compositeReplay && draw.gx.uniformReplayLayout.compositeDepthCopy != nullptr) {
+          if (const RenderPass* source = find_composite_source(draw.gx.uniformReplayLayout.compositeDepthCopy)) {
+            replay_composite_source(*source);
+            break;
+          }
         }
         const gfx::Range* uniformOverride = nullptr;
         // Only a 2D draw the virtual screen actually claimed carries a stereo

@@ -14,11 +14,11 @@ struct DrawData {
   // Eye depth/stencil format siblings. Shader modules are shared with mono.
   gfx::PipelineRef stereoPipeline = 0;
   gfx::PipelineRef stereoScreenPipeline = 0;
-  // Constant-alpha siblings, resolved only for the draws of a composite's source pass
-  // (link_composite_sources) from the config remembered under configHash.
-  gfx::PipelineRef stereoGhostPipeline = 0;
-  gfx::PipelineRef stereoGhostStencilPipeline = 0;
-  HashType configHash = 0;
+  // Constant-alpha (kCompositeSourceBlend) siblings of pipeline and stereoPipeline, set only
+  // on the perspective draws of a pipeline an eye re-issues at a composite
+  // (note_composite_source_pipeline).
+  gfx::PipelineRef compositeSourcePipeline = 0;
+  gfx::PipelineRef stereoCompositeSourcePipeline = 0;
   gfx::Range vertRange;
   gfx::Range idxRange;
   gfx::Range uniformRange;
@@ -101,9 +101,10 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass, DrawEncod
             bool requireReadyPipeline, const gfx::Range* uniformRangeOverride = nullptr,
             gfx::PipelineRef pipelineOverride = 0, const wgpu::Color* blendConstantOverride = nullptr);
 
-// The constant-alpha (kCompositeSourceBlend) siblings of the pipeline recorded under configHash,
-// for a stencil-less and a stencil eye target. False when the config is no longer remembered.
-bool resolve_composite_source_pipelines(HashType configHash, gfx::PipelineRef& plain, gfx::PipelineRef& stencil);
+// Gives the draws of `pipeline` their constant-alpha siblings from its next draw on: an eye
+// re-issues them at a composite (gfx::link_composite_source). Called with the renderer lock
+// the draw paths hold, as the composite is recorded.
+void note_composite_source_pipeline(gfx::PipelineRef pipeline) noexcept;
 
 void queue_surface(const u8* dlStart, uint32_t dlSize, bool bigEndian) noexcept;
 } // namespace aurora::gx

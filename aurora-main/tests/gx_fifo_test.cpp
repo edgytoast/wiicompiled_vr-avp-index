@@ -5308,11 +5308,92 @@ TEST_F(GXFifoTest, NativeCompositeRecordsTheFrameSizedDepthCopyItSamples) {
                                                    aurora::gx::FrameInterpolationDrawIdentity{}, false);
   EXPECT_TRUE(composite.replayLayout.nativeEfbEffect);
   EXPECT_EQ(composite.replayLayout.compositeDepthCopy, records[0].texture.get());
-  EXPECT_EQ(composite.replayLayout.compositeSourcePass, -1);
 
   // The same draw with the game camera is world geometry, whatever it samples.
   aurora::gfx::testing::reset_uniform_allocations();
   const auto world = aurora::gx::build_uniform(info, 0, aurora::gx::BindGroupRanges{},
                                                aurora::gx::FrameInterpolationDrawIdentity{}, true);
   EXPECT_EQ(world.replayLayout.compositeDepthCopy, nullptr);
+}
+
+static void draw_quad_with_projection(GXProjectionType type) {
+  aurora::gfx::testing::use_real_vertex_format_helpers(true);
+  aurora::gfx::testing::use_draw_command_tracking(true);
+
+  aurora::Mat4x4<float> proj{};
+  if (type == GX_PERSPECTIVE) {
+    proj.m0[0] = 1.0f;
+    proj.m1[1] = 1.0f;
+    proj.m2[2] = -1.0f;
+    proj.m2[3] = -1.0f;
+    proj.m3[2] = -1.0f;
+  } else {
+    proj.m0[0] = 2.0f / 608.0f;
+    proj.m0[3] = -1.0f;
+    proj.m1[1] = -2.0f / 456.0f;
+    proj.m1[3] = 1.0f;
+    proj.m2[2] = -1.0f;
+    proj.m3[3] = 1.0f;
+  }
+  GXSetProjection(&proj, type);
+  GXSetViewport(0.0f, 0.0f, 608.0f, 456.0f, 0.0f, 1.0f);
+  GXSetScissor(0, 0, 608, 456);
+  aurora::Mat3x4<float> identity{};
+  identity.m0[0] = identity.m1[1] = identity.m2[2] = 1.0f;
+  GXLoadPosMtxImm(&identity, GX_PNMTX0);
+  GXSetCurrentMtx(GX_PNMTX0);
+
+  GXClearVtxDesc();
+  GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
+  GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+  GXSetNumChans(0);
+  GXSetNumTexGens(0);
+  GXSetNumTevStages(1);
+  GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR_NULL);
+  GXSetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_C0);
+  GXSetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+  GXSetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_A0);
+  GXSetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+  const float corners[4][2]{{-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f}};
+  GXBegin(GX_QUADS, GX_VTXFMT0, 4);
+  for (const auto& corner : corners) {
+    GXPosition3f32(corner[0], corner[1], -5.0f);
+  }
+  GXEnd();
+}
+
+TEST_F(GXFifoTest, CompositeSourcePipelineGetsConstantAlphaSiblingsFromItsNextDraw) {
+  // An eye re-issues MKW's ghost kart draws at the composite with constant-alpha siblings of
+  // their pipelines. Only a pipeline an eye asked for gets them, from its next draw on, and
+  // only in perspective draws.
+  draw_quad_with_projection(GX_PERSPECTIVE);
+  decode_fifo(flush_and_capture());
+  const auto* first = aurora::gfx::get_last_draw_command<aurora::gx::DrawData>();
+  ASSERT_NE(first, nullptr);
+  ASSERT_TRUE(first->uniformReplayLayout.perspective);
+  ASSERT_NE(first->pipeline, 0u);
+  EXPECT_EQ(first->compositeSourcePipeline, 0u);
+  EXPECT_EQ(first->stereoCompositeSourcePipeline, 0u);
+  const auto pipeline = first->pipeline;
+
+  aurora::gx::note_composite_source_pipeline(pipeline);
+  draw_quad_with_projection(GX_PERSPECTIVE);
+  decode_fifo(flush_and_capture());
+  const auto* next = aurora::gfx::get_last_draw_command<aurora::gx::DrawData>();
+  ASSERT_NE(next, nullptr);
+  ASSERT_EQ(next->pipeline, pipeline);
+  EXPECT_NE(next->compositeSourcePipeline, 0u);
+  EXPECT_NE(next->stereoCompositeSourcePipeline, 0u);
+  EXPECT_NE(next->compositeSourcePipeline, next->pipeline);
+  EXPECT_NE(next->stereoCompositeSourcePipeline, next->stereoPipeline);
+  EXPECT_NE(next->compositeSourcePipeline, next->stereoCompositeSourcePipeline);
+
+  draw_quad_with_projection(GX_ORTHOGRAPHIC);
+  decode_fifo(flush_and_capture());
+  const auto* flat = aurora::gfx::get_last_draw_command<aurora::gx::DrawData>();
+  ASSERT_NE(flat, nullptr);
+  ASSERT_EQ(flat->pipeline, pipeline);
+  EXPECT_EQ(flat->compositeSourcePipeline, 0u);
+  EXPECT_EQ(flat->stereoCompositeSourcePipeline, 0u);
 }
