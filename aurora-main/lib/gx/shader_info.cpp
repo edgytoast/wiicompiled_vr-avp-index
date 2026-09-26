@@ -743,6 +743,7 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
   // eligible for the virtual screen even when small and alpha blended.
   bool samplesRecentEfbCopy = false;
   bool samplesReducedEfbCopy = false;
+  const gfx::TextureRef* compositeDepthCopy = nullptr;
   const u32 currentFrame = gfx::current_frame();
   for (int i = 0; i < info.sampledTextures.size(); ++i) {
     if (!info.sampledTextures.test(i)) {
@@ -752,8 +753,11 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
     // CHECK(tex, "unbound texture {}", i);
     if (tex.ref && tex.ref->is_recent_efb_copy(currentFrame)) {
       samplesRecentEfbCopy = true;
-      samplesReducedEfbCopy =
-          samplesReducedEfbCopy || tex.texObj.width() * 2 <= kEfbWidth || tex.texObj.height() * 2 <= kEfbHeight;
+      const bool reduced = tex.texObj.width() * 2 <= kEfbWidth || tex.texObj.height() * 2 <= kEfbHeight;
+      samplesReducedEfbCopy = samplesReducedEfbCopy || reduced;
+      if (!perspective && !reduced && is_depth_format(tex.texObj.format())) {
+        compositeDepthCopy = tex.ref.get();
+      }
     }
     buf.append(texture_size_bias(tex));
   }
@@ -778,6 +782,8 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
                                  (drawViewport.width < static_cast<float>(fbWidth) * 0.9f ||
                                   drawViewport.height < static_cast<float>(fbHeight) * 0.9f);
 
+  const bool nativeEfbEffect =
+      !perspective && (readsDstAlpha || (samplesRecentEfbCopy && (samplesReducedEfbCopy || blends || offscreenViewport)));
   const UniformReplayLayout replayLayout{
       .projectionOffset = static_cast<uint32_t>(projectionOffset),
       .positionOffset = static_cast<uint32_t>(positionOffset),
@@ -787,8 +793,8 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
       .normalMatrixCount = layout.nrmCount,
       .perspective = perspective,
       .indexedMatrices = info.indexAttr.test(GX_VA_PNMTXIDX),
-      .nativeEfbEffect = !perspective && (readsDstAlpha || (samplesRecentEfbCopy &&
-                                                            (samplesReducedEfbCopy || blends || offscreenViewport))),
+      .nativeEfbEffect = nativeEfbEffect,
+      .compositeDepthCopy = nativeEfbEffect ? compositeDepthCopy : nullptr,
   };
 
   if (!perspective || !frame_interpolation_active()) {

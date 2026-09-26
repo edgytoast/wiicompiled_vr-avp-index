@@ -5246,3 +5246,73 @@ TEST_F(GXFifoTest, OffscreenViewportPassOverFreshCopyIsNativeEfbEffect) {
                                                      aurora::gx::FrameInterpolationDrawIdentity{}, false);
   EXPECT_FALSE(frameLayout.replayLayout.nativeEfbEffect);
 }
+
+TEST(GXPipelineConfig, StereoStencilFieldCarriesTheCompositeSourceBlendBit) {
+  aurora::gx::PipelineConfig config{};
+  config.stereoStencil = aurora::gx::kStereoStencilFormat | aurora::gx::kCompositeSourceBlend;
+  EXPECT_TRUE(aurora::gx::valid_pipeline_config(config));
+  config.stereoStencil = (aurora::gx::kStereoStencilFormat | aurora::gx::kCompositeSourceBlend) + 1;
+  EXPECT_FALSE(aurora::gx::valid_pipeline_config(config));
+}
+
+TEST_F(GXFifoTest, NativeCompositeRecordsTheFrameSizedDepthCopyItSamples) {
+  // Mario Kart Wii's ghost kart: one orthographic quad blends a frame-sized colour copy back
+  // over the race with the depth of a frame-sized depth copy. The layout names that depth copy so
+  // the eye replay can find the pass whose draws produced it.
+  // Frame-sized buffers: static so two of them do not exhaust the test thread's stack.
+  static std::array<u8, 608 * 456 * 4> colour{};
+  static std::array<u8, 608 * 456 * 4> depth{};
+  gxState().pixelFmt = GX_PF_RGBA6_Z24;
+  aurora::gfx::testing::set_framebuffer_sizes(640, 528, 640, 528);
+  aurora::gfx::testing::set_current_frame(50);
+
+  GXSetTexCopySrc(0, 0, 608, 456);
+  GXSetTexCopyDst(608, 456, GX_TF_Z24X8, GX_FALSE);
+  GXCopyTex(depth.data(), GX_TRUE);
+  GXSetTexCopyDst(608, 456, GX_TF_RGB565, GX_FALSE);
+  GXCopyTex(colour.data(), GX_TRUE);
+  const auto& records = aurora::gfx::testing::resolve_pass_records();
+  ASSERT_EQ(records.size(), 2u);
+  ASSERT_TRUE(records[0].texture);
+  ASSERT_TRUE(records[1].texture);
+
+  GXTexObj_ colourObj{};
+  colourObj.mWidth = 608;
+  colourObj.mHeight = 456;
+  colourObj.mFormat = GX_TF_RGB565;
+  GXTexObj_ depthObj{};
+  depthObj.mWidth = 608;
+  depthObj.mHeight = 456;
+  depthObj.mFormat = GX_TF_Z24X8;
+  gxState().textures[GX_TEXMAP0] = aurora::gfx::TextureBind{colourObj, records[1].texture};
+  gxState().textures[GX_TEXMAP1] = aurora::gfx::TextureBind{depthObj, records[0].texture};
+  gxState().blendMode = GX_BM_BLEND;
+  gxState().blendFacSrc = GX_BL_SRCALPHA;
+  gxState().blendFacDst = GX_BL_INVSRCALPHA;
+  gxState().logicalViewport = {0.0f, 0.0f, 640.0f, 528.0f, 0.0f, 1.0f};
+  aurora::gx::ShaderConfig shader{};
+  shader.numTexGens = 2;
+  shader.tevStageCount = 2;
+  shader.tevStages[0].texCoordId = GX_TEXCOORD0;
+  shader.tevStages[0].texMapId = GX_TEXMAP0;
+  shader.tevStages[0].colorPass.d = GX_CC_TEXC;
+  shader.tevStages[0].alphaPass.d = GX_CA_TEXA;
+  shader.tevStages[1].texCoordId = GX_TEXCOORD1;
+  shader.tevStages[1].texMapId = GX_TEXMAP1;
+  shader.tevStages[1].colorPass.d = GX_CC_TEXC;
+  shader.tevStages[1].alphaPass.d = GX_CA_TEXA;
+  const auto info = aurora::gx::build_shader_info(shader);
+
+  aurora::gfx::testing::reset_uniform_allocations();
+  const auto composite = aurora::gx::build_uniform(info, 0, aurora::gx::BindGroupRanges{},
+                                                   aurora::gx::FrameInterpolationDrawIdentity{}, false);
+  EXPECT_TRUE(composite.replayLayout.nativeEfbEffect);
+  EXPECT_EQ(composite.replayLayout.compositeDepthCopy, records[0].texture.get());
+  EXPECT_EQ(composite.replayLayout.compositeSourcePass, -1);
+
+  // The same draw with the game camera is world geometry, whatever it samples.
+  aurora::gfx::testing::reset_uniform_allocations();
+  const auto world = aurora::gx::build_uniform(info, 0, aurora::gx::BindGroupRanges{},
+                                               aurora::gx::FrameInterpolationDrawIdentity{}, true);
+  EXPECT_EQ(world.replayLayout.compositeDepthCopy, nullptr);
+}

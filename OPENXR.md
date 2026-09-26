@@ -750,7 +750,21 @@ full-screen orthographic quad then darkens the image by destination alpha. The e
 volumes, so that alpha exists in each eye, and the quad has to cover the whole eye: on the virtual
 screen it shaded only the screen's rectangle, cutting every shadow off at its edge. Retained one-shot
 EFB bakes such as Mario Kart Wii's minimap are treated as game art and remain eligible for the
-screen. A reprojected 2D draw
+screen.
+
+One native effect is replayed differently: a composite that samples a freshly produced,
+frame-sized depth copy. Mario Kart Wii draws a ghost kart by rendering it alone into the cleared
+EFB, copying the frame's colour and depth out, drawing the race, and blending the copies back
+with one orthographic quad whose depth comes from the depth copy. Left on its recorded transforms,
+that quad stamps the desktop's flat image of the ghost over each eye, following the head and cut
+off by the eye's own ground. An eye therefore skips the perspective draws of the pass that
+produced the depth copy where they were recorded and re-issues them in the composite's place,
+with this eye's transforms, a constant-alpha blend (`kCompositeSourceAlpha`, about the strength of
+the game's own composite) and a depth test against the world the eye has drawn by then: the ghost
+in stereo, translucent, where the game put it. The desktop image is unchanged. The link is logged
+once (`Immersive replay: pass N ... is re-issued by each eye`).
+
+A reprojected 2D draw
 uses the full eye viewport and scissor because its recorded rectangle no longer describes where it
 ended up; its original viewport is folded into the projection instead.
 

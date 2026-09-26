@@ -6,6 +6,11 @@
 
 namespace aurora::gfx::stereo_replay {
 
+// The alpha an eye re-issues a composite's source draws with (Mario Kart Wii's ghost kart).
+// The game's own composite blends its copy of the ghost at about half strength; the constant
+// stands in for the alpha that quad carries in its vertex colour.
+constexpr float kCompositeSourceAlpha = 0.5f;
+
 struct SubviewRect {
   float left = 0.f;
   float top = 0.f;

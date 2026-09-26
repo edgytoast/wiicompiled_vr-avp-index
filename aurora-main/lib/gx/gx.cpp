@@ -1609,12 +1609,13 @@ static inline wgpu::PrimitiveState to_primitive_state(GXCullMode gx_cullMode) {
 wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu::VertexBufferLayout> vtxBuffers,
                                     wgpu::ShaderModule shader, const char* label) noexcept {
   ZoneScoped;
-  const bool maskCockpit = config.stereoStencil && config.shaderConfig.exactScreenDepth;
+  const bool stencilTarget = (config.stereoStencil & kStereoStencilFormat) != 0;
+  const bool maskCockpit = stencilTarget && config.shaderConfig.exactScreenDepth;
   const wgpu::StencilFaceState stencil{
       .compare = maskCockpit ? wgpu::CompareFunction::Equal : wgpu::CompareFunction::Always,
   };
   const wgpu::DepthStencilState depthStencil{
-      .format = config.stereoStencil ? wgpu::TextureFormat::Depth24PlusStencil8 : g_graphicsConfig.depthFormat,
+      .format = stencilTarget ? wgpu::TextureFormat::Depth24PlusStencil8 : g_graphicsConfig.depthFormat,
       .depthWriteEnabled = config.depthUpdate,
       .depthCompare = config.depthCompare ? to_compare_function(config.depthFunc) : wgpu::CompareFunction::Always,
       .stencilFront = stencil,
@@ -1622,8 +1623,22 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
       .stencilReadMask = 1,
       .stencilWriteMask = 0,
   };
-  const auto blendState = to_blend_state(config.blendMode, config.blendFacSrc, config.blendFacDst, config.blendOp,
+  auto blendState = to_blend_state(config.blendMode, config.blendFacSrc, config.blendFacDst, config.blendOp,
                                          config.pixelFmt, config.dstAlpha);
+  if ((config.stereoStencil & kCompositeSourceBlend) != 0) {
+    // A composite's source draw re-issued by an eye: opaque geometry laid over the world at
+    // the blend constant's alpha, the alpha the game's own composite quad would have used.
+    blendState.color = wgpu::BlendComponent{
+        .operation = wgpu::BlendOperation::Add,
+        .srcFactor = wgpu::BlendFactor::Constant,
+        .dstFactor = wgpu::BlendFactor::OneMinusConstant,
+    };
+    blendState.alpha = wgpu::BlendComponent{
+        .operation = wgpu::BlendOperation::Add,
+        .srcFactor = wgpu::BlendFactor::One,
+        .dstFactor = wgpu::BlendFactor::Zero,
+    };
+  }
   const std::array colorTargets{wgpu::ColorTargetState{
       .format = g_graphicsConfig.surfaceConfiguration.format,
       .blend = &blendState,
