@@ -228,7 +228,7 @@ class SettingsPage(
                     R.string.vr_foveation_off, R.string.vr_foveation_low,
                     R.string.vr_foveation_medium, R.string.vr_foveation_high,
                 ),
-                read = { stringIndex(it, "vr", "foveation", FOVEATION_LEVELS) },
+                read = { stringIndex(it, "vr", "foveation", FOVEATION_LEVELS, FOVEATION_DEFAULT) },
                 write = { c, index -> c.setString("vr", "foveation", FOVEATION_LEVELS[index]) },
             )
             choice(
@@ -757,8 +757,9 @@ class SettingsPage(
         val SEATS = listOf("cockpit", "custom")
         // The runtime's default ("boost") first: an absent key reads as index 0.
         val PERFORMANCE_LEVELS = listOf("boost", "sustained_high", "sustained_low", "power_savings", "default")
-        // runtime_config.h's kVrFoveationLevels, the default ("off") first.
+        // runtime_config.h's kVrFoveationLevels, and its Quest default.
         val FOVEATION_LEVELS = listOf("off", "low", "medium", "high")
+        val FOVEATION_DEFAULT = FOVEATION_LEVELS.indexOf("medium")
         val CONTROLLER_MODES = listOf("wii_remote", "gamepad", "none")
         val INTERPOLATION_FPS = listOf(0L, 1L, 72L, 90L, 120L)
         val RESOLUTIONS = listOf(1.0, 1.5, 2.0, 3.0, 4.0)

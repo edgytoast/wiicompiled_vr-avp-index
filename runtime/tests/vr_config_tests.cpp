@@ -23,7 +23,11 @@ int main() {
     Require(!Parse("[vr]\nfoveation = \"ultra\"\n").vrFoveation.has_value());
     Require(!Parse("[vr]\nfoveation = 2\n").vrFoveation.has_value());
     Require(!Parse("[vr]\n").vrFoveation.has_value());
+#if defined(__ANDROID__)
+    Require(std::string_view(RuntimeConfigFile::kVrFoveationDefault) == "medium");
+#else
     Require(std::string_view(RuntimeConfigFile::kVrFoveationDefault) == "off");
+#endif
     Require(RuntimeConfigFile::VrFoveationLevelIndex("off") == 0);
     Require(RuntimeConfigFile::VrFoveationLevelIndex("low") == 1);
     Require(RuntimeConfigFile::VrFoveationLevelIndex("medium") == 2);

@@ -261,8 +261,12 @@ inline bool IsSupportedVrPerformanceLevel(std::string_view value) {
 // 4x4 pixel blocks, the higher the level the closer to the centre. Whether the
 // GPU device gets fragment density maps at all is decided at launch, so going
 // from "off" to a level takes a restart; between levels and back to "off" it is
-// live.
+// live. The Quest starts at "medium"; elsewhere it does nothing.
+#if defined(__ANDROID__)
+inline constexpr const char* kVrFoveationDefault = "medium";
+#else
 inline constexpr const char* kVrFoveationDefault = "off";
+#endif
 inline constexpr std::array<std::string_view, 4> kVrFoveationLevels{"off", "low", "medium", "high"};
 
 inline bool IsSupportedVrFoveation(std::string_view value) {

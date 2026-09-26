@@ -211,7 +211,7 @@ its CPU and GPU domains: `boost`, `sustained_high`, `sustained_low`, `power_savi
 request (see `docs/quest-port.md`); desktop runtimes rarely offer the extension, and the setting
 then does nothing. It is read at launch, and the session log records whether the runtime accepted
 it and any later performance notification (a thermal or rendering warning).
-`foveation` (Quest only, default `off`) shades the edges of the immersive race view more coarsely:
+`foveation` (Quest only, default `medium`) shades the edges of the immersive race view more coarsely:
 `off`, `low`, `medium` or `high`, see [Foveated rendering](#foveated-rendering). A session launched
 with it off runs without fragment density maps, so going from `off` to a level takes a restart;
 between levels, and back to `off`, it is live from the headset panel's VR tab. The launcher's
@@ -914,9 +914,11 @@ interleaved within one session (`docs/quest-port.md` has the method).
 
 At the Quest's default 0.8 an eye's time goes mostly to geometry and to storing its tiles at full
 resolution. The Wii's shading is cheap, so foveation saves nothing measurable there, although the
-density map verifiably applies (4x4 blocks at the view's edges on High). That is why it defaults to
-`off`. At higher render scales it takes 8 to 22% off the eyes, which is where it earns its keep,
-bought with a softer periphery. The Quest's GPU applies the density per screen tile, and inside a
+density map verifiably applies (4x4 blocks at the view's edges on High). At higher render scales it
+takes 8 to 22% off the eyes, which is where it earns its keep, bought with a softer periphery. The
+Quest defaults to `medium` all the same: it costs nothing measurable at 0.8, it is already on when
+the render scale is raised, and a session launched with a level can change it live, where one
+launched with `off` needs a restart. The Quest's GPU applies the density per screen tile, and inside a
 reduced-rate tile it also samples textures one level blurrier per halving. Most surfaces hide it,
 but fine animated detail does not: on Retro Rewind's swamp goo the tiles show as squares where the
 ripples give way to a smoother look. It is no fix for a heavy track: on Retro Rewind's SNES Ghost Valley

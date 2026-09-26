@@ -179,8 +179,9 @@ at 0.8, and 492 to 525 MHz at 1.3, the unfoveated windows running at the higher 
 
 So an eye's time on these tracks is mostly geometry and full-resolution tile stores, which a
 density map does not reduce (the stores stay full size for non-subsampled images). Foveation
-stays off by default; it pays only when `render_scale` makes the eyes pixel-bound, as at 1.3 on
-Luigi Circuit.
+pays only when `render_scale` makes the eyes pixel-bound, as at 1.3 on Luigi Circuit; it
+defaults to `medium` anyway, so it is already on when the render scale is raised and can be
+changed without a restart.
 
 ### Quest 1 renderer compatibility
 
