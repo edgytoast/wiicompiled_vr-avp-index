@@ -34,6 +34,7 @@ void CheckNear(float actual, float expected, const char* what, float tolerance =
 constexpr float kDt = 1.0f / 90.0f;
 constexpr OpenXRControllerMode kWiiRemote = OpenXRControllerMode::WiiRemote;
 constexpr OpenXRControllerMode kGamepad = OpenXRControllerMode::Gamepad;
+constexpr OpenXRControllerMode kNone = OpenXRControllerMode::None;
 
 std::array<HandInputs, 2> Released() {
     return {};
@@ -101,6 +102,20 @@ void ChordOpensAndClosesOnceAsAGamepad() {
     Check(frame.withheld, "the closing chord is still withheld from the game");
     frame = controls.Update(Released(), open, kDt, kGamepad);
     Check(!frame.withheld, "the game gets the controllers back once everything is released");
+}
+
+void LeftYOpensThePanelWithoutAGameController() {
+    Controls controls;
+    bool open = false;
+
+    Frame frame = controls.Update(Chord(), open, kDt, kNone);
+    Check(!open, "with no game controller the thumbstick chord does not open the panel");
+    controls.Update(Released(), open, kDt, kNone);
+    frame = controls.Update(LeftY(), open, kDt, kNone);
+    Check(open && frame.open, "with no game controller left Y opens the panel");
+    controls.Update(Released(), open, kDt, kNone);
+    frame = controls.Update(LeftY(), open, kDt, kNone);
+    Check(!open && !frame.open, "and closes it again");
 }
 
 void MenuClosesAndItsPressStaysOutOfTheGame() {
@@ -213,6 +228,7 @@ void BridgeAccumulatesWheelUntilTaken() {
 int main() {
     LeftYOpensAndClosesOnceAsAWiiRemote();
     ChordOpensAndClosesOnceAsAGamepad();
+    LeftYOpensThePanelWithoutAGameController();
     MenuClosesAndItsPressStaysOutOfTheGame();
     SelectWaitsForAReleaseAndFollowsTheTrigger();
     ThumbstickScrolls();

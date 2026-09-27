@@ -216,6 +216,11 @@ public:
         if (!runtime.CreateSession(&binding)) return Fail("OpenXR rejected Dawn's Vulkan device binding");
         owns_session_ = true;
         aurora_format_ = static_cast<VkFormat>(format);
+        for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+            const auto& view = runtime.ViewConfiguration()[eye];
+            eye_size_[eye] = {view.render_width, view.render_height};
+        }
+        requested_eye_size_ = eye_size_;
         const auto abandon_session = [&] {
             DestroySwapchains();
             runtime.DestroySession();
@@ -248,6 +253,21 @@ public:
         return true;
     }
 
+    void SetRenderScale(float scale) {
+        if (runtime_ == nullptr) {
+            return;
+        }
+        std::array<OpenXREyeSize, kOpenXREyeCount> requested{};
+        for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+            requested[eye] = OpenXRScaledEyeSize(runtime_->ViewConfiguration()[eye].properties, scale);
+        }
+        // Only a change: a refused size stays refused while it is still the one asked for.
+        if (requested != requested_eye_size_) {
+            requested_eye_size_ = requested;
+            eye_size_ = requested;
+        }
+    }
+
     OpenXRWindowsVulkanBeginStatus BeginFrame(const OpenXRWindowsVulkanPresentation& presentation,
                                       OpenXRWindowsVulkanFrame& frame) {
         frame = {};
@@ -258,6 +278,9 @@ public:
         }
         if (frame_active_ || pending_packet_serial_ != 0) {
             Fail("BeginFrame called while another OpenXR frame is active");
+            return OpenXRWindowsVulkanBeginStatus::Error;
+        }
+        if (!ResizeWritablePair()) {
             return OpenXRWindowsVulkanBeginStatus::Error;
         }
 
@@ -394,6 +417,7 @@ public:
             const auto status = KeepAliveCycle();
             if (status != OpenXRBeginStatus::Ready) return status;
         }
+        if (!ResizeWritablePair()) return OpenXRBeginStatus::Error;
         packet.xr_frame.serial = next_packet_serial_++;
         packet.xr_frame.predicted_display_time = last_display_time_ + 2 * last_display_period_;
         packet.xr_frame.predicted_display_period = last_display_period_;
@@ -841,13 +865,74 @@ private:
 
     bool CreateSwapchainPair(std::array<EyeSwapchain, kOpenXREyeCount>& pair) {
         for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
-            const auto& view = runtime_->ViewConfiguration()[eye];
-            if (!CreateSwapchain(pair[eye], view.render_width, view.render_height,
+            if (!CreateSwapchain(pair[eye], eye_size_[eye].width, eye_size_[eye].height,
                                  eye == 0 ? "left eye" : "right eye")) {
                 return false;
             }
         }
         return true;
+    }
+
+    // As the D3D12 backend's. Aurora's bridge wraps each swapchain VkImage for Dawn, and the
+    // runtime may hand the old handles out again, so the wraps go with the swapchains.
+    bool ResizeWritablePair() {
+        ReapRetiredPairs(false);
+        std::array<OpenXREyeSize, kOpenXREyeCount> current{};
+        for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+            if (eye_swapchains_[eye].acquired) {
+                return true;
+            }
+            current[eye] = {eye_swapchains_[eye].width, eye_swapchains_[eye].height};
+        }
+        if (current == eye_size_) {
+            return true;
+        }
+        std::array<EyeSwapchain, kOpenXREyeCount> replacement{};
+        if (!CreateSwapchainPair(replacement)) {
+            DestroySwapchainPair(replacement);
+            std::ostringstream message;
+            message << "OpenXR Vulkan eyes stay " << current[0].width << 'x' << current[0].height
+                    << ": the runtime could not make " << eye_size_[0].width << 'x' << eye_size_[0].height
+                    << " swapchains (" << last_error_ << ')';
+            Log(OpenXRLogLevel::Warning, message.str());
+            ClearError();
+            // Back to this pair's size, which also returns the other pair to it if it was rebuilt.
+            eye_size_ = current;
+            return true;
+        }
+        // The compositor may still be reading the old pair (kOpenXRRetiredSwapchainCycles).
+        retired_pairs_.push_back({std::move(eye_swapchains_), kOpenXRRetiredSwapchainCycles});
+        eye_swapchains_ = std::move(replacement);
+        std::ostringstream message;
+        message << "OpenXR Vulkan eyes resized: " << eye_size_[0].width << 'x' << eye_size_[0].height << " / "
+                << eye_size_[1].width << 'x' << eye_size_[1].height;
+        Log(OpenXRLogLevel::Info, message.str());
+        return true;
+    }
+
+    // As the D3D12 backend's: Aurora drains Dawn's queue and drops its wraps of the images (which
+    // it does under Dawn's device guard, so before the guard is taken to destroy them).
+    void ReapRetiredPairs(bool all) {
+        for (auto it = retired_pairs_.begin(); it != retired_pairs_.end();) {
+            if (!all && --it->cycles_left != 0) {
+                ++it;
+                continue;
+            }
+            std::vector<void*> images;
+            for (const EyeSwapchain& swapchain : it->swapchains) {
+                for (const auto& image : swapchain.images) {
+                    images.push_back(reinterpret_cast<void*>(image.image));
+                }
+            }
+            if (aurora_vulkan_win32_forget_targets(images.data(), static_cast<uint32_t>(images.size()))) {
+                DestroySwapchainPair(it->swapchains);
+            } else {
+                Log(OpenXRLogLevel::Warning,
+                    "Aurora could not retire its copies into a replaced Vulkan eye swapchain pair; "
+                    "deferring its destruction to xrDestroySession");
+            }
+            it = retired_pairs_.erase(it);
+        }
     }
 
     bool CreateSwapchain(EyeSwapchain& swapchain, uint32_t width, uint32_t height, const char* what) {
@@ -868,7 +953,14 @@ private:
         create.faceCount = 1;
         create.arraySize = 1;
         create.mipCount = 1;
-        XrResult result = xrCreateSwapchain(runtime_->Session(), &create, &swapchain.handle);
+        XrResult result;
+        {
+            // The spec keeps the runtime off the VkQueue here, but mid-session (the panel's
+            // swapchains, a new render resolution) Dawn's worker is submitting on it, and a
+            // runtime that transitions its new images would race that; the guard costs nothing.
+            const auto queue_guard = runtime_->LockGraphicsQueue();
+            result = xrCreateSwapchain(runtime_->Session(), &create, &swapchain.handle);
+        }
         ObserveResult(result);
         if (XR_FAILED(result)) {
             std::ostringstream message;
@@ -1007,6 +1099,7 @@ private:
     void DestroyPanelSwapchains() {
         for (auto* swapchain : {&panel_swapchain_, &retained_panel_swapchain_}) {
             if (swapchain->handle != XR_NULL_HANDLE && !swapchain->acquired) {
+                const auto queue_guard = runtime_ ? runtime_->LockGraphicsQueue() : OpenXRRuntime::GraphicsQueueGuard{nullptr, nullptr};
                 xrDestroySwapchain(swapchain->handle);
             } else if (swapchain->acquired) {
                 Log(OpenXRLogLevel::Warning,
@@ -1020,6 +1113,7 @@ private:
 
     void DestroySwapchains() {
         DestroyPanelSwapchains();
+        ReapRetiredPairs(true);
         DestroySwapchainPair(eye_swapchains_);
         DestroySwapchainPair(retained_swapchains_);
         have_retained_frame_ = false;
@@ -1030,6 +1124,7 @@ private:
     void DestroySwapchainPair(std::array<EyeSwapchain, kOpenXREyeCount>& pair) {
         for (auto& swapchain : pair) {
             if (swapchain.handle != XR_NULL_HANDLE && !swapchain.acquired) {
+                const auto queue_guard = runtime_ ? runtime_->LockGraphicsQueue() : OpenXRRuntime::GraphicsQueueGuard{nullptr, nullptr};
                 xrDestroySwapchain(swapchain.handle);
             } else if (swapchain.acquired) {
                 Log(OpenXRLogLevel::Warning,
@@ -1102,6 +1197,14 @@ private:
     OpenXRWindowsVulkanGraphicsRequirements requirements_{};
     std::array<EyeSwapchain, kOpenXREyeCount> eye_swapchains_{};
     std::array<EyeSwapchain, kOpenXREyeCount> retained_swapchains_{};
+    // As the D3D12 backend's.
+    std::array<OpenXREyeSize, kOpenXREyeCount> eye_size_{};
+    std::array<OpenXREyeSize, kOpenXREyeCount> requested_eye_size_{};
+    struct RetiredPair {
+        std::array<EyeSwapchain, kOpenXREyeCount> swapchains;
+        uint32_t cycles_left;
+    };
+    std::vector<RetiredPair> retired_pairs_;
     // The settings panel's layer: written like the eyes into panel_swapchain_,
     // shown from retained_panel_swapchain_ (see FinishFrame).
     EyeSwapchain panel_swapchain_{};
@@ -1157,6 +1260,8 @@ bool OpenXRWindowsVulkanBackend::QueryGraphicsRequirements(OpenXRRuntime& runtim
 bool OpenXRWindowsVulkanBackend::BindAurora(OpenXRRuntime& runtime) {
     return m_impl->BindAurora(runtime);
 }
+
+void OpenXRWindowsVulkanBackend::SetRenderScale(float scale) { m_impl->SetRenderScale(scale); }
 
 OpenXRWindowsVulkanBeginStatus OpenXRWindowsVulkanBackend::BeginFrame(
     const OpenXRWindowsVulkanPresentation& presentation, OpenXRWindowsVulkanFrame& frame) {

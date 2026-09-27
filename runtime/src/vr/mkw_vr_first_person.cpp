@@ -740,6 +740,20 @@ bool PublishNativeWheelMesh(uint32_t part, const Mtx34& model_view, const Mtx34&
         if (version < 8 || version > 11) {
             return false;
         }
+        const uint32_t mdl_size = Memory::Read32(mdl + 4);
+        const uint8_t* mdl_bytes = mdl_size <= 0x1000000 ? Memory::GetPointer(mdl, mdl_size) : nullptr;
+        Mtx34 body_from_vertices = kIdentityMtx34;
+        Mtx34 wheel_model_view = model_view;
+        if (!whole_part) {
+            // Body::mtx is the model placement, while the bone GX draws the
+            // body's node 0 through may have its own authored transform (the
+            // Baby Booster's rotated root). GX draws its positions through
+            // placement * bone, so both wheel selection and Aurora's
+            // local-player matrix match must include it. It is found by node
+            // id: the Flame Flyer and Cheep Charger list an nw4r_root first.
+            if (!ReadNativeWheelNodeMatrix(mdl_bytes, mdl_size, 0, body_from_vertices.data())) return false;
+            wheel_model_view = ComposeMtx(model_view, body_from_vertices);
+        }
         const uint32_t dic_offset = Memory::Read32(mdl + 0x18);
         if (dic_offset == 0 || dic_offset > 0x100000) {
             return false;
@@ -795,8 +809,13 @@ bool PublishNativeWheelMesh(uint32_t part, const Mtx34& model_view, const Mtx34&
                 for (auto& point : points) {
                     point = detail::TransformPoint(correction, point.x, point.y, point.z);
                 }
-            } else if (RotateNativeWheelVertices(points, center, radius, angle, &correction) < 8) {
-                continue;
+            } else {
+                NativeWheelTopology topology(num);
+                if (!ReadNativeWheelTopology(mdl_bytes, mdl_size, Memory::Read32(header + 0x10), topology) ||
+                    RotateNativeWheelVertices(points, topology, center, radius, angle, &correction,
+                                              body_from_vertices) < 8) {
+                    continue;
+                }
             }
             const uint8_t* source = Memory::GetPointer(data, size);
             if (source == nullptr) {
@@ -825,7 +844,7 @@ bool PublishNativeWheelMesh(uint32_t part, const Mtx34& model_view, const Mtx34&
                     }
                 }
             }
-            if (valid && GxNativeWheel::PostVertices(data, bytes.data(), size, model_view.data())) {
+            if (valid && GxNativeWheel::PostVertices(data, bytes.data(), size, wheel_model_view.data())) {
                 published = true;
                 g_state.wheel_arrays_posted = true;
             }

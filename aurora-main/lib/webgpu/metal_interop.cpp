@@ -479,6 +479,31 @@ private:
     return success;
   }
 
+public:
+  bool ForgetTargets(void* const* surfaces, uint32_t count) noexcept {
+    std::lock_guard lock(m_mutex);
+    if (m_framePending) {
+      return false;
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+      const auto it = m_imports.find(static_cast<IOSurfaceRef>(surfaces[i]));
+      if (it == m_imports.end()) {
+        continue;
+      }
+      if (it->second.accessBegun) {
+        return false;
+      }
+      it->second.texture = nullptr;
+      it->second.memory = nullptr;
+      if (it->second.surface != nullptr) {
+        CFRelease(it->second.surface);
+      }
+      m_imports.erase(it);
+    }
+    return true;
+  }
+
+private:
   void ReleaseImportsLocked() noexcept {
     for (auto& [surface, import] : m_imports) {
       import.texture = nullptr;
@@ -601,6 +626,14 @@ bool aurora_metal_cancel_stereo_targets(uint64_t frameToken) {
   return g_bridge && g_bridge->CancelBeforeEncode(frameToken);
 }
 
+bool aurora_metal_forget_stereo_targets(void* const* ioSurfaces, uint32_t count) {
+  using namespace aurora::metal_interop;
+  if (!g_bridge) {
+    return true;
+  }
+  return ioSurfaces != nullptr && g_bridge->ForgetTargets(ioSurfaces, count);
+}
+
 bool aurora_metal_disable_stereo_bridge() {
   using namespace aurora::metal_interop;
   if (!g_bridge) {
@@ -635,6 +668,8 @@ bool aurora_metal_set_stereo_targets_with_panel(uint64_t, const AuroraMetalStere
 }
 
 bool aurora_metal_cancel_stereo_targets(uint64_t) { return false; }
+
+bool aurora_metal_forget_stereo_targets(void* const*, uint32_t) { return true; }
 
 bool aurora_metal_disable_stereo_bridge() { return true; }
 

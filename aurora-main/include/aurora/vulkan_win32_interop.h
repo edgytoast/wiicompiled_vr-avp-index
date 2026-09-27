@@ -16,6 +16,10 @@ bool aurora_vulkan_win32_set_targets(uint64_t token, const AuroraD3D12StereoTarg
 bool aurora_vulkan_win32_set_targets_with_panel(uint64_t token, const AuroraD3D12StereoTarget* targets, uint32_t count,
                                                 const AuroraD3D12StereoTarget* panel);
 bool aurora_vulkan_win32_cancel(uint64_t token);
+// As aurora_d3d12_forget_stereo_targets, for VkImages: waits for Dawn's queue,
+// then drops the textures wrapping them, since the runtime may hand the same
+// handles out again for the swapchains that replace them.
+bool aurora_vulkan_win32_forget_targets(void* const* images, uint32_t count);
 bool aurora_vulkan_win32_disable();
 void* aurora_vulkan_win32_lock_queue();
 void aurora_vulkan_win32_unlock_queue(void* guard);

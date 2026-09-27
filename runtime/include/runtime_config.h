@@ -60,9 +60,6 @@ struct RuntimeUserConfig {
     std::optional<bool> vrFlatScreen;
     std::optional<bool> vrImmersiveWindow;
     std::optional<bool> vrPassthrough;
-    std::optional<bool> vrStopAtDisplayCopy;
-    std::optional<bool> vrSkipCopyClears;
-    std::optional<bool> vrSinglePassEyes;
     std::optional<std::string> vrMirrorView;
     std::optional<std::string> vrControllerMode;
     std::optional<uint32_t> vrFrameInterpolationFps;
@@ -80,6 +77,7 @@ struct RuntimeUserConfig {
     std::optional<bool> vrSteeringWheel;
     std::optional<bool> vrNativeSteeringWheel;
     std::optional<bool> vrHandSteering;
+    std::optional<bool> vrHandTracking;
     std::optional<float> vrWheelKartDegrees;
     std::optional<float> vrWheelBikeDegrees;
     std::optional<float> vrWheelGrabDistance;
@@ -194,6 +192,10 @@ inline constexpr float kVrRenderScaleDefault = 0.8f;
 inline constexpr float kVrRenderScaleDefault = 1.0f;
 #define MKW_VR_RENDER_SCALE_DEFAULT_TEXT "1.0"
 #endif
+// The range the file accepts and the F10 bar's slider offers; the Quest
+// launcher's settings page (SettingsPage.kt) repeats it.
+inline constexpr float kVrRenderScaleMin = 0.25f;
+inline constexpr float kVrRenderScaleMax = 2.0f;
 
 // First-person camera defaults and the range its head offsets accept, in one
 // place: the config getters, the on-disk template and the F10 bar's reset all
@@ -233,6 +235,11 @@ inline constexpr float kVrCockpitUnitsPerMeterMax = 400.0f;
 inline constexpr bool kVrSteeringWheelDefault = true;
 inline constexpr bool kVrNativeSteeringWheelDefault = true;
 inline constexpr bool kVrHandSteeringDefault = true;
+// The cockpit hands follow the headset's hand tracking (the controllers' touch
+// sensors while they are held, the cameras once they are put down, when bare
+// hands also drive). Opt-in, and only offered on the Quest for now; the
+// launcher's Settings page shows the same default.
+inline constexpr bool kVrHandTrackingDefault = false;
 // Hand steering tuning ranges; the defaults are mkw::vr::WheelTuning's.
 inline constexpr float kVrWheelDegreesMin = 20.0f, kVrWheelDegreesMax = 180.0f;
 inline constexpr float kVrWheelGrabDistanceMin = 0.15f, kVrWheelGrabDistanceMax = 0.8f;
@@ -254,8 +261,12 @@ inline bool IsSupportedVrPerformanceLevel(std::string_view value) {
 // 4x4 pixel blocks, the higher the level the closer to the centre. Whether the
 // GPU device gets fragment density maps at all is decided at launch, so going
 // from "off" to a level takes a restart; between levels and back to "off" it is
-// live.
+// live. The Quest starts at "medium"; elsewhere it does nothing.
+#if defined(__ANDROID__)
+inline constexpr const char* kVrFoveationDefault = "medium";
+#else
 inline constexpr const char* kVrFoveationDefault = "off";
+#endif
 inline constexpr std::array<std::string_view, 4> kVrFoveationLevels{"off", "low", "medium", "high"};
 
 inline bool IsSupportedVrFoveation(std::string_view value) {
@@ -278,11 +289,12 @@ inline bool IsSupportedVrMirrorView(std::string_view value) {
 }
 // What the tracked VR controllers are to the game: "wii_remote" is a Wii
 // Remote with a Nunchuk (motion and pointer included), "gamepad" one ordinary
-// controller read as a GameCube pad. Matches mkw::vr::OpenXRControllerMode.
+// controller read as a GameCube pad, "none" nothing at all (they only open the
+// settings panel). Matches mkw::vr::OpenXRControllerMode.
 inline constexpr const char* kVrControllerModeDefault = "wii_remote";
 
 inline bool IsSupportedVrControllerMode(std::string_view value) {
-    return value == "wii_remote" || value == "gamepad";
+    return value == "wii_remote" || value == "gamepad" || value == "none";
 }
 // SDL scancode name, spelled the way SDL_GetScancodeName produces it. An
 // empty string leaves the recenter hotkey unbound, menu button only.
@@ -503,8 +515,8 @@ inline void EnsureConfigFile() {
               "# What the headset's controllers are to the game: \"wii_remote\"\n"
               "# is a Wii Remote (right hand, with motion and a pointer aimed at\n"
               "# the virtual screen) plus a Nunchuk (left hand); \"gamepad\" is one\n"
-              "# ordinary controller read as a GameCube pad. Changeable live from\n"
-              "# the F10 menu.\n"
+              "# ordinary controller read as a GameCube pad; \"none\" leaves the game\n"
+              "# to other controllers. Changeable live from the F10 menu.\n"
               "controller_mode = \"wii_remote\"\n"
               "# VR interpolation: 0 = Off, 1 = Auto, or 72/90/120 FPS. Live.\n"
               "frame_interpolation_fps = 0\n"
@@ -528,17 +540,6 @@ inline void EnsureConfigFile() {
               "# Quest (black elsewhere). Flat Screen mode wins over it.\n"
               "# Changeable live from the F10 menu.\n"
               "immersive_window = false\n"
-              "# EFB replay controls for the per-eye views, changeable live\n"
-              "# from the F10 menu. stop_at_display_copy ends each eye at the\n"
-              "# frame's final GXCopyDisp; skip_copy_clears drops the EFB\n"
-              "# reset a GX copy performs afterwards. Both keep that reset\n"
-              "# from erasing the eye, and both are safe to turn off.\n"
-              "stop_at_display_copy = true\n"
-              "skip_copy_clears = true\n"
-              "# Draw each eye in one render pass across the frame's GX copies,\n"
-              "# which only the desktop image performs: the same picture with\n"
-              "# less GPU memory traffic. Changeable live from the F10 menu.\n"
-              "single_pass_eyes = true\n"
               "# Put the camera at the Player 1 driver's head instead of behind\n"
               "# the kart, with the horizon kept level. Changeable live from the\n"
               "# F10 menu, and only during a single-screen race.\n"
@@ -767,7 +768,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     config.vrEnabled = FindConfigValue<bool>(document, "vr", "enabled");
     config.vrRequired = FindConfigValue<bool>(document, "vr", "required");
     if (auto value = FindConfigFloat(document, "vr", "render_scale");
-        value && *value >= 0.25f && *value <= 2.0f) {
+        value && *value >= kVrRenderScaleMin && *value <= kVrRenderScaleMax) {
         config.vrRenderScale = *value;
     }
     if (auto value = FindConfigFloat(document, "vr", "world_units_per_meter");
@@ -786,9 +787,6 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     config.vrFlatScreen = FindConfigValue<bool>(document, "vr", "flat_screen");
     config.vrImmersiveWindow = FindConfigValue<bool>(document, "vr", "immersive_window");
     config.vrPassthrough = FindConfigValue<bool>(document, "vr", "passthrough");
-    config.vrStopAtDisplayCopy = FindConfigValue<bool>(document, "vr", "stop_at_display_copy");
-    config.vrSkipCopyClears = FindConfigValue<bool>(document, "vr", "skip_copy_clears");
-    config.vrSinglePassEyes = FindConfigValue<bool>(document, "vr", "single_pass_eyes");
     config.vrFirstPerson = FindConfigValue<bool>(document, "vr", "first_person");
     config.vrFirstPersonToggleClick = FindConfigValue<bool>(document, "vr", "first_person_toggle_click");
     if (auto value = FindConfigFloat(document, "vr", "first_person_units_per_meter");
@@ -862,6 +860,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     config.vrSteeringWheel = FindConfigValue<bool>(document, "vr", "steering_wheel");
     config.vrNativeSteeringWheel = FindConfigValue<bool>(document, "vr", "native_steering_wheel");
     config.vrHandSteering = FindConfigValue<bool>(document, "vr", "hand_steering");
+    config.vrHandTracking = FindConfigValue<bool>(document, "vr", "hand_tracking");
     config.vrWheelKartDegrees = readRangedFloat("wheel_kart_degrees", kVrWheelDegreesMin, kVrWheelDegreesMax);
     config.vrWheelBikeDegrees = readRangedFloat("wheel_bike_degrees", kVrWheelDegreesMin, kVrWheelDegreesMax);
     config.vrWheelGrabDistance =
@@ -1119,21 +1118,6 @@ inline bool SetVrPassthrough(bool value) {
     return WriteSetting("vr", "passthrough", value ? "true" : "false");
 }
 
-inline bool SetVrStopAtDisplayCopy(bool value) {
-    Mutable().vrStopAtDisplayCopy = value;
-    return WriteSetting("vr", "stop_at_display_copy", value ? "true" : "false");
-}
-
-inline bool SetVrSkipCopyClears(bool value) {
-    Mutable().vrSkipCopyClears = value;
-    return WriteSetting("vr", "skip_copy_clears", value ? "true" : "false");
-}
-
-inline bool SetVrSinglePassEyes(bool value) {
-    Mutable().vrSinglePassEyes = value;
-    return WriteSetting("vr", "single_pass_eyes", value ? "true" : "false");
-}
-
 inline bool SetVrFirstPerson(bool value) {
     Mutable().vrFirstPerson = value;
     return WriteSetting("vr", "first_person", value ? "true" : "false");
@@ -1171,6 +1155,14 @@ inline bool SetVrFirstPersonHeadForwardMeters(float value) {
 inline bool SetVrRecenterKey(std::string value) {
     Mutable().vrRecenterKey = value;
     return WriteSetting("vr", "recenter_key", FormatString(value));
+}
+
+inline bool SetVrRenderScale(float value) {
+    value = std::clamp(value, kVrRenderScaleMin, kVrRenderScaleMax);
+    Mutable().vrRenderScale = value;
+    std::ostringstream formatted;
+    formatted << value;
+    return WriteSetting("vr", "render_scale", formatted.str());
 }
 
 inline bool SetVrLeanBackDegrees(float value) {
@@ -1261,6 +1253,11 @@ inline bool SetVrNativeSteeringWheel(bool value) {
 inline bool SetVrHandSteering(bool value) {
     Mutable().vrHandSteering = value;
     return WriteSetting("vr", "hand_steering", value ? "true" : "false");
+}
+
+inline bool SetVrHandTracking(bool value) {
+    Mutable().vrHandTracking = value;
+    return WriteSetting("vr", "hand_tracking", value ? "true" : "false");
 }
 
 inline bool SetVrWheelTuning(const mkw::vr::WheelTuning& tuning) {
@@ -1566,7 +1563,7 @@ inline bool VrRequired(bool fallback = false) {
 }
 
 inline float VrRenderScale(float fallback = kVrRenderScaleDefault) {
-    return std::clamp(Get().vrRenderScale.value_or(fallback), 0.25f, 2.0f);
+    return std::clamp(Get().vrRenderScale.value_or(fallback), kVrRenderScaleMin, kVrRenderScaleMax);
 }
 
 inline float VrWorldUnitsPerMeter(float fallback = 500.0f) {
@@ -1628,18 +1625,6 @@ inline bool SetVrRaceView(VrRaceView view) {
 // launcher's Settings page shows the same default.
 inline bool VrPassthrough(bool fallback = true) {
     return Get().vrPassthrough.value_or(fallback);
-}
-
-inline bool VrStopAtDisplayCopy(bool fallback = true) {
-    return Get().vrStopAtDisplayCopy.value_or(fallback);
-}
-
-inline bool VrSkipCopyClears(bool fallback = true) {
-    return Get().vrSkipCopyClears.value_or(fallback);
-}
-
-inline bool VrSinglePassEyes(bool fallback = true) {
-    return Get().vrSinglePassEyes.value_or(fallback);
 }
 
 inline bool VrFirstPerson(bool fallback = false) {
@@ -1744,6 +1729,10 @@ inline bool VrNativeSteeringWheel(bool fallback = kVrNativeSteeringWheelDefault)
 
 inline bool VrHandSteering(bool fallback = kVrHandSteeringDefault) {
     return Get().vrHandSteering.value_or(fallback);
+}
+
+inline bool VrHandTracking(bool fallback = kVrHandTrackingDefault) {
+    return Get().vrHandTracking.value_or(fallback);
 }
 
 inline mkw::vr::WheelTuning VrWheelTuning() {

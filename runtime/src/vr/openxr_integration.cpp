@@ -205,12 +205,22 @@ XrPosef ScreenPoseAhead(const OpenXRFrame& frame, float distance) noexcept {
 }
 
 // Hand steering draws the player's hands, in the runtime's own hand mesh where
-// it offers one (XR_FB_hand_tracking_mesh). Only asked for when hand steering
-// is on at launch; turning it on later uses the procedural gloves.
+// it offers one (XR_FB_hand_tracking_mesh), and tracked hands pose them from
+// the hand trackers: the controllers' touch sensors while they are held
+// (XR_EXT_hand_tracking_data_source) and the cameras once they are put down,
+// with the runtime's own pinch and menu gesture (XR_FB_hand_tracking_aim), and
+// with a put-down controller handing its side to the cameras at once
+// (XR_META_simultaneous_hands_and_controllers). Asked for when either is on at
+// launch, since none costs anything until it is used; turning both on later
+// needs a restart for the mesh and the tracked hands (until then the
+// procedural gloves are drawn).
 void AddHandMeshExtensions(OpenXRConfig& config) {
-    if (RuntimeConfigFile::VrHandSteering()) {
+    if (RuntimeConfigFile::VrHandSteering() || RuntimeConfigFile::VrHandTracking()) {
         config.optional_extensions.push_back("XR_EXT_hand_tracking");
         config.optional_extensions.push_back("XR_FB_hand_tracking_mesh");
+        config.optional_extensions.push_back("XR_EXT_hand_tracking_data_source");
+        config.optional_extensions.push_back("XR_FB_hand_tracking_aim");
+        config.optional_extensions.push_back("XR_META_simultaneous_hands_and_controllers");
     }
 }
 
@@ -455,6 +465,7 @@ public:
             runtime_->LoadFunction("xrPerfSettingsSetPerformanceLevelEXT", &set_performance_level_);
         }
         interpolation_available_.store(convert_display_time_ != nullptr, std::memory_order_release);
+        hand_tracking_available_.store(has_extension("XR_EXT_hand_tracking"), std::memory_order_release);
         if (!backend_->QueryGraphicsRequirements(*runtime_)) {
             SetError(backend_->LastError());
             ResetPreparedObjects();
@@ -481,6 +492,13 @@ public:
             ResetPreparedObjects();
             return false;
         }
+        {
+            const OpenXRViewConfiguration& left = runtime_->ViewConfiguration()[0];
+            std::lock_guard lock(eye_view_mutex_);
+            eye_view_ = left.properties;
+            eye_width_.store(left.render_width, std::memory_order_relaxed);
+            eye_height_.store(left.render_height, std::memory_order_relaxed);
+        }
         input_ = std::make_unique<OpenXRInput>(logger_);
         if (!input_->Create(*runtime_)) {
             RT_LOG(RT_TAG_RUNTIME) << "OpenXR controller input unavailable: " << input_->LastError()
@@ -498,6 +516,13 @@ public:
             interpolation_stopping_ = false;
         }
         teardown_requested_.store(false, std::memory_order_release);
+        // How every eye is replayed, fixed: it ends at the frame's final GXCopyDisp, so it holds the
+        // image the game presented; it keeps the EFB reset after a display copy, which can only be
+        // an earlier one's and erases what that last copy did not show; and it is drawn in one
+        // render pass (the Quest's debug.wiicompiled.eye_passes splits it again, for A/B timing).
+        aurora_set_stereo_stop_at_display_copy(true);
+        aurora_set_stereo_skip_copy_clears(false);
+        aurora_set_stereo_single_pass_eyes(true);
         WithdrawPublishedFrame();
         aurora_set_stereo_frame_provider(&OpenXRIntegration::ProvideStereoFrame, this);
         provider_registered_ = true;
@@ -569,6 +594,13 @@ public:
         headset_hz_.store(0, std::memory_order_relaxed);
         rendered_fps_.store(0, std::memory_order_relaxed);
         interpolation_available_.store(false, std::memory_order_release);
+        hand_tracking_available_.store(false, std::memory_order_release);
+        {
+            std::lock_guard lock(eye_view_mutex_);
+            eye_view_ = {XR_TYPE_VIEW_CONFIGURATION_VIEW};
+            eye_width_.store(0, std::memory_order_relaxed);
+            eye_height_.store(0, std::memory_order_relaxed);
+        }
         ResetTrackingOrigin();
         applied_session_run_serial_ = 0;
         session_was_active_ = false;
@@ -592,6 +624,10 @@ public:
         return interpolation_available_.load(std::memory_order_acquire);
     }
 
+    bool HandTrackingAvailable() const noexcept {
+        return hand_tracking_available_.load(std::memory_order_acquire);
+    }
+
     void SetPassthrough(bool enabled) noexcept {
         passthrough_.store(enabled, std::memory_order_relaxed);
     }
@@ -605,6 +641,23 @@ public:
             std::clamp(degrees, -RuntimeConfigFile::kVrLeanBackDegreesLimit,
                        RuntimeConfigFile::kVrLeanBackDegreesLimit),
             std::memory_order_relaxed);
+    }
+
+    void SetRenderScale(float scale) noexcept {
+        render_scale_.store(ClampRenderScale(scale), std::memory_order_relaxed);
+    }
+
+    OpenXREyeResolution EyeResolution(float scale) const noexcept {
+        OpenXREyeResolution resolution{};
+        std::lock_guard lock(eye_view_mutex_);
+        resolution.width = eye_width_.load(std::memory_order_relaxed);
+        resolution.height = eye_height_.load(std::memory_order_relaxed);
+        if (resolution.width != 0) {
+            const OpenXREyeSize scaled = OpenXRScaledEyeSize(eye_view_, ClampRenderScale(scale));
+            resolution.scaled_width = scaled.width;
+            resolution.scaled_height = scaled.height;
+        }
+        return resolution;
     }
 
     void ServiceProducerFrameBoundary() noexcept {
@@ -634,6 +687,17 @@ private:
     // Skipped eye copies tolerated back to back before the session is given up: a few seconds
     // at the headset's refresh rate.
     static constexpr uint32_t kMaxConsecutiveSkips = 300;
+
+    static float ClampRenderScale(float scale) noexcept {
+        return std::clamp(scale, RuntimeConfigFile::kVrRenderScaleMin, RuntimeConfigFile::kVrRenderScaleMax);
+    }
+
+    // The size the eyes are rendered at now, for the settings: the pair being written, before the
+    // immersive window may aim its eyes through the window.
+    void NoteEyeSize(const OpenXRBackendFrame& frame) noexcept {
+        eye_width_.store(frame.render_width[0], std::memory_order_relaxed);
+        eye_height_.store(frame.render_height[0], std::memory_order_relaxed);
+    }
 
     bool BackendMatchesConfiguredGraphicsApi(const AuroraConfig& aurora_config) {
 #if defined(_WIN32)
@@ -931,6 +995,8 @@ private:
                 RT_LOG(RT_TAG_RUNTIME) << "OpenXR " << kGraphicsBackendName << " pacing: "
                     << (render_first ? "render-first" : "frame-first (VR interpolation)") << std::endl;
             }
+            // A new scale rebuilds the eyes as the backend next prepares them.
+            backend_->SetRenderScale(render_scale_.load(std::memory_order_relaxed));
             if (render_first) {
                 if (!RenderFirstCycle(presentation, policy, immersive, consecutive_skips,
                                       immersive_submission_logged)) {
@@ -953,6 +1019,7 @@ private:
                 fatal = true;
                 break;
             }
+            NoteEyeSize(frame);
 
             UpdateFrameTiming(frame.xr_frame);
             if (diagnostics::Enabled()) {
@@ -1144,6 +1211,7 @@ private:
             SetError(backend_->LastError());
             return false;
         }
+        NoteEyeSize(packet);
         // The head pose this packet was located with places the screens and aims the pointer.
         ServiceRecenterRequest();
         UpdateVirtualScreenPose(packet);
@@ -1342,7 +1410,10 @@ private:
         const DrivingSnapshot driving = input_ != nullptr ? input_->Driving() : DrivingSnapshot{};
         if (driving.hand_steering && !hand_meshes_loaded_ && runtime_ != nullptr) {
             hand_meshes_loaded_ = true;
-            const bool loaded = LoadRuntimeHandMeshes(*runtime_);
+            // Tracked hands' trackers, when they exist, serve the mesh too.
+            const XrHandTrackerEXT trackers[2]{input_ != nullptr ? input_->HandTracker(0) : XR_NULL_HANDLE,
+                                               input_ != nullptr ? input_->HandTracker(1) : XR_NULL_HANDLE};
+            const bool loaded = LoadRuntimeHandMeshes(*runtime_, trackers);
             RT_LOG(RT_TAG_RUNTIME) << "[mkw-vr] cockpit hands: "
                                    << (loaded ? "the runtime's hand mesh" : "procedural gloves (no runtime hand mesh)")
                                    << std::endl;
@@ -1366,6 +1437,7 @@ private:
             ViewFromBase(source.xr_frame.views[eye].pose, base_position_, true, 1.0f, lean_back_radians,
                          cockpit.eyeFromSeat[eye]);
         }
+        const hand_tracking::HandJointFrame* joints = input_ != nullptr ? &input_->HandJoints() : nullptr;
         for (size_t hand = 0; hand < 2; ++hand) {
             auto& target = cockpit.hands[hand];
             const auto& from = driving.hands[hand];
@@ -1373,6 +1445,14 @@ private:
             target.held = from.held;
             target.squeeze = from.squeeze;
             std::copy(from.seat_from_grip.begin(), from.seat_from_grip.end(), target.seatFromGrip);
+            target.jointsValid = from.joints_valid && joints != nullptr && joints->valid[hand];
+            if (target.jointsValid) {
+                for (size_t joint = 0; joint < hand_tracking::kJointCount; ++joint) {
+                    const auto& matrix = joints->seat_from_joint[hand][joint];
+                    std::copy(matrix.begin(), matrix.end(), target.seatFromJoint[joint]);
+                    target.jointRadii[joint] = joints->radius[hand][joint];
+                }
+            }
         }
     }
 
@@ -1587,7 +1667,8 @@ private:
 
     // Android: `adb shell setprop debug.wiicompiled.eye_passes 0` replays each eye in one render
     // pass per recorded pass again, and 1 forces the single pass, to compare the two within one
-    // session. An empty value hands the switch back to the settings. Read about once a second.
+    // session. An empty value restores the single pass every eye has otherwise. Read about once a
+    // second.
     void PollEyePassesOverride() noexcept {
 #if defined(__ANDROID__)
         if (eye_passes_poll_ != 0) {
@@ -1605,8 +1686,7 @@ private:
             return;
         }
         eye_passes_override_ = override_value;
-        const bool single =
-            override_value >= 0 ? override_value == 1 : RuntimeConfigFile::VrSinglePassEyes();
+        const bool single = override_value != 0;
         aurora_set_stereo_single_pass_eyes(single);
         RT_LOG(RT_TAG_RUNTIME) << "OpenXR: eyes replayed in "
                                << (single ? "one render pass" : "one render pass per recorded pass")
@@ -1909,10 +1989,18 @@ private:
     std::atomic_bool teardown_requested_{false};
     std::atomic_bool recenter_requested_{false};
     std::atomic<float> lean_back_degrees_{RuntimeConfigFile::VrLeanBackDegrees()};
+    std::atomic<float> render_scale_{RuntimeConfigFile::VrRenderScale()};
+    // The left eye for OpenXRGetEyeResolution: the runtime's description of it, set while a
+    // session runs, and the size it is rendered at now (0 without a session).
+    mutable std::mutex eye_view_mutex_;
+    XrViewConfigurationView eye_view_{XR_TYPE_VIEW_CONFIGURATION_VIEW};
+    std::atomic_uint32_t eye_width_{0};
+    std::atomic_uint32_t eye_height_{0};
     std::atomic_bool passthrough_{RuntimeConfigFile::VrPassthrough()};
     std::atomic_bool immersive_window_{RuntimeConfigFile::VrImmersiveWindow()};
     std::atomic_uint32_t frame_interpolation_fps_{RuntimeConfigFile::VrFrameInterpolationFps()};
     std::atomic_bool interpolation_available_{false};
+    std::atomic_bool hand_tracking_available_{false};
     std::mutex interpolation_mutex_;
     bool interpolation_stopping_ = true;
     FrameInterpolationPacing interpolation_pacing_;
@@ -2040,6 +2128,23 @@ void OpenXRSetImmersiveWindow(bool enabled) noexcept {
 #endif
 }
 
+void OpenXRSetRenderScale(float scale) noexcept {
+#if MKW_OPENXR_GRAPHICS_BACKEND
+    OpenXRIntegration::Get().SetRenderScale(scale);
+#else
+    (void)scale;
+#endif
+}
+
+OpenXREyeResolution OpenXRGetEyeResolution(float scale) noexcept {
+#if MKW_OPENXR_GRAPHICS_BACKEND
+    return OpenXRIntegration::Get().EyeResolution(scale);
+#else
+    (void)scale;
+    return {};
+#endif
+}
+
 void OpenXRSetFrameInterpolationFps(uint32_t target) noexcept {
 #if MKW_OPENXR_GRAPHICS_BACKEND
     OpenXRIntegration::Get().SetFrameInterpolationFps(target);
@@ -2059,6 +2164,14 @@ OpenXRFrameTiming OpenXRGetFrameTiming() noexcept {
 bool OpenXRFrameInterpolationAvailable() noexcept {
 #if MKW_OPENXR_GRAPHICS_BACKEND
     return OpenXRIntegration::Get().FrameInterpolationAvailable();
+#else
+    return false;
+#endif
+}
+
+bool OpenXRHandTrackingAvailable() noexcept {
+#if MKW_OPENXR_GRAPHICS_BACKEND
+    return OpenXRIntegration::Get().HandTrackingAvailable();
 #else
     return false;
 #endif

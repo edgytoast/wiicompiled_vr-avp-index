@@ -140,6 +140,16 @@ bool aurora_metal_set_stereo_targets_with_panel(uint64_t frameToken, const Auror
 bool aurora_metal_cancel_stereo_targets(uint64_t frameToken);
 
 /**
+ * The host is about to destroy these target IOSurfaces (the eye swapchains, when
+ * the render resolution changes): the bridge drops its Dawn imports of them.
+ * Dawn keeps a texture a queued copy still uses alive until that copy is done,
+ * and the host orders the compositor's reads with the release fences, so no
+ * wait is needed. Call with no frame token pending; false when one is (keep the
+ * surfaces and try again later).
+ */
+bool aurora_metal_forget_stereo_targets(void* const* ioSurfaces, uint32_t count);
+
+/**
  * Removes the sink and releases the cached Dawn imports. The worker must be
  * idle. Returns false only when Dawn could not be drained, in which case the
  * bridge is retained for the process lifetime.

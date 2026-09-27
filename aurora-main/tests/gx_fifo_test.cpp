@@ -5133,3 +5133,267 @@ TEST_F(GXFifoTest, Composite_TevSetup) {
   EXPECT_EQ(g_gxState.tevStages[0].colorPass.d, GX_CC_TEXC);
   EXPECT_EQ(g_gxState.tevStages[0].alphaPass.d, GX_CA_TEXA);
 }
+
+// Mario Kart Wii's dynamic shadows: EGG::DrawPathShadowVolume counts the shadow
+// volumes' coverage into the EFB alpha plane with perspective draws, then one
+// full-screen orthographic quad darkens the image by destination alpha. The
+// quad samples nothing, so only its blend factors say it composes with the
+// framebuffer; it must keep its recorded transforms in an immersive eye.
+static void draw_full_screen_ortho_quad_with_blend(GXBlendFactor src, GXBlendFactor dst) {
+  aurora::gfx::testing::use_real_vertex_format_helpers(true);
+  aurora::gfx::testing::use_draw_command_tracking(true);
+
+  aurora::Mat4x4<float> proj{};
+  proj.m0[0] = 2.0f / 608.0f;
+  proj.m0[3] = -1.0f;
+  proj.m1[1] = -2.0f / 456.0f;
+  proj.m1[3] = 1.0f;
+  proj.m2[2] = -1.0f;
+  proj.m3[3] = 1.0f;
+  GXSetProjection(&proj, GX_ORTHOGRAPHIC);
+  GXSetViewport(0.0f, 0.0f, 608.0f, 456.0f, 0.0f, 1.0f);
+  GXSetScissor(0, 0, 608, 456);
+  aurora::Mat3x4<float> identity{};
+  identity.m0[0] = identity.m1[1] = identity.m2[2] = 1.0f;
+  GXLoadPosMtxImm(&identity, GX_PNMTX0);
+  GXSetCurrentMtx(GX_PNMTX0);
+
+  GXClearVtxDesc();
+  GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
+  GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+  GXSetNumChans(0);
+  GXSetNumTexGens(0);
+  GXSetNumTevStages(1);
+  GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR_NULL);
+  GXSetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_C0);
+  GXSetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+  GXSetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_A0);
+  GXSetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+  GXSetBlendMode(GX_BM_BLEND, src, dst, GX_LO_CLEAR);
+  GXSetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
+
+  const float corners[4][2]{{0.0f, 0.0f}, {608.0f, 0.0f}, {608.0f, 456.0f}, {0.0f, 456.0f}};
+  GXBegin(GX_QUADS, GX_VTXFMT0, 4);
+  for (const auto& corner : corners) {
+    GXPosition3f32(corner[0], corner[1], 0.0f);
+  }
+  GXEnd();
+}
+
+TEST_F(GXFifoTest, OrthographicQuadBlendingWithDestinationAlphaIsNativeEfbEffect) {
+  draw_full_screen_ortho_quad_with_blend(GX_BL_DSTALPHA, GX_BL_INVDSTALPHA);
+  decode_fifo(flush_and_capture());
+  const auto* draw = aurora::gfx::get_last_draw_command<aurora::gx::DrawData>();
+  ASSERT_NE(draw, nullptr);
+  EXPECT_FALSE(draw->uniformReplayLayout.perspective);
+  EXPECT_TRUE(draw->uniformReplayLayout.nativeEfbEffect);
+}
+
+TEST_F(GXFifoTest, OrthographicQuadBlendingWithSourceAlphaStaysOnScreen) {
+  // An ordinary alpha-blended 2D element (a fade, a translucent HUD panel)
+  // depends on its own alpha only and remains virtual-screen content.
+  draw_full_screen_ortho_quad_with_blend(GX_BL_SRCALPHA, GX_BL_INVSRCALPHA);
+  decode_fifo(flush_and_capture());
+  const auto* draw = aurora::gfx::get_last_draw_command<aurora::gx::DrawData>();
+  ASSERT_NE(draw, nullptr);
+  EXPECT_FALSE(draw->uniformReplayLayout.perspective);
+  EXPECT_FALSE(draw->uniformReplayLayout.nativeEfbEffect);
+}
+
+TEST_F(GXFifoTest, OffscreenViewportPassOverFreshCopyIsNativeEfbEffect) {
+  // MKW builds its object shadow map in a 440x440 corner of the EFB: every
+  // stage is a full-resolution, unblended orthographic pass over the previous
+  // stage's copy, drawn in that corner's viewport and copied back out. The
+  // displayed frame never shows those passes, so they are not 2D-layer content.
+  std::array<u8, 440 * 440 * 4> image{};
+  gxState().pixelFmt = GX_PF_RGBA6_Z24;
+  aurora::gfx::testing::set_framebuffer_sizes(640, 528, 640, 528);
+
+  GXSetTexCopySrc(0, 0, 440, 440);
+  GXSetTexCopyDst(440, 440, GX_TF_RGBA8, GX_FALSE);
+  aurora::gfx::testing::set_current_frame(42);
+  GXCopyTex(image.data(), GX_TRUE);
+  const auto& records = aurora::gfx::testing::resolve_pass_records();
+  ASSERT_EQ(records.size(), 1u);
+  ASSERT_TRUE(records.front().texture);
+
+  GXTexObj_ texObj{};
+  texObj.mWidth = 440;
+  texObj.mHeight = 440;
+  texObj.mFormat = GX_TF_RGBA8;
+  gxState().textures[GX_TEXMAP0] = aurora::gfx::TextureBind{texObj, records.front().texture};
+  gxState().blendMode = GX_BM_NONE;
+  aurora::gx::ShaderConfig shader{};
+  shader.numTexGens = 1;
+  shader.tevStageCount = 1;
+  shader.tevStages[0].texCoordId = GX_TEXCOORD0;
+  shader.tevStages[0].texMapId = GX_TEXMAP0;
+  shader.tevStages[0].colorPass.d = GX_CC_TEXC;
+  shader.tevStages[0].alphaPass.d = GX_CA_TEXA;
+  const auto info = aurora::gx::build_shader_info(shader);
+
+  gxState().logicalViewport = {0.0f, 0.0f, 440.0f, 440.0f, 0.0f, 1.0f};
+  aurora::gfx::testing::reset_uniform_allocations();
+  const auto cornerLayout = aurora::gx::build_uniform(info, 0, aurora::gx::BindGroupRanges{},
+                                                      aurora::gx::FrameInterpolationDrawIdentity{}, false);
+  EXPECT_TRUE(cornerLayout.replayLayout.nativeEfbEffect);
+
+  // The same full-resolution, opaque copy drawn across the whole frame is a
+  // frozen-frame background (pause menus) and stays on the screen.
+  gxState().logicalViewport = {0.0f, 0.0f, 640.0f, 528.0f, 0.0f, 1.0f};
+  aurora::gfx::testing::reset_uniform_allocations();
+  const auto frameLayout = aurora::gx::build_uniform(info, 0, aurora::gx::BindGroupRanges{},
+                                                     aurora::gx::FrameInterpolationDrawIdentity{}, false);
+  EXPECT_FALSE(frameLayout.replayLayout.nativeEfbEffect);
+}
+
+TEST(GXPipelineConfig, StereoStencilFieldCarriesTheCompositeSourceBlendBit) {
+  aurora::gx::PipelineConfig config{};
+  config.stereoStencil = aurora::gx::kStereoStencilFormat | aurora::gx::kCompositeSourceBlend;
+  EXPECT_TRUE(aurora::gx::valid_pipeline_config(config));
+  config.stereoStencil = (aurora::gx::kStereoStencilFormat | aurora::gx::kCompositeSourceBlend) + 1;
+  EXPECT_FALSE(aurora::gx::valid_pipeline_config(config));
+}
+
+TEST_F(GXFifoTest, NativeCompositeRecordsTheFrameSizedDepthCopyItSamples) {
+  // Mario Kart Wii's ghost kart: one orthographic quad blends a frame-sized colour copy back
+  // over the race with the depth of a frame-sized depth copy. The layout names that depth copy so
+  // the eye replay can find the pass whose draws produced it.
+  // Frame-sized buffers: static so two of them do not exhaust the test thread's stack.
+  static std::array<u8, 608 * 456 * 4> colour{};
+  static std::array<u8, 608 * 456 * 4> depth{};
+  gxState().pixelFmt = GX_PF_RGBA6_Z24;
+  aurora::gfx::testing::set_framebuffer_sizes(640, 528, 640, 528);
+  aurora::gfx::testing::set_current_frame(50);
+
+  GXSetTexCopySrc(0, 0, 608, 456);
+  GXSetTexCopyDst(608, 456, GX_TF_Z24X8, GX_FALSE);
+  GXCopyTex(depth.data(), GX_TRUE);
+  GXSetTexCopyDst(608, 456, GX_TF_RGB565, GX_FALSE);
+  GXCopyTex(colour.data(), GX_TRUE);
+  const auto& records = aurora::gfx::testing::resolve_pass_records();
+  ASSERT_EQ(records.size(), 2u);
+  ASSERT_TRUE(records[0].texture);
+  ASSERT_TRUE(records[1].texture);
+
+  GXTexObj_ colourObj{};
+  colourObj.mWidth = 608;
+  colourObj.mHeight = 456;
+  colourObj.mFormat = GX_TF_RGB565;
+  GXTexObj_ depthObj{};
+  depthObj.mWidth = 608;
+  depthObj.mHeight = 456;
+  depthObj.mFormat = GX_TF_Z24X8;
+  gxState().textures[GX_TEXMAP0] = aurora::gfx::TextureBind{colourObj, records[1].texture};
+  gxState().textures[GX_TEXMAP1] = aurora::gfx::TextureBind{depthObj, records[0].texture};
+  gxState().blendMode = GX_BM_BLEND;
+  gxState().blendFacSrc = GX_BL_SRCALPHA;
+  gxState().blendFacDst = GX_BL_INVSRCALPHA;
+  gxState().logicalViewport = {0.0f, 0.0f, 640.0f, 528.0f, 0.0f, 1.0f};
+  aurora::gx::ShaderConfig shader{};
+  shader.numTexGens = 2;
+  shader.tevStageCount = 2;
+  shader.tevStages[0].texCoordId = GX_TEXCOORD0;
+  shader.tevStages[0].texMapId = GX_TEXMAP0;
+  shader.tevStages[0].colorPass.d = GX_CC_TEXC;
+  shader.tevStages[0].alphaPass.d = GX_CA_TEXA;
+  shader.tevStages[1].texCoordId = GX_TEXCOORD1;
+  shader.tevStages[1].texMapId = GX_TEXMAP1;
+  shader.tevStages[1].colorPass.d = GX_CC_TEXC;
+  shader.tevStages[1].alphaPass.d = GX_CA_TEXA;
+  const auto info = aurora::gx::build_shader_info(shader);
+
+  aurora::gfx::testing::reset_uniform_allocations();
+  const auto composite = aurora::gx::build_uniform(info, 0, aurora::gx::BindGroupRanges{},
+                                                   aurora::gx::FrameInterpolationDrawIdentity{}, false);
+  EXPECT_TRUE(composite.replayLayout.nativeEfbEffect);
+  EXPECT_EQ(composite.replayLayout.compositeDepthCopy, records[0].texture.get());
+
+  // The same draw with the game camera is world geometry, whatever it samples.
+  aurora::gfx::testing::reset_uniform_allocations();
+  const auto world = aurora::gx::build_uniform(info, 0, aurora::gx::BindGroupRanges{},
+                                               aurora::gx::FrameInterpolationDrawIdentity{}, true);
+  EXPECT_EQ(world.replayLayout.compositeDepthCopy, nullptr);
+}
+
+static void draw_quad_with_projection(GXProjectionType type) {
+  aurora::gfx::testing::use_real_vertex_format_helpers(true);
+  aurora::gfx::testing::use_draw_command_tracking(true);
+
+  aurora::Mat4x4<float> proj{};
+  if (type == GX_PERSPECTIVE) {
+    proj.m0[0] = 1.0f;
+    proj.m1[1] = 1.0f;
+    proj.m2[2] = -1.0f;
+    proj.m2[3] = -1.0f;
+    proj.m3[2] = -1.0f;
+  } else {
+    proj.m0[0] = 2.0f / 608.0f;
+    proj.m0[3] = -1.0f;
+    proj.m1[1] = -2.0f / 456.0f;
+    proj.m1[3] = 1.0f;
+    proj.m2[2] = -1.0f;
+    proj.m3[3] = 1.0f;
+  }
+  GXSetProjection(&proj, type);
+  GXSetViewport(0.0f, 0.0f, 608.0f, 456.0f, 0.0f, 1.0f);
+  GXSetScissor(0, 0, 608, 456);
+  aurora::Mat3x4<float> identity{};
+  identity.m0[0] = identity.m1[1] = identity.m2[2] = 1.0f;
+  GXLoadPosMtxImm(&identity, GX_PNMTX0);
+  GXSetCurrentMtx(GX_PNMTX0);
+
+  GXClearVtxDesc();
+  GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
+  GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+  GXSetNumChans(0);
+  GXSetNumTexGens(0);
+  GXSetNumTevStages(1);
+  GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR_NULL);
+  GXSetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_C0);
+  GXSetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+  GXSetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_A0);
+  GXSetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+  const float corners[4][2]{{-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f}};
+  GXBegin(GX_QUADS, GX_VTXFMT0, 4);
+  for (const auto& corner : corners) {
+    GXPosition3f32(corner[0], corner[1], -5.0f);
+  }
+  GXEnd();
+}
+
+TEST_F(GXFifoTest, CompositeSourcePipelineGetsConstantAlphaSiblingsFromItsNextDraw) {
+  // An eye re-issues MKW's ghost kart draws at the composite with constant-alpha siblings of
+  // their pipelines. Only a pipeline an eye asked for gets them, from its next draw on, and
+  // only in perspective draws.
+  draw_quad_with_projection(GX_PERSPECTIVE);
+  decode_fifo(flush_and_capture());
+  const auto* first = aurora::gfx::get_last_draw_command<aurora::gx::DrawData>();
+  ASSERT_NE(first, nullptr);
+  ASSERT_TRUE(first->uniformReplayLayout.perspective);
+  ASSERT_NE(first->pipeline, 0u);
+  EXPECT_EQ(first->compositeSourcePipeline, 0u);
+  EXPECT_EQ(first->stereoCompositeSourcePipeline, 0u);
+  const auto pipeline = first->pipeline;
+
+  aurora::gx::note_composite_source_pipeline(pipeline);
+  draw_quad_with_projection(GX_PERSPECTIVE);
+  decode_fifo(flush_and_capture());
+  const auto* next = aurora::gfx::get_last_draw_command<aurora::gx::DrawData>();
+  ASSERT_NE(next, nullptr);
+  ASSERT_EQ(next->pipeline, pipeline);
+  EXPECT_NE(next->compositeSourcePipeline, 0u);
+  EXPECT_NE(next->stereoCompositeSourcePipeline, 0u);
+  EXPECT_NE(next->compositeSourcePipeline, next->pipeline);
+  EXPECT_NE(next->stereoCompositeSourcePipeline, next->stereoPipeline);
+  EXPECT_NE(next->compositeSourcePipeline, next->stereoCompositeSourcePipeline);
+
+  draw_quad_with_projection(GX_ORTHOGRAPHIC);
+  decode_fifo(flush_and_capture());
+  const auto* flat = aurora::gfx::get_last_draw_command<aurora::gx::DrawData>();
+  ASSERT_NE(flat, nullptr);
+  ASSERT_EQ(flat->pipeline, pipeline);
+  EXPECT_EQ(flat->compositeSourcePipeline, 0u);
+  EXPECT_EQ(flat->stereoCompositeSourcePipeline, 0u);
+}

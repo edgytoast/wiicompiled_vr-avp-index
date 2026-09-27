@@ -208,6 +208,9 @@ struct RenderPass {
   bool postCopyClear = false;
   bool snapshotColorResolveSource = false;
   bool efbTarget = false;
+  // This pass's perspective draws are re-issued by an eye at the composite that samples its
+  // depth copy (link_composite_source), and skipped where they were recorded.
+  bool compositeSource = false;
   std::vector<tex_palette_conv::ConvRequest> paletteConvs;
 };
 static std::vector<RenderPass> g_renderPasses;
@@ -951,8 +954,57 @@ void end_offscreen() {
   push_command(CommandType::SetScissor, Command::Data{.setScissor = g_cachedScissor});
 }
 
+// Mario Kart Wii draws a ghost kart by rendering it alone into the cleared EFB, copying the
+// frame's colour and depth out, drawing the race, and blending the copies back with one
+// orthographic quad whose depth comes from the depth copy. That quad is a native effect, so an
+// eye would stamp the desktop's flat image of the ghost over its own view, following the head
+// and cut by the eye's ground. Instead the eye skips the draws of the pass that resolved the
+// depth copy where they were recorded and re-issues them in the composite's place, blended
+// with kCompositeSourceAlpha and depth-tested against its own world: the ghost in stereo,
+// translucent, where the game put it.
+//
+// Linked as the composite is recorded, so a frame without one does no work for it. The source
+// pass is complete by then, and only the current pass ever moves (offscreen suspension), so it
+// is found by the copy it resolved. A source draw without constant-alpha siblings asks for them
+// here; its pipeline's next draw brings them, and until then the eye leaves that draw out.
+static void link_composite_source(const gx::DrawData& composite) noexcept {
+  if (g_currentRenderPass >= g_renderPasses.size()) {
+    return;
+  }
+  static bool linkLogged = false;
+  for (size_t p = g_currentRenderPass; p-- > 0;) {
+    auto& source = g_renderPasses[p];
+    if (!source.efbTarget || source.resolveTarget.get() != composite.uniformReplayLayout.compositeDepthCopy) {
+      continue;
+    }
+    size_t draws = 0;
+    for (const auto& command : source.commands) {
+      if (command.type != CommandType::Draw || command.data.draw.type != ShaderType::GX ||
+          !command.data.draw.gx.uniformReplayLayout.perspective) {
+        continue;
+      }
+      ++draws;
+      if (command.data.draw.gx.stereoCompositeSourcePipeline == 0) {
+        gx::note_composite_source_pipeline(command.data.draw.gx.pipeline);
+      }
+    }
+    if (draws > 0) {
+      source.compositeSource = true;
+      if (!linkLogged) {
+        linkLogged = true;
+        Log.info("Immersive replay: pass {} ({} perspective draws) is re-issued by each eye in place of a "
+                 "composite that samples its depth copy",
+                 p, draws);
+      }
+    }
+    return;
+  }
+}
+
 template <>
 void push_draw_command(gx::DrawData data) {
+  if (data.uniformReplayLayout.compositeDepthCopy != nullptr && stereo_frame_provider_active())
+    UNLIKELY { link_composite_source(data); }
   push_draw_command(ShaderDrawCommand{.type = ShaderType::GX, .gx = data});
 }
 
@@ -2581,6 +2633,113 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
                      recordedViewport.znear, recordedViewport.zfar);
   };
 
+  // WebGPU requires 0 <= minDepth <= maxDepth <= 1. vp.znear/vp.zfar are in GX's own distance
+  // terms (0 = near); under UseReversedZ the host depth-buffer storage direction is flipped
+  // (near = 1, far = 0), so this range has to be remapped through 1-x the same way the
+  // projection matrix, depth compare function, and clear value all are - a plain min/max clamp
+  // (the previous code here) maps a *restricted* range (e.g. a viewport deliberately narrowed
+  // to force something to draw "in front of everything") to the wrong end of the buffer: what
+  // should land near the near-storage-extreme (1.0) instead lands near the far-storage-extreme
+  // (0.0), so anything else drawn afterward at its true depth wins the compare test and the
+  // "in front" geometry silently vanishes. A full [0,1] viewport is unaffected either way,
+  // which is why this only broke specific elements, not the whole scene. Matches upstream
+  // aurora's apply_viewport (lib/gfx/encoding.cpp).
+  //
+  // The remapped pair is then ordered and clamped before it reaches WebGPU. For any ordered
+  // guest range this is a no-op (znear <= zfar implies 1-zfar <= 1-znear), so upstream's fix is
+  // reproduced exactly; it only guards the swapped pair MKW is known to emit, which the raw
+  // remap would hand to SetViewport as minDepth > maxDepth and fail validation. The VR eye
+  // replay below reuses these recorded values, so the guard covers that path too.
+  const auto map_viewport = [&](const Viewport& vp) noexcept {
+    const float remappedNear = gx::UseReversedZ ? 1.0f - vp.zfar : vp.znear;
+    const float remappedFar = gx::UseReversedZ ? 1.0f - vp.znear : vp.zfar;
+    const float minDepth = std::clamp(std::min(remappedNear, remappedFar), 0.0f, 1.0f);
+    const float maxDepth = std::clamp(std::max(remappedNear, remappedFar), 0.0f, 1.0f);
+    return Viewport{
+        .left = (vp.left - static_cast<float>(sourceRegionLeft)) * scaleX,
+        .top = (vp.top - static_cast<float>(sourceRegionTop)) * scaleY,
+        .width = vp.width * scaleX,
+        .height = vp.height * scaleY,
+        .znear = minDepth,
+        .zfar = maxDepth,
+    };
+  };
+  const auto map_scissor = [&](const ClipRect& sc) noexcept {
+    const auto sourceLeft = std::clamp(sc.x, sourceRegionLeft, sourceRegionRight);
+    const auto sourceTop = std::clamp(sc.y, sourceRegionTop, sourceRegionBottom);
+    const auto sourceRight = std::clamp(sc.x + sc.width, sourceLeft, sourceRegionRight);
+    const auto sourceBottom = std::clamp(sc.y + sc.height, sourceTop, sourceRegionBottom);
+    const auto left = static_cast<uint32_t>(
+        std::clamp(static_cast<int32_t>(std::floor(static_cast<float>(sourceLeft - sourceRegionLeft) * scaleX)), 0,
+                   static_cast<int32_t>(targetSize.width)));
+    const auto top = static_cast<uint32_t>(
+        std::clamp(static_cast<int32_t>(std::floor(static_cast<float>(sourceTop - sourceRegionTop) * scaleY)), 0,
+                   static_cast<int32_t>(targetSize.height)));
+    const auto right = static_cast<uint32_t>(
+        std::clamp(static_cast<int32_t>(std::ceil(static_cast<float>(sourceRight - sourceRegionLeft) * scaleX)),
+                   static_cast<int32_t>(left), static_cast<int32_t>(targetSize.width)));
+    const auto bottom = static_cast<uint32_t>(
+        std::clamp(static_cast<int32_t>(std::ceil(static_cast<float>(sourceBottom - sourceRegionTop) * scaleY)),
+                   static_cast<int32_t>(top), static_cast<int32_t>(targetSize.height)));
+    return std::array<uint32_t, 4>{left, top, right - left, bottom - top};
+  };
+  // Composites serve one camera; a multiplayer eye keeps every draw where it was recorded.
+  const bool compositeReplay = overrideTarget && !multiplayer;
+  const bool skipCompositeSource = compositeReplay && renderPasses[idx].compositeSource;
+  const auto find_composite_source = [&](const TextureRef* depthCopy) -> const RenderPass* {
+    for (u32 p = 0; p < idx; ++p) {
+      if (renderPasses[p].compositeSource && renderPasses[p].resolveTarget.get() == depthCopy) {
+        return &renderPasses[p];
+      }
+    }
+    return nullptr;
+  };
+  // The perspective draws of a composite's source pass, in the composite's place: their own
+  // recorded viewport and scissor, this eye's uniforms, the constant-alpha pipeline sibling,
+  // depth-tested against the world the eye has drawn by now (see link_composite_source).
+  const auto replay_composite_source = [&](const RenderPass& source) {
+    const wgpu::Color alpha{stereo_replay::kCompositeSourceAlpha, stereo_replay::kCompositeSourceAlpha,
+                            stereo_replay::kCompositeSourceAlpha, stereo_replay::kCompositeSourceAlpha};
+    const bool stencilTarget = invocation.target->depthFormat == wgpu::TextureFormat::Depth24PlusStencil8;
+    for (const auto& command : source.commands) {
+      if (command.type == CommandType::SetViewport) {
+        const Viewport vp = map_viewport(command.data.setViewport);
+        pass.SetViewport(vp.left, vp.top, vp.width, vp.height, vp.znear, vp.zfar);
+        continue;
+      }
+      if (command.type == CommandType::SetScissor) {
+        apply_scissor(map_scissor(command.data.setScissor));
+        continue;
+      }
+      if (command.type != CommandType::Draw || command.data.draw.type != ShaderType::GX) {
+        continue;
+      }
+      const auto& draw = command.data.draw.gx;
+      if (!draw.uniformReplayLayout.perspective) {
+        continue;
+      }
+      const gfx::PipelineRef pipeline = stencilTarget ? draw.stereoCompositeSourcePipeline : draw.compositeSourcePipeline;
+      if (pipeline == 0) {
+        continue;
+      }
+      const gfx::Range* uniform = nullptr;
+      if (invocation.stereoEye < draw.stereoUniformRanges.size() &&
+          draw.stereoUniformRanges[invocation.stereoEye].size != 0) {
+        uniform = &draw.stereoUniformRanges[invocation.stereoEye];
+      } else if (invocation.interpolatedFrame >= 0 &&
+                 static_cast<size_t>(invocation.interpolatedFrame) < draw.interpolatedUniformRanges.size() &&
+                 draw.interpolatedUniformRanges[invocation.interpolatedFrame].size != 0) {
+        uniform = &draw.interpolatedUniformRanges[invocation.interpolatedFrame];
+      }
+      gx::render(draw, pass, encodeState, source.requireReadyPipelines, uniform, pipeline, &alpha);
+    }
+    if (invocation.sceneDrawn != nullptr) {
+      *invocation.sceneDrawn = true;
+    }
+    // The source pass's own viewport and scissor were applied; the next draw restores its own.
+    viewportStateKnown = false;
+    scissorStateKnown = false;
+  };
   for (const auto& cmd : renderPasses[idx].commands) {
 #ifdef AURORA_GFX_DEBUG_GROUPS
     {
@@ -2604,35 +2763,7 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
     case CommandType::SetViewport: {
       const auto& vp = cmd.data.setViewport;
       sourceViewport = {vp.left, vp.top, vp.width, vp.height};
-      // WebGPU requires 0 <= minDepth <= maxDepth <= 1. vp.znear/vp.zfar are in GX's own distance
-      // terms (0 = near); under UseReversedZ the host depth-buffer storage direction is flipped
-      // (near = 1, far = 0), so this range has to be remapped through 1-x the same way the
-      // projection matrix, depth compare function, and clear value all are - a plain min/max clamp
-      // (the previous code here) maps a *restricted* range (e.g. a viewport deliberately narrowed
-      // to force something to draw "in front of everything") to the wrong end of the buffer: what
-      // should land near the near-storage-extreme (1.0) instead lands near the far-storage-extreme
-      // (0.0), so anything else drawn afterward at its true depth wins the compare test and the
-      // "in front" geometry silently vanishes. A full [0,1] viewport is unaffected either way,
-      // which is why this only broke specific elements, not the whole scene. Matches upstream
-      // aurora's apply_viewport (lib/gfx/encoding.cpp).
-      //
-      // The remapped pair is then ordered and clamped before it reaches WebGPU. For any ordered
-      // guest range this is a no-op (znear <= zfar implies 1-zfar <= 1-znear), so upstream's fix is
-      // reproduced exactly; it only guards the swapped pair MKW is known to emit, which the raw
-      // remap would hand to SetViewport as minDepth > maxDepth and fail validation. The VR eye
-      // replay below reuses these recorded values, so the guard covers that path too.
-      const float remappedNear = gx::UseReversedZ ? 1.0f - vp.zfar : vp.znear;
-      const float remappedFar = gx::UseReversedZ ? 1.0f - vp.znear : vp.zfar;
-      const float minDepth = std::clamp(std::min(remappedNear, remappedFar), 0.0f, 1.0f);
-      const float maxDepth = std::clamp(std::max(remappedNear, remappedFar), 0.0f, 1.0f);
-      recordedViewport = {
-          .left = (vp.left - static_cast<float>(sourceRegionLeft)) * scaleX,
-          .top = (vp.top - static_cast<float>(sourceRegionTop)) * scaleY,
-          .width = vp.width * scaleX,
-          .height = vp.height * scaleY,
-          .znear = minDepth,
-          .zfar = maxDepth,
-      };
+      recordedViewport = map_viewport(vp);
       hudScreenViewport = false;
       viewportStateKnown = true;
       apply_viewport(false);
@@ -2640,23 +2771,7 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
     case CommandType::SetScissor: {
       const auto& sc = cmd.data.setScissor;
       sourceScissor = {float(sc.x), float(sc.y), float(sc.width), float(sc.height)};
-      const auto sourceLeft = std::clamp(sc.x, sourceRegionLeft, sourceRegionRight);
-      const auto sourceTop = std::clamp(sc.y, sourceRegionTop, sourceRegionBottom);
-      const auto sourceRight = std::clamp(sc.x + sc.width, sourceLeft, sourceRegionRight);
-      const auto sourceBottom = std::clamp(sc.y + sc.height, sourceTop, sourceRegionBottom);
-      const auto left = static_cast<uint32_t>(
-          std::clamp(static_cast<int32_t>(std::floor(static_cast<float>(sourceLeft - sourceRegionLeft) * scaleX)), 0,
-                     static_cast<int32_t>(targetSize.width)));
-      const auto top = static_cast<uint32_t>(
-          std::clamp(static_cast<int32_t>(std::floor(static_cast<float>(sourceTop - sourceRegionTop) * scaleY)), 0,
-                     static_cast<int32_t>(targetSize.height)));
-      const auto right = static_cast<uint32_t>(
-          std::clamp(static_cast<int32_t>(std::ceil(static_cast<float>(sourceRight - sourceRegionLeft) * scaleX)),
-                     static_cast<int32_t>(left), static_cast<int32_t>(targetSize.width)));
-      const auto bottom = static_cast<uint32_t>(
-          std::clamp(static_cast<int32_t>(std::ceil(static_cast<float>(sourceBottom - sourceRegionTop) * scaleY)),
-                     static_cast<int32_t>(top), static_cast<int32_t>(targetSize.height)));
-      recordedScissor = {left, top, right - left, bottom - top};
+      recordedScissor = map_scissor(sc);
       hudScreenScissor = false;
       scissorStateKnown = true;
       apply_scissor(recordedScissor);
@@ -2676,6 +2791,16 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
                                                                    draw.gx.uniformReplayLayout.nativeEfbEffect) ||
                             !stereo_replay::subviews_overlap(sourceScissor, playerRegion))) {
           break;
+        }
+        // A composite's source pass is drawn at the composite instead (link_composite_source).
+        if (skipCompositeSource) {
+          break;
+        }
+        if (compositeReplay && draw.gx.uniformReplayLayout.compositeDepthCopy != nullptr) {
+          if (const RenderPass* source = find_composite_source(draw.gx.uniformReplayLayout.compositeDepthCopy)) {
+            replay_composite_source(*source);
+            break;
+          }
         }
         const gfx::Range* uniformOverride = nullptr;
         // Only a 2D draw the virtual screen actually claimed carries a stereo

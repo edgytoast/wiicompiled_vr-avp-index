@@ -51,9 +51,6 @@ hud_width_meters = 2.4
 hud_virtual_screen = true
 flat_screen = false
 immersive_window = false
-stop_at_display_copy = true
-skip_copy_clears = true
-single_pass_eyes = true
 first_person = false
 first_person_toggle_click = true
 first_person_seat = "cockpit"
@@ -139,8 +136,34 @@ The old Eager Frame Heartbeat option has been removed and existing `eager_frame_
 settings are ignored. Completed rendering wakes the XR thread immediately. A 50 ms keep-alive
 still protects pauses and window dragging without eager repeats during rendering.
 
-`render_scale` scales the per-eye size recommended by the OpenXR runtime. It defaults to 1.0 on PC
-and 0.8 on the Quest, whose mobile GPU needs the headroom.
+`render_scale` scales the per-eye size recommended by the OpenXR runtime (0.25 to 2, never above the
+runtime's maximum). It defaults to 1.0 on PC and 0.8 on the Quest, whose mobile GPU needs the
+headroom. It is live: **F10 → VR → Render resolution** (also on the headset panel's VR tab) sets it
+in percent, applies it when the slider is let go, and saves it. Below the slider, *Each eye* gives
+the left eye's size now and, while they differ, the size the slider's value gives.
+
+A new scale never interrupts the picture. Each backend keeps two swapchain pairs, one on display and
+one Aurora writes next, and rebuilds only the second, at the start of the frame that writes it; the
+other follows a frame later, once it is the one written. The new swapchains are created before the
+old ones go, and a replaced pair is not destroyed at once: the compositor may still be consuming the
+layer that last showed it (the spec lets a runtime use the images after `xrDestroySwapchain`, and
+destroying a pair straight after its last frame lost the Vulkan device on a PC runtime), so it lives
+on for `kOpenXRRetiredSwapchainCycles` (8) more pacing cycles, each of which ends another compositor
+frame, and goes with the session if it is still waiting then. Before a pair is destroyed Aurora
+forgets its images: the D3D12 bridge waits for any copy still writing them, and the Windows Vulkan
+bridge drains Dawn's queue and drops its wraps of the old `VkImage`s (the runtime may hand the same
+handles to the new swapchains); on the Quest the backend's own copy device is idled. The Windows
+Vulkan binding also takes Dawn's device guard around `xrCreateSwapchain` and `xrDestroySwapchain`,
+since mid-session Dawn's worker is submitting on the shared queue. The Quest also replaces its
+shared eye buffers, whose Dawn imports are released (`aurora_vulkan_forget_stereo_buffers`). Those
+buffers are kept as large as both pairs, growing with the first pair rebuilt larger and shrinking
+once the second has followed it down, and each copy moves only what fits the image it writes. If the
+runtime cannot allocate a size, the log says so, the eyes keep the size they had (a pair already
+rebuilt goes back to it), and that size is not tried again until the scale changes; the saved value
+is still what the next launch asks for. `mkw_openxr_replay_tests` and
+`mkw_openxr_vulkan_replay_tests` cover the rebuild, the display pair left alone, the replaced pairs
+outliving their last frame by exactly that many cycles and going with the session otherwise, the
+images forgotten before their swapchains are destroyed, and both kinds of refusal.
 `world_units_per_meter` controls the scale of headset translation in the game world.
 `hud_distance_meters` and `hud_width_meters` place and size the virtual screen. They are read at
 launch and govern both the menu screen and the in-race 2D screen, so 2D content keeps its place
@@ -170,16 +193,20 @@ live, from the headset panel's VR tab or the launcher's Settings page. The app d
 So that the room frames the picture rather than black bands, the Quest's menu quad shows only the
 part of its eye-sized image Aurora draws into (the desktop snapshot, and the in-eye settings
 panel's rectangle), at the same size per pixel, so nothing moves.
-`stop_at_display_copy` ends eye replay at the final `GXCopyDisp`, matching the frame shown on the
-desktop. `skip_copy_clears` independently suppresses the EFB reset performed after a copy. Both
-default on and can be changed live from the F10 settings bar for diagnostics.
-`single_pass_eyes` draws each eye in one render pass. The desktop image ends a render pass at every
-GX copy, because the copy reads what was drawn before it; an eye samples the copies the desktop
-image made and never performs them, so it keeps drawing in the pass it has open, and it leaves out
-whatever a later clear of the whole color and depth erases. The picture is the same with less GPU
-memory traffic, which a tiled mobile GPU pays for at every split (the "Eye replay plan" log line
-reports each new pass structure). It defaults on and is live; turning it off replays one render pass
-per recorded pass.
+`hand_tracking` (Quest only, default off) makes the first-person cockpit's hands follow the
+headset's hand tracking; see "Tracked hands" under
+[Steering wheel and hand steering](#steering-wheel-and-hand-steering).
+How each eye is replayed is fixed; the former `stop_at_display_copy`, `skip_copy_clears` and
+`single_pass_eyes` settings are ignored. An eye ends at the frame's final `GXCopyDisp`, so it holds
+the frame shown on the desktop. It keeps the EFB reset that follows a display copy: Aurora marks
+only a display copy's reset, the final one lies past the replay's end, and an earlier one erases
+exactly what the final copy did not show. And it is drawn in one render pass. The desktop image ends
+a render pass at every GX copy, because the copy reads what was drawn before it; an eye samples the
+copies the desktop image made and never performs them, so it keeps drawing in the pass it has open,
+and it leaves out whatever a later clear of the whole color and depth erases. The picture is the
+same with less GPU memory traffic, which a tiled mobile GPU pays for at every split (the "Eye replay
+plan" log line reports each new pass structure). On the Quest, `debug.wiicompiled.eye_passes 0`
+replays one render pass per recorded pass again, for A/B timing (`docs/quest-port.md`).
 `first_person` and the `first_person_*` values are the first-person camera described below. All
 four are live and are also exposed in the F10 settings bar.
 `performance_level` is the level asked of the runtime through `XR_EXT_performance_settings` for
@@ -188,7 +215,7 @@ its CPU and GPU domains: `boost`, `sustained_high`, `sustained_low`, `power_savi
 request (see `docs/quest-port.md`); desktop runtimes rarely offer the extension, and the setting
 then does nothing. It is read at launch, and the session log records whether the runtime accepted
 it and any later performance notification (a thermal or rendering warning).
-`foveation` (Quest only, default `off`) shades the edges of the immersive race view more coarsely:
+`foveation` (Quest only, default `medium`) shades the edges of the immersive race view more coarsely:
 `off`, `low`, `medium` or `high`, see [Foveated rendering](#foveated-rendering). A session launched
 with it off runs without fragment density maps, so going from `off` to a level takes a restart;
 between levels, and back to `off`, it is live from the headset panel's VR tab. The launcher's
@@ -199,7 +226,7 @@ Settings page has it too.
 The headset's tracked controllers reach the game through an OpenXR action set synced on the pacing
 thread (`runtime/src/vr/openxr_input.cpp`), which feeds a virtual SDL gamepad that Aurora assigns
 to a port like any other. `controller_mode` decides what the game finds on that port, and is live
-from **F10 > VR > VR controllers**; the game sees a change as a controller reconnection.
+from **F10 > Controller settings > VR controllers**; the game sees a change as a controller reconnection.
 
 The pacing thread only publishes that gamepad; the game thread writes it to SDL where it already
 polls controllers (`OpenXRApplyControllerState`, called from `PAD__Read_HLE` and the overlay's
@@ -223,8 +250,7 @@ Touch controllers. The port is served through KPAD like a Bluetooth remote
 | Right trigger | B |
 | Right B | C (look behind) |
 | Right stick up / down | 1 / 2 |
-| Left X | − |
-| Left menu | + |
+| Left X or left menu | + |
 | Left stick | Nunchuk stick |
 | Left trigger | Z |
 | Left Y | Settings panel (not a Wii button) |
@@ -234,7 +260,9 @@ Touch controllers. The port is served through KPAD like a Bluetooth remote
 | Left controller motion | Nunchuk accelerometer |
 
 Analog inputs count as pressed past half travel. The grips, right stick left / right and the left
-stick click press no Wii button, and nothing presses HOME. C sits on right B rather than a grip
+stick click press no Wii button, and nothing presses − or HOME: Mario Kart Wii never reads −. Left
+X presses + as well as the left menu because the PlayStation VR2's controllers give no usable left
+menu, so pause would otherwise be out of reach there. C sits on right B rather than a grip
 because hand steering holds a grip down for a whole corner, and C is the game's look-behind. The
 game's Wii Remote rumble vibrates both controllers, subject to the ordinary controller-vibration
 switch.
@@ -276,11 +304,27 @@ see [Steering wheel and hand
 steering](#steering-wheel-and-hand-steering). Turning the wheel moves the controllers, and the game's
 own motion detection still reads them, so a sharp enough turn can read as a shake.
 
+**Bare hands.** On the Quest, with `hand_tracking` on and the controllers put down, the hands drive
+`khr/simple_controller`: a right pinch is A with the pointer on the hand's aim ray, the left
+palm-up pinch is + (pause), and in the cockpit, while a hand holds the wheel, that hand holds A and
+a free hand's pinch is Z; see "Tracked hands" under [Steering wheel and hand
+steering](#steering-wheel-and-hand-steering). A bare hand feeds no motion; flicking the hands up
+plays one shake instead. With `hand_tracking` off a bare hand presses nothing but +.
+
 `"gamepad"` keeps the controllers one ordinary gamepad read through PAD as a GameCube controller:
 A/B → South/East, X/Y → West/North, index triggers → trigger axes, grips → shoulders, thumbsticks
 → sticks (clicks → stick buttons), left menu → Start. Every binding in the F10 controller menu
 applies. Left Y is GameCube Y here, so clicking both thumbsticks together opens the settings panel
 instead. The right thumbstick click on its own still toggles the first-person camera.
+
+`"none"` makes the controllers nothing to the game, for playing with another controller (a desktop
+gamepad, a USB wheel or a Bluetooth Wii Remote). The virtual gamepad is unplugged, so it takes no
+port and the other controllers keep theirs; the game sees a switch to or from `"none"` as that
+controller disconnecting or connecting. The plugging follows the mode on the game thread, where the
+gamepad is already written, so the pacing thread never waits on SDL's joystick lock for it. The
+controllers still open the settings panel with left Y, point at it and toggle the first-person camera
+with a right thumbstick click; they press no game button, drive no Wii Remote, cannot take hold of
+the cockpit's wheel, and the game's rumble does not reach them.
 
 Bindings are suggested for `oculus/touch_controller` (Quest 2, 3 and Pro) and
 `khr/simple_controller`. `mkw_vr_wii_remote_tests` checks the accelerometer frame, the pointer
@@ -295,7 +339,7 @@ thumbsticks together** instead); the left controller's menu button and the panel
 also close it. It can be opened from the desktop as well, with
 **F10 → VR → Show these settings in the headset**.
 
-The panel has the F10 bar's menus as tabs (VR, Graphics, Controllers, Audio, Diagnostics) and a
+The panel has the F10 bar's menus as tabs (VR, Camera, Graphics, Controllers, Audio, Diagnostics) and a
 *Recenter view* button. Aim a controller at it: the cursor goes where you aim, a trigger (or A / X)
 selects and drags sliders, and a thumbstick scrolls. Whichever hand last pulled its trigger does the
 pointing. Changes apply exactly as they do from the F10 bar, and the two stay in step.
@@ -314,7 +358,11 @@ of you.
 
 How it is drawn: `settings_overlay.cpp` builds the panel with a second Dear ImGui context of its own,
 a 1440 × 1080 canvas at twice the desktop menu's scale with its own font atlas, fed by the pointer
-that `openxr_input.cpp` publishes through `vr/openxr_settings_panel.h`. Aurora renders that draw data
+that `openxr_input.cpp` publishes through `vr/openxr_settings_panel.h`. That context shares the
+desktop context's renderer backend data: ImGui's current context is one process-wide pointer, and
+Aurora's frame worker renders draw data while the game thread may have switched to the panel
+context, so the WebGPU backend has to find its device objects through either (without this, a
+worker render during the switch crashed on a null backend, seen while dragging the panel's sliders). Aurora renders that draw data
 into a panel texture once per sealed frame (`aurora-main/lib/stereo_overlay.cpp`). The ImGui backend
 keeps a single projection uniform, so the panel's pass is submitted on its own command buffer before
 the desktop's ImGui pass of the same frame is recorded.
@@ -447,10 +495,17 @@ bike's handlebar turns with your steering: the left stick's deflection at the fu
 (`wheel_kart_degrees` 90, `wheel_bike_degrees` 45), eased so a flicked stick does not snap it round,
 or the hands' own angle while they hold it. `native_steering_wheel = true` turns the vehicle's own
 model. Karts bake the wheel into the body, so at the race draw boundary the runtime decodes the
-body's MDL0 position arrays, turns only the disc around the authored hand grips on a copy, and hands
-the copy to the GX thread; Aurora substitutes it into the draws that bind that array with the
-player's own model-view matrix (`aurora_set_native_wheel_vertices`), checking each changed vertex's
-matrix slot, so an opponent sharing the asset and other joints of the same draw are untouched. The
+body's MDL0 position arrays and shape connectivity. Hand grips locate the wheel, but its complete
+rim determines the rotation centre, radius and tilt: grip height/spacing varies by character.
+Whole rim and spoke components turn together on a copy; a column or chassis component crossing
+the selection stays intact. The authored transform of the bone that draws the body's node 0 is
+included when locating and turning the wheel (the Baby Booster authors its body with rotated
+axes). That bone is found by its node id, not its place in the bone dictionary: the Flame Flyer and
+Cheep Charger list an `nw4r_root` bone first, and taking that one left both on the separate VR
+wheel. The copy goes to the GX thread; Aurora substitutes it into draws that bind that array with
+the player's model-view matrix including that bone's transform (`aurora_set_native_wheel_vertices`),
+checking each changed vertex's matrix slot, so an opponent sharing the asset and other joints of
+the same draw are untouched. The
 guest's own vertices are never written, and the copies are dropped after the frame's draws. Bikes
 turn their handle part in the game already; its copy is only re-seated on the cockpit frame so the
 bars stay with your hands while the bike banks. The wheel rides in the same frame as the view: the
@@ -458,6 +513,14 @@ level seat for `"yaw"`, the kart's own orientation for `"yaw_pitch"` and `"full"
 the copy (for 30 frames running; the race's opening pan does this) a separate VR wheel stands in,
 which is also what `native_steering_wheel = false` draws. The copy keeps being published, so the
 vehicle's own wheel returns as soon as draws take it again, and the log notes both switches.
+
+Validated on the extracted PAL disc's 216 single-player kart/character and Mii combinations
+(all 18 kart types): each resolves its node-0 bone as the runtime does and selects the complete
+21-position rim and 15-position spoke assembly, with the remaining positions unchanged and
+connected-piece distances preserved. Regression tests also cover raised/narrow grips, domed hubs,
+rotated roots, a node-0 bone listed behind another, child joints, chassis triangles crossing the
+wheel volume, degenerate strip connectors and malformed MDL0 data. This asset check does not by
+itself verify every combination's live draw matching or modded vehicle models.
 
 The substitution is decided per draw, and a draw that folds into a neighbour renders through that
 neighbour's array binding, so only draws that reached the same decision may merge. Deciding this
@@ -500,11 +563,85 @@ player 1's GameCube controller. The cockpit's wheel follows its calibrated steer
 full-lock angle as the stick (`wheel_kart_degrees`, `wheel_bike_degrees`), and hand steering steps
 aside while it drives.
 
+**Tracked hands.** `hand_tracking` (Quest only for now, default off; the Quest launcher's
+Settings > VR and the headset panel's Camera tab, under hand steering, which it needs) poses the
+cockpit hands from the headset's hand tracking instead of curling them with the grip. Two hand
+trackers (`XR_EXT_hand_tracking`) are located every XR frame at the display time. While the
+controllers are held the Quest builds the joints from their touch sensors
+(`XR_EXT_hand_tracking_data_source`'s controller source: the trigger finger, the thumb on its rest or
+a button, the grip); once they are put down, from its cameras. The runtime's hand mesh is then
+skinned with the joints themselves, each joint's tracked pose times its inverse bind pose (the bind
+poses are in the mesh's space, as `xrLocateHandJointsEXT` reports poses), with no curl and no grip;
+a runtime with joints but no mesh (SteamVR, Virtual Desktop) gets a skeleton along the joints. A
+hand whose joints are not located, or not finite, falls back to the curl at its grip. The trackers
+exist only while the option and hand steering are both on, and serve the mesh too; the extensions
+(with `XR_FB_hand_tracking_aim`) are asked for when either is on at launch, otherwise turning the
+option on applies after a restart. The log says `OpenXR tracked hands ready (controller-driven
+hands: yes|no)` and, at each change, `OpenXR tracked hands: left camera, right controller`; the
+headset panel shows each hand's source under the checkbox.
+
+The Quest app declares `horizonos.permission.HAND_TRACKING` (and the older
+`com.oculus.permission.HAND_TRACKING`), normal permissions granted at install with no prompt, and
+`oculus.software.handtracking` as optional: without that flag Horizon OS keeps the app
+controllers-only. With it, putting the controllers down drives `khr/simple_controller` from the
+hands (an index pinch is select, the left palm-up pinch the menu), and every change of interaction
+profile is logged (`OpenXR interaction profiles: left ..., right ...`). A hand driving that profile
+instead of the Touch one (its squeeze action inactive, its select active) is a bare hand; with
+tracked hands off it presses nothing but the menu gesture, which pauses, is not drawn, and feeds
+no Wii Remote motion, so the permission changes nothing for players who leave the option off. On
+PC none of this applies: a PC runtime can drive real controllers through `khr/simple_controller`
+and synthesize joints for them, so a hand-edited `hand_tracking = true` only changes the drawing.
+
+Left to itself, Horizon OS switches all input between the controllers and the hands, and it
+switches back to the controllers as soon as one lying on a table moves, so a race started with the
+controllers connected tended to stay on them (a Quest 3 log went controllers, hands, controllers
+within seconds). An app cannot disconnect them. Instead, with tracked hands on, the input resumes
+simultaneous hands and controllers (`XR_META_simultaneous_hands_and_controllers`, Meta's
+"multimodal"), which overrides that switching: a controller that is not in a hand no longer owns
+it, so the cameras track that hand at once, while a held controller keeps working (its fingers
+from its touch sensors). The log says `OpenXR simultaneous hands and controllers on` (and `off`
+when the option goes off). Meta documents that it cannot run together with passthrough and wide
+motion mode both on, and not while body tracking is; this app uses neither of the last two.
+
+With tracked hands on, bare hands drive. A hand is bare while it has no controller in it (its
+squeeze action inactive) and either drives `khr/simple_controller` or has camera-tracked joints (a
+free hand under simultaneous tracking may get no profile our actions are bound in),
+latched through `wheel_tracking_grace` (Meta also drops the select
+action while a hand is lost) and cleared as soon as a controller's squeeze is back. Its palm joint
+stands in for the grip and a grasp for the squeeze: the middle, ring and little fingers' flexion,
+summed over each finger's three joints, read as 0 below 1.2 radians (a relaxed hand) and 1 from
+3.0 (a hand closed on a rim), so the wheel's own 55 % press and 15 % release apply, and closing a
+hand on the rim takes hold. The grasp never reaches the game's buttons (as a squeeze it would press
+the gamepad's shoulders). In the cockpit, while a bare hand holds the wheel it holds the gas (A,
+the gamepad's South) until both hands let go, and a pinch from a free bare hand, either one, uses
+an item (Z, the gamepad's L) if the hand has been off the wheel for 0.15 s and is still mostly open
+(a grasp under 0.5), so neither opening a hand off the rim nor closing one on it fires one;
+holding the pinch holds the button. The left palm-up pinch pauses (a
+pinch made in that gesture is not an item: `XR_FB_hand_tracking_aim` reports the system gesture).
+With no bare hand on the wheel, in the cockpit or anywhere else, a right pinch is A and the
+pointer follows the hand's aim ray, which is what the pause menu and the results need; in a race
+it also gives gas without steering. A left pinch then does nothing, so the headset panel cannot be
+opened with bare hands (an open one takes a right pinch, and the palm-up pinch closes it). The
+game's own pointer switch cannot tell driving from those menus: MKW keeps it on in a race (checked
+on a Quest 3, 2026-09-25). Manual drift has no gesture: choose Automatic drift. The headset panel
+reads out each hand's source, grasp, hold and pinch under the checkbox, for tuning.
+
+A bare hand feeds no Wii Remote motion: camera-tracked poses are too noisy to differentiate twice,
+and turning the wheel would trick and wheelie. Tricks come from a flick instead. Both hands on
+the wheel rising together (at least 1.2 m/s on average, 0.6 m/s each, within 0.6 m/s of each
+other) or a free bare hand rising at 1.5 m/s makes one; a turn, where one hand rises as the other
+drops, never does, nor does a lone hand on the wheel. A rise has to last three samples and cover
+5 cm within 150 ms, a pose jumping faster than 5 m/s (tracking coming back) resets it, and
+flicks are 0.5 s apart. A flick plays one shake on the remote's accelerometer: 150 ms, so the
+guest sees it on at least three of its frames, one cycle up to +2 g and down to the -3.6 g limit,
+as Dolphin's emulated shake does. Only the Wii Remote presentation has it (the gamepad has no
+shake); `debug.wiicompiled.inject <n>:flick` plays the same shake with or without hands.
+
 **Hands and the separate wheel.** Hands are drawn while hand steering is on: the runtime's own hand
-mesh where it offers one (`XR_EXT_hand_tracking` and `XR_FB_hand_tracking_mesh`, requested only when
-hand steering is on at launch), otherwise procedural gloves that curl with the squeeze. A Quest 3
-offers that mesh without the app declaring hand tracking, and the log says which is drawn
-(`[mkw-vr] cockpit hands:`). Both close their fingers towards the palm: the mesh's joints point
+mesh where it offers one (`XR_EXT_hand_tracking` and `XR_FB_hand_tracking_mesh`, requested when
+hand steering or tracked hands are on at launch), otherwise procedural gloves that curl with the
+squeeze. A Quest 3 offers that mesh even without the app declaring hand tracking, and the log says
+which is drawn (`[mkw-vr] cockpit hands:`). Both close their fingers towards the palm: the mesh's joints point
 -Z towards the fingertip and +Y out of the back of the hand, so flexion is negative about the
 joint's own X, on both hands. They and the
 separate VR wheel or handlebar travel with the stereo packet in metres in the seated frame, and each
@@ -523,8 +660,10 @@ The guest offsets involved (driver, movement, damage, grip frames, bike handle, 
 their world matrices) are PAL `RMCP01` constants listed with the leaf getter or constructor that
 proves each in `runtime/src/vr/mkw_vr_first_person.cpp`. `mkw_steering_wheel_tests`,
 `mkw_vr_cockpit_tests` and `mkw_vr_hand_steering_tests` cover the grab model, the seat and wheel
-geometry and the hand-off to the game; `gx_fifo_tests` covers the per-draw substitution and the
-overlay geometry, and `cockpit_gpu_smoke` its depth test on a real GPU.
+geometry and the hand-off to the game, and `mkw_vr_hand_tracking_tests` the tracked hands' rules
+(grasp, bare latch, pinch gate, bare-hand buttons, flick and its shake); `gx_fifo_tests` covers the
+per-draw substitution and the overlay geometry, joint skinning included, and `cockpit_gpu_smoke`
+its depth test on a real GPU.
 
 ## Presentation policy
 
@@ -624,11 +763,39 @@ is parked at mid-depth for clipping. This avoids the view-dependent perspective-
 that otherwise breaks equal-depth `LEQUAL` ordering and causes overlapping menu/HUD elements to
 z-fight.
 
-Two classes of draw are deliberately left on their recorded transforms: native framebuffer effects
-(bloom and the rest of the post-processing chain, recognised by sampling a freshly produced,
-reduced or blended-back EFB copy), which belong to the rendered image rather than to the game's 2D
-layer, and any draw whose matrix is not actually affine. Retained one-shot EFB bakes such as Mario
-Kart Wii's minimap are treated as game art and remain eligible for the screen. A reprojected 2D draw
+Two classes of draw are deliberately left on their recorded transforms: native framebuffer effects,
+which belong to the rendered image rather than to the game's 2D layer, and any draw whose matrix is
+not actually affine. A native framebuffer effect is recognised three ways: it samples a freshly
+produced EFB copy that is reduced or blended back (bloom and the rest of the post-processing chain);
+it samples a fresh copy inside a viewport that does not cover the frame (an offscreen bake such as
+the 440x440 corner in which Mario Kart Wii builds its object shadow map, copying each stage back
+out); or it samples no texture and blends with destination alpha. The last is how Mario Kart Wii
+draws its dynamic shadows:
+the shadow volumes are perspective draws that count their coverage into the EFB's alpha plane, and one
+full-screen orthographic quad then darkens the image by destination alpha. The eyes replay the
+volumes, so that alpha exists in each eye, and the quad has to cover the whole eye: on the virtual
+screen it shaded only the screen's rectangle, cutting every shadow off at its edge. Retained one-shot
+EFB bakes such as Mario Kart Wii's minimap are treated as game art and remain eligible for the
+screen.
+
+One native effect is replayed differently: a composite that samples a freshly produced,
+frame-sized depth copy. Mario Kart Wii draws a ghost kart by rendering it alone into the cleared
+EFB, copying the frame's colour and depth out, drawing the race, and blending the copies back
+with one orthographic quad whose depth comes from the depth copy. Left on its recorded transforms,
+that quad stamps the desktop's flat image of the ghost over each eye, following the head and cut
+off by the eye's own ground. An eye therefore skips the perspective draws of the pass that
+produced the depth copy where they were recorded and re-issues them in the composite's place,
+with this eye's transforms, a constant-alpha blend (`kCompositeSourceAlpha`, about the strength of
+the game's own composite) and a depth test against the world the eye has drawn by then: the ghost
+in stereo, translucent, where the game put it. The desktop image is unchanged. The link is made as
+the composite is recorded, so frames without a composite do no work for it, and a draw only
+costs one comparison. The constant-alpha pipeline variants exist only for pipelines seen among
+a composite's source draws: such a pipeline gets them from its next draw, and until then the
+eye leaves that draw out, so a ghost first drawn in a session is missing from the eyes for that
+one frame. The link is logged
+once (`Immersive replay: pass N ... is re-issued by each eye`).
+
+A reprojected 2D draw
 uses the full eye viewport and scissor because its recorded rectangle no longer describes where it
 ended up; its original viewport is folded into the projection instead.
 
@@ -654,8 +821,9 @@ eye's last draw Aurora covers the eye with one full-screen triangle (`aurora-mai
 that keeps the colour inside the window with alpha 1 and leaves transparent black outside it, with a
 one-pixel ramp at the edge. The triangle carries, at each corner, where that pixel's ray meets the
 window's plane in homogeneous window coordinates (`stereo_replay::window_mask`), which interpolate
-exactly across the image. With `single_pass_eyes` it is drawn in the eye's own last render pass, so it
-adds no pass and no tile load; otherwise it takes a pass of its own, as the cockpit overlay does. On
+exactly across the image. It is drawn in the eye's own last render pass, so it adds no pass and no
+tile load; an eye replayed one render pass per recorded pass (`debug.wiicompiled.eye_passes 0`)
+gives it a pass of its own, as the cockpit overlay has. On
 the Quest the backend submits the passthrough layer, then the projection layer with
 `XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT` (premultiplied alpha), then the settings panel.
 The flag travels with the packet, so the eyes Aurora masked and the layer that blends them always
@@ -733,7 +901,7 @@ pipeline flag. That is why the launch decides.
 A density map forces Adreno into binned rendering, where every extra render pass in an eye stores
 and reloads the whole eye. DolphinXR measured foveation as a net loss on Mario Kart Wii for exactly
 that reason (its bloom chain splits the frame about 20 times). An eye is therefore foveated only
-when it is drawn in a single render pass (`single_pass_eyes`); an eye that a partial clear still
+when it is drawn in a single render pass, as every eye is by default; an eye that a partial clear still
 splits is drawn at full rate. The session log reports what happened: "Fragment density maps:
 enabled" at startup, one "eye foveation" line per eye and level with the map's size, and the "Eye
 replay plan" lines. `debug.wiicompiled.foveation <0-3>` overrides the level for A/B timing, and
@@ -743,16 +911,18 @@ What it saves depends on how much of an eye's cost is shading pixels. The number
 Quest 3 at Luigi Circuit's Grand Prix start: GPU time of both eyes per frame, all settings
 interleaved within one session (`docs/quest-port.md` has the method).
 
-| `render_scale` (eye size) | One pass per recorded pass | `single_pass_eyes` | `low` | `medium` | `high` |
+| `render_scale` (eye size) | One pass per recorded pass | One pass per eye | `low` | `medium` | `high` |
 | --- | --- | --- | --- | --- | --- |
 | 0.8 (1344x1408) | 5.82 ms | 5.11 ms | 5.09 ms | 5.36 ms | 5.11 ms |
 | 1.3 (2184x2288) | 6.32 ms | 5.81 ms | 5.33 ms | 5.00 ms | 4.56 ms |
 
 At the Quest's default 0.8 an eye's time goes mostly to geometry and to storing its tiles at full
 resolution. The Wii's shading is cheap, so foveation saves nothing measurable there, although the
-density map verifiably applies (4x4 blocks at the view's edges on High). That is why it defaults to
-`off`. At higher render scales it takes 8 to 22% off the eyes, which is where it earns its keep,
-bought with a softer periphery. The Quest's GPU applies the density per screen tile, and inside a
+density map verifiably applies (4x4 blocks at the view's edges on High). At higher render scales it
+takes 8 to 22% off the eyes, which is where it earns its keep, bought with a softer periphery. The
+Quest defaults to `medium` all the same: it costs nothing measurable at 0.8, it is already on when
+the render scale is raised, and a session launched with a level can change it live, where one
+launched with `off` needs a restart. The Quest's GPU applies the density per screen tile, and inside a
 reduced-rate tile it also samples textures one level blurrier per halving. Most surfaces hide it,
 but fine animated detail does not: on Retro Rewind's swamp goo the tiles show as squares where the
 ripples give way to a smoother look. It is no fix for a heavy track: on Retro Rewind's SNES Ghost Valley

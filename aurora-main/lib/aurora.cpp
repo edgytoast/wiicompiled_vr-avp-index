@@ -793,6 +793,20 @@ std::optional<AuroraStereoFrame> request_stereo_frame(uint32_t logicalFrame, uin
   }
   // The cockpit overlay is optional: a bad one is dropped, never the frame.
   if (frame.cockpit.active) {
+    // A hand's tracked joints are optional too: non-finite ones only put that
+    // hand back on its grip.
+    for (auto& hand : frame.cockpit.hands) {
+      if (hand.jointsValid && !(finite(&hand.seatFromJoint[0][0], AURORA_VR_HAND_JOINT_COUNT * 12) &&
+                                finite(hand.jointRadii, AURORA_VR_HAND_JOINT_COUNT))) {
+        hand.jointsValid = false;
+        static bool jointRejectionLogged = false;
+        if (!jointRejectionLogged) {
+          jointRejectionLogged = true;
+          Log.warn("Stereo frame {} carries non-finite VR hand joints; drawing that hand at its grip",
+                   logicalFrame);
+        }
+      }
+    }
     const auto& cockpit = frame.cockpit;
     bool valid = finite(&cockpit.wheelAngle, 1) && finite(&cockpit.handlebarRadius, 1) &&
                  finite(&cockpit.unitsPerMeter, 1) && cockpit.unitsPerMeter > 0.f &&

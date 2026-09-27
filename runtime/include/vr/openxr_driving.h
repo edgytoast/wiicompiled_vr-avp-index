@@ -17,6 +17,7 @@
 // forward. It is the frame the first-person anchor places the vehicle in, so
 // hands, wheel geometry and eye transforms all meet there.
 
+#include "vr/openxr_hand_tracking.h"
 #include "vr/openxr_wii_remote.h"
 #include "vr/steering_wheel.h"
 
@@ -35,6 +36,17 @@ struct DrivingHand {
     float squeeze = 0.0f;
     // Row-major 3x4 from the controller's grip space into the seated frame.
     std::array<float, 12> seat_from_grip{1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
+    // Tracked hands ([vr] hand_tracking, openxr_hand_tracking.h). The joints
+    // themselves stay with OpenXRInput::HandJoints(), on the pacing thread;
+    // this says whether the cockpit draws the hand from them, and carries what
+    // the settings panel reads out: where they came from, whether the hand is
+    // bare (camera-tracked, no controller), how closed it is and whether it
+    // pinches.
+    bool joints_valid = false;
+    bool bare = false;
+    hand_tracking::Source source = hand_tracking::Source::None;
+    float grasp = 0.0f;
+    bool pinch = false;
 };
 
 struct DrivingSnapshot {

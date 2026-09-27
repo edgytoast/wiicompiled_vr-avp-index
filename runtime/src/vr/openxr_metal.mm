@@ -142,6 +142,11 @@ public:
             return Fail("the visionOS OpenXR provider refused to create a session: " + std::string(xr_visionos_last_error()));
         }
         owns_session_ = true;
+        for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+            const auto& view = runtime.ViewConfiguration()[eye];
+            eye_size_[eye] = {view.render_width, view.render_height};
+        }
+        requested_eye_size_ = eye_size_;
 
         if (!SelectSwapchainFormat() || !CreateSwapchains()) {
             DestroySwapchains();
@@ -184,6 +189,9 @@ public:
             return OpenXRBeginStatus::Error;
         }
         ApplyEnvironment(presentation);
+        if (!ResizeWritablePair()) {
+            return OpenXRBeginStatus::Error;
+        }
         const OpenXRFrameStatus status = runtime_->WaitFrame(frame.xr_frame);
         if (status != OpenXRFrameStatus::Ready) {
             if (status == OpenXRFrameStatus::Error) {
@@ -294,6 +302,7 @@ public:
             const auto status = KeepAliveCycle();
             if (status != OpenXRBeginStatus::Ready) return status;
         }
+        if (!ResizeWritablePair()) return OpenXRBeginStatus::Error;
         packet.xr_frame.serial = next_packet_serial_++;
         packet.xr_frame.predicted_display_time = last_display_time_ + 2 * last_display_period_;
         packet.xr_frame.predicted_display_period = last_display_period_;
@@ -759,12 +768,106 @@ private:
 
     bool CreateSwapchainPair(std::array<EyeSwapchain, kOpenXREyeCount>& pair) {
         for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
-            const auto& view = runtime_->ViewConfiguration()[eye];
-            if (!CreateSwapchain(pair[eye], view.render_width, view.render_height, eye == 0 ? "left eye" : "right eye")) {
+            if (!CreateSwapchain(pair[eye], eye_size_[eye].width, eye_size_[eye].height,
+                                 eye == 0 ? "left eye" : "right eye")) {
                 return false;
             }
         }
         return true;
+    }
+
+public:
+    // [vr] render_scale changed live: the next writable pair is rebuilt at the new size
+    // (ResizeWritablePair, from the pacing thread), as the D3D12 backend does.
+    void SetRenderScale(float scale) {
+        if (runtime_ == nullptr) {
+            return;
+        }
+        std::array<OpenXREyeSize, kOpenXREyeCount> requested{};
+        for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+            requested[eye] = OpenXRScaledEyeSize(runtime_->ViewConfiguration()[eye].properties, scale);
+        }
+        // Only a change: a refused size stays refused while it is still the one asked for.
+        if (requested != requested_eye_size_) {
+            requested_eye_size_ = requested;
+            eye_size_ = requested;
+        }
+    }
+
+private:
+    // Rebuilds the pair Aurora writes next at eye_size_ when it is another size. Only that pair,
+    // with none of its images acquired, never the one on display. The new swapchains are made
+    // before the old ones go, so a size the provider cannot allocate leaves the pair as it was.
+    bool ResizeWritablePair() {
+        ReapRetiredPairs(false);
+        std::array<OpenXREyeSize, kOpenXREyeCount> current{};
+        for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+            if (eye_swapchains_[eye].acquired) {
+                return true;
+            }
+            current[eye] = {eye_swapchains_[eye].width, eye_swapchains_[eye].height};
+        }
+        if (current == eye_size_) {
+            return true;
+        }
+        std::array<EyeSwapchain, kOpenXREyeCount> replacement{};
+        if (!CreateSwapchainPair(replacement)) {
+            DestroySwapchainPair(replacement);
+            std::ostringstream message;
+            message << "OpenXR Metal eyes stay " << current[0].width << 'x' << current[0].height
+                    << ": the provider could not make " << eye_size_[0].width << 'x' << eye_size_[0].height
+                    << " swapchains (" << last_error_ << ')';
+            Log(OpenXRLogLevel::Warning, message.str());
+            ClearError();
+            eye_size_ = current;
+            return true;
+        }
+        // The compositor may still be reading the old pair (kOpenXRRetiredSwapchainCycles).
+        retired_pairs_.push_back({std::move(eye_swapchains_), kOpenXRRetiredSwapchainCycles});
+        eye_swapchains_ = std::move(replacement);
+        std::ostringstream message;
+        message << "OpenXR Metal eyes resized: " << eye_size_[0].width << 'x' << eye_size_[0].height << " / "
+                << eye_size_[1].width << 'x' << eye_size_[1].height;
+        Log(OpenXRLogLevel::Info, message.str());
+        return true;
+    }
+
+    // Destroys the retired pairs whose time is up (every one of them at shutdown), once Aurora
+    // has dropped its imports of their IOSurfaces. A pair Aurora cannot let go of yet (a frame
+    // is pending) waits for a later cycle, or for xrDestroySession at shutdown.
+    void ReapRetiredPairs(bool all) {
+        for (auto it = retired_pairs_.begin(); it != retired_pairs_.end();) {
+            if (!all && it->cycles_left > 1) {
+                --it->cycles_left;
+                ++it;
+                continue;
+            }
+            std::vector<void*> surfaces;
+            for (const EyeSwapchain& swapchain : it->swapchains) {
+                for (const auto& image : swapchain.images) {
+                    surfaces.push_back(image.ioSurface);
+                }
+            }
+            if (aurora_metal_forget_stereo_targets(surfaces.data(), static_cast<uint32_t>(surfaces.size()))) {
+                DestroySwapchainPair(it->swapchains);
+                it = retired_pairs_.erase(it);
+            } else if (all) {
+                Log(OpenXRLogLevel::Warning,
+                    "Aurora could not drop a replaced Metal eye swapchain pair; leaving it to xrDestroySession");
+                it = retired_pairs_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    void DestroySwapchainPair(std::array<EyeSwapchain, kOpenXREyeCount>& pair) {
+        for (auto& swapchain : pair) {
+            if (swapchain.handle != XR_NULL_HANDLE && !swapchain.acquired) {
+                xrDestroySwapchain(swapchain.handle);
+            }
+            swapchain = {};
+        }
     }
 
     bool CreateSwapchain(EyeSwapchain& swapchain, uint32_t width, uint32_t height, const char* what) {
@@ -909,14 +1012,9 @@ private:
 
     void DestroySwapchains() {
         DestroyPanelSwapchains();
-        for (auto* pair : {&eye_swapchains_, &retained_swapchains_}) {
-            for (auto& swapchain : *pair) {
-                if (swapchain.handle != XR_NULL_HANDLE && !swapchain.acquired) {
-                    xrDestroySwapchain(swapchain.handle);
-                }
-                swapchain = {};
-            }
-        }
+        ReapRetiredPairs(true);
+        DestroySwapchainPair(eye_swapchains_);
+        DestroySwapchainPair(retained_swapchains_);
         have_retained_frame_ = false;
         retained_frame_ = {};
         swapchain_format_ = AURORA_MTL_PIXEL_FORMAT_INVALID;
@@ -1011,6 +1109,15 @@ private:
     bool panel_swapchains_ready_ = false;
     bool panel_layer_failed_ = false;
     bool retained_panel_valid_ = false;
+    // The eye size the next writable pair is made at, and the one last asked for.
+    std::array<OpenXREyeSize, kOpenXREyeCount> eye_size_{};
+    std::array<OpenXREyeSize, kOpenXREyeCount> requested_eye_size_{};
+    // Pairs replaced by a new size, destroyed once the compositor has moved on from them.
+    struct RetiredPair {
+        std::array<EyeSwapchain, kOpenXREyeCount> swapchains;
+        uint32_t cycles_left;
+    };
+    std::vector<RetiredPair> retired_pairs_;
     OpenXRBackendFrame retained_frame_{};
     uint64_t retained_session_serial_ = 0;
     uint64_t retained_space_serial_ = 0;
@@ -1052,6 +1159,7 @@ OpenXRMetalBackend::OpenXRMetalBackend(OpenXRLogCallback logger) : m_impl(std::m
 OpenXRMetalBackend::~OpenXRMetalBackend() = default;
 bool OpenXRMetalBackend::QueryGraphicsRequirements(OpenXRRuntime& runtime) { return m_impl->QueryGraphicsRequirements(runtime); }
 bool OpenXRMetalBackend::BindAurora(OpenXRRuntime& runtime) { return m_impl->BindAurora(runtime); }
+void OpenXRMetalBackend::SetRenderScale(float scale) { m_impl->SetRenderScale(scale); }
 OpenXRBeginStatus OpenXRMetalBackend::BeginFrame(const OpenXRPresentation& presentation, OpenXRBackendFrame& frame) {
     return m_impl->BeginFrame(presentation, frame);
 }

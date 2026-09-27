@@ -48,14 +48,6 @@ bool IsFinitePositive(float value) noexcept {
            (bits & 0x7f800000u) != 0x7f800000u;
 }
 
-uint32_t ScaledDimension(uint32_t recommended, uint32_t maximum, float scale) {
-    const double scaled = std::round(static_cast<double>(recommended) *
-                                     static_cast<double>(scale));
-    const double clamped = std::clamp(
-        scaled, 1.0, static_cast<double>(std::max(maximum, 1u)));
-    return static_cast<uint32_t>(clamped);
-}
-
 const char* ReferenceSpaceName(XrReferenceSpaceType type) {
     switch (type) {
     case XR_REFERENCE_SPACE_TYPE_VIEW:
@@ -309,12 +301,9 @@ bool OpenXRRuntime::EnumerateViewConfiguration() {
     for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
         OpenXRViewConfiguration& destination = m_view_configuration[eye];
         destination.properties = properties[eye];
-        destination.render_width = ScaledDimension(
-            properties[eye].recommendedImageRectWidth,
-            properties[eye].maxImageRectWidth, m_config.resolution_scale);
-        destination.render_height = ScaledDimension(
-            properties[eye].recommendedImageRectHeight,
-            properties[eye].maxImageRectHeight, m_config.resolution_scale);
+        const OpenXREyeSize size = OpenXRScaledEyeSize(properties[eye], m_config.resolution_scale);
+        destination.render_width = size.width;
+        destination.render_height = size.height;
     }
     return true;
 }
@@ -554,6 +543,16 @@ OpenXREventStatus OpenXRRuntime::PollEvents() {
                 m_reference_space_change.pose_in_previous_space =
                     space_event.poseInPreviousSpace;
                 m_pending_app_space_changes.push_back(m_reference_space_change);
+            }
+            break;
+        }
+        case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED: {
+            // A controller picked up or put down; the input logs the profiles
+            // the hands moved to.
+            const auto& profile_event =
+                *reinterpret_cast<const XrEventDataInteractionProfileChanged*>(&event);
+            if (profile_event.session == m_session) {
+                ++m_interaction_profile_serial;
             }
             break;
         }

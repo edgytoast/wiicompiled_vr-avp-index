@@ -11,6 +11,11 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- The Khronos loader brokers the system OpenXR runtime through this permission. -->
     <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />
+    <!-- Tracked hands ([vr] hand_tracking): a normal permission, granted at install without a
+         prompt. horizonos is the current name; Horizon OS logs the com.oculus one as deprecated,
+         which older builds still need. -->
+    <uses-permission android:name="horizonos.permission.HAND_TRACKING" />
+    <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
 
     <queries>
         <provider android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker" />
@@ -29,6 +34,11 @@
     <!-- XR_FB_passthrough around the menu screen: without this flag Horizon OS keeps the app
          passthrough-disabled and the passthrough layer composites nothing. No camera permission. -->
     <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="false" />
+    <!-- Hands or controllers: without this flag Horizon OS keeps the app controllers-only ("hands
+         are disabled by manifest flag") and gives it no tracked hands. With it, putting the
+         controllers down drives khr/simple_controller from the hands; with tracked hands off
+         they press nothing but the palm-up menu gesture (openxr_hand_tracking.h). -->
+    <uses-feature android:name="oculus.software.handtracking" android:required="false" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <uses-feature android:name="android.hardware.gamepad" android:required="false" />
 
@@ -40,12 +50,13 @@
         android:label="@string/app_name"
         android:theme="@style/Theme.WiiCompiled.Quest">
 
-        <meta-data android:name="com.oculus.supportedDevices" android:value="quest2|quest3|quest3s|questpro" />
+        <meta-data android:name="com.oculus.supportedDevices" android:value="${mkwQuestSupportedDevices}" />
         <meta-data android:name="com.oculus.vr.focusaware" android:value="true" />
         <!-- Let the runtime move CPU budget to the GPU; Aurora's replay is GPU-bound. -->
         <meta-data android:name="com.oculus.trade_cpu_for_gpu_amount" android:value="-1" />
 
-        <!-- The app opens on this 2D panel: Play starts QuestActivity, Settings edits Config.toml. -->
+        <!-- The setup panel: Play starts QuestActivity on modern Horizon OS; the
+             Quest 1 flavour exposes it as a separate Settings library entry. -->
         <activity
             android:name=".launcher.LauncherActivity"
             android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode|density"
@@ -58,10 +69,6 @@
                 android:defaultHeight="640dp"
                 android:minWidth="760dp"
                 android:minHeight="520dp" />
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
         </activity>
 
         <!-- Extracts the player's disc image and imports games built on a PC (launcher process). -->
@@ -87,11 +94,6 @@
             <property
                 android:name="android.window.PROPERTY_XR_ACTIVITY_START_MODE"
                 android:value="XR_ACTIVITY_START_MODE_FULL_SPACE_UNMANAGED" />
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="com.oculus.intent.category.VR" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
         </activity>
     </application>
 

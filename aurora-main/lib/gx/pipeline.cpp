@@ -66,7 +66,8 @@ void clear_shader_module_cache() {
 }
 
 void render(const DrawData& data, const wgpu::RenderPassEncoder& pass, DrawEncodeState& state,
-            bool requireReadyPipeline, const gfx::Range* uniformRangeOverride, gfx::PipelineRef pipelineOverride) {
+            bool requireReadyPipeline, const gfx::Range* uniformRangeOverride, gfx::PipelineRef pipelineOverride,
+            const wgpu::Color* blendConstantOverride) {
   const gfx::PipelineRef pipeline = pipelineOverride != 0 ? pipelineOverride : data.pipeline;
   if (!gfx::bind_pipeline(pipeline, pass, state.currentPipeline, requireReadyPipeline)) {
     return;
@@ -83,7 +84,9 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass, DrawEncod
     wgpuRenderPassEncoderSetBindGroup(pass.Get(), 2, data.bindGroups.resolvedTextureBindGroup, 0, nullptr);
     state.boundTextureBindGroup = data.bindGroups.resolvedTextureBindGroup;
   }
-  if (data.dstAlpha != UINT32_MAX) {
+  if (blendConstantOverride != nullptr) {
+    pass.SetBlendConstant(blendConstantOverride);
+  } else if (data.dstAlpha != UINT32_MAX) {
     const wgpu::Color color{0.f, 0.f, 0.f, data.dstAlpha / 255.f};
     pass.SetBlendConstant(&color);
   }

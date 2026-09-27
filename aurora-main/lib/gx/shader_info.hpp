@@ -18,6 +18,13 @@ struct UniformReplayLayout {
   // rest of the native post-processing chain. It belongs to the rendered image,
   // not to the game's 2D layer, so it must stay where the game aimed it.
   bool nativeEfbEffect = false;
+  // For a native effect that samples a freshly produced, frame-sized depth copy: that
+  // copy. Mario Kart Wii draws a ghost kart alone into the cleared EFB, copies the
+  // frame's colour and depth out, draws the race, then blends the copies back with one
+  // such quad. The pass that resolved the copy holds the ghost's own perspective draws,
+  // which an eye re-issues in this quad's place (gfx::link_composite_source) instead of
+  // stamping the desktop's flat image of the ghost over its own view.
+  const gfx::TextureRef* compositeDepthCopy = nullptr;
 };
 
 struct UniformRanges {

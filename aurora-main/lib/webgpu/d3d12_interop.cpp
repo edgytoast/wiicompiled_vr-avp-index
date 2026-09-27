@@ -319,6 +319,26 @@ public:
     return true;
   }
 
+  // The command references keep a destroyed swapchain's resources alive, but
+  // not necessarily the runtime's memory behind them, so a copy still writing
+  // one is waited for. Usually the last one finished frames ago.
+  bool ForgetTargets(void* const* resources, uint32_t count) noexcept {
+    std::lock_guard lock(m_mutex);
+    if (m_framePending) {
+      return false;
+    }
+    CollectCompletedCommandsLocked();
+    const auto writesOne = [&](const InFlightCommand& command) {
+      return std::any_of(command.destinations.begin(), command.destinations.end(), [&](const auto& destination) {
+        return destination && std::find(resources, resources + count, destination.Get()) != resources + count;
+      });
+    };
+    if (std::none_of(m_commands.begin(), m_commands.end(), writesOne)) {
+      return true;
+    }
+    return WaitForGpuLocked();
+  }
+
 private:
   bool EnsureIntermediate(uint32_t eye, const stereo::EyeImage& source) noexcept {
     auto& intermediate = m_intermediates[eye];
@@ -756,6 +776,14 @@ bool aurora_d3d12_cancel_stereo_targets(uint64_t frameToken) {
   return g_bridge && g_bridge->CancelBeforeEncode(frameToken);
 }
 
+bool aurora_d3d12_forget_stereo_targets(void* const* resources, uint32_t count) {
+  using namespace aurora::d3d12_interop;
+  if (!g_bridge) {
+    return true;
+  }
+  return resources != nullptr && g_bridge->ForgetTargets(resources, count);
+}
+
 bool aurora_d3d12_disable_stereo_bridge() {
   using namespace aurora::d3d12_interop;
   if (!g_bridge) {
@@ -797,6 +825,8 @@ bool aurora_d3d12_set_stereo_targets_with_panel(uint64_t, const AuroraD3D12Stere
 }
 
 bool aurora_d3d12_cancel_stereo_targets(uint64_t) { return false; }
+
+bool aurora_d3d12_forget_stereo_targets(void* const*, uint32_t) { return true; }
 
 bool aurora_d3d12_disable_stereo_bridge() { return true; }
 

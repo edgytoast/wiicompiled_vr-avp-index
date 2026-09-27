@@ -65,6 +65,16 @@ struct OpenXRPanelLayer {
 inline constexpr uint32_t kOpenXRPanelLayerWidth = static_cast<uint32_t>(kSettingsPanelWidthPixels);
 inline constexpr uint32_t kOpenXRPanelLayerHeight = static_cast<uint32_t>(kSettingsPanelHeightPixels);
 
+// How many more pacing cycles an eye swapchain pair replaced by a new render
+// resolution lives on before it is destroyed. The pair was last shown by the
+// xrEndFrame of the cycle before its replacement, and the compositor keeps
+// reading that layer's images until a later one lands and its own GPU work on
+// them is done; the spec allows a runtime to use the images after
+// xrDestroySwapchain, but destroying a pair the compositor was still consuming
+// lost the Vulkan device on a PC runtime. Each cycle ends a compositor frame,
+// so this many later frames have replaced the pair's picture by then.
+inline constexpr uint32_t kOpenXRRetiredSwapchainCycles = 8;
+
 // The panel's layer, submitted after (so over) the scene's.
 inline XrCompositionLayerQuad OpenXRPanelQuadLayer(const OpenXRPanelLayer& panel, XrSpace space,
                                                    XrSwapchain swapchain) noexcept {

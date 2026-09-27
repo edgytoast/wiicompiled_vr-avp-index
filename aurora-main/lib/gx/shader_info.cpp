@@ -743,6 +743,7 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
   // eligible for the virtual screen even when small and alpha blended.
   bool samplesRecentEfbCopy = false;
   bool samplesReducedEfbCopy = false;
+  const gfx::TextureRef* compositeDepthCopy = nullptr;
   const u32 currentFrame = gfx::current_frame();
   for (int i = 0; i < info.sampledTextures.size(); ++i) {
     if (!info.sampledTextures.test(i)) {
@@ -752,13 +753,37 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
     // CHECK(tex, "unbound texture {}", i);
     if (tex.ref && tex.ref->is_recent_efb_copy(currentFrame)) {
       samplesRecentEfbCopy = true;
-      samplesReducedEfbCopy =
-          samplesReducedEfbCopy || tex.texObj.width() * 2 <= kEfbWidth || tex.texObj.height() * 2 <= kEfbHeight;
+      const bool reduced = tex.texObj.width() * 2 <= kEfbWidth || tex.texObj.height() * 2 <= kEfbHeight;
+      samplesReducedEfbCopy = samplesReducedEfbCopy || reduced;
+      if (!perspective && !reduced && is_depth_format(tex.texObj.format())) {
+        compositeDepthCopy = tex.ref.get();
+      }
     }
     buf.append(texture_size_bias(tex));
   }
   const bool blends = g_gxState.blendMode == GX_BM_BLEND || g_gxState.blendMode == GX_BM_SUBTRACT;
+  // A texture-less draw whose blend factor reads destination alpha composes a colour with
+  // alpha the frame's own draws left in the EFB: Mario Kart Wii's shadow volumes count their
+  // coverage into the alpha plane with perspective draws, then one full-screen orthographic quad
+  // darkens the image by destination alpha. That quad's output exists only in relation to the
+  // framebuffer pixel under it, so it belongs to the rendered image, not the 2D layer: folded onto
+  // the virtual screen it shades the screen's rectangle and nothing beyond it. Textured 2D
+  // elements that blend with destination alpha (menu layouts) are left to the screen.
+  const bool readsDstAlpha =
+      info.sampledTextures.none() && g_gxState.blendMode == GX_BM_BLEND &&
+      (g_gxState.blendFacSrc == GX_BL_DSTALPHA || g_gxState.blendFacSrc == GX_BL_INVDSTALPHA ||
+       g_gxState.blendFacDst == GX_BL_DSTALPHA || g_gxState.blendFacDst == GX_BL_INVDSTALPHA);
+  // An orthographic pass over a fresh copy inside a viewport that does not cover the frame is an
+  // offscreen bake (MKW builds its object shadow map in a 440x440 corner of the EFB and copies
+  // each stage back out), whatever it blends with; the displayed frame never shows it.
+  const auto [fbWidth, fbHeight] = logical_fb_size();
+  const auto& drawViewport = g_gxState.logicalViewport;
+  const bool offscreenViewport = fbWidth > 0 && fbHeight > 0 &&
+                                 (drawViewport.width < static_cast<float>(fbWidth) * 0.9f ||
+                                  drawViewport.height < static_cast<float>(fbHeight) * 0.9f);
 
+  const bool nativeEfbEffect =
+      !perspective && (readsDstAlpha || (samplesRecentEfbCopy && (samplesReducedEfbCopy || blends || offscreenViewport)));
   const UniformReplayLayout replayLayout{
       .projectionOffset = static_cast<uint32_t>(projectionOffset),
       .positionOffset = static_cast<uint32_t>(positionOffset),
@@ -768,7 +793,8 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
       .normalMatrixCount = layout.nrmCount,
       .perspective = perspective,
       .indexedMatrices = info.indexAttr.test(GX_VA_PNMTXIDX),
-      .nativeEfbEffect = !perspective && samplesRecentEfbCopy && (samplesReducedEfbCopy || blends),
+      .nativeEfbEffect = nativeEfbEffect,
+      .compositeDepthCopy = nativeEfbEffect ? compositeDepthCopy : nullptr,
   };
 
   if (!perspective || !frame_interpolation_active()) {

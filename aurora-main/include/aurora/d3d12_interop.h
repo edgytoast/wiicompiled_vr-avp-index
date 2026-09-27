@@ -85,6 +85,15 @@ bool aurora_d3d12_set_stereo_targets_with_panel(uint64_t frameToken,
 bool aurora_d3d12_cancel_stereo_targets(uint64_t frameToken);
 
 /**
+ * The host is about to destroy these target resources (the eye swapchains, when
+ * the render resolution changes): returns once no copy the bridge queued can
+ * still write them, waiting for the queue if it has to. Call with no frame
+ * token pending. False when the queue could not be fenced, in which case the
+ * resources must be kept.
+ */
+bool aurora_d3d12_forget_stereo_targets(void* const* resources, uint32_t count);
+
+/**
  * Removes the sink and drains bridge resources. The worker must be idle. Returns
  * false when queued work cannot be fenced; in that case the bridge is retained
  * for the process lifetime and the caller must likewise retain its graphics/XR

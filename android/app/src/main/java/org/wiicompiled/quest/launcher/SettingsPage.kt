@@ -189,6 +189,14 @@ class SettingsPage(
                 write = { c, value -> c.setBool("vr", "hand_steering", value) },
                 enabledIf = cockpit,
             )
+            // The hands follow the headset's hand tracking; kVrHandTrackingDefault is off. The
+            // hands are only drawn while they can steer, so it goes with hand steering.
+            toggle(
+                R.string.vr_hand_tracking, R.string.vr_hand_tracking_helper,
+                read = { it.bool("vr", "hand_tracking") ?: false },
+                write = { c, value -> c.setBool("vr", "hand_tracking", value) },
+                enabledIf = { c -> cockpit(c) && (c.bool("vr", "hand_steering") ?: true) },
+            )
             slider(
                 R.string.vr_lean_back, R.string.vr_lean_back_helper, -45.0, 45.0, 1.0,
                 read = { number(it, "vr", "lean_back_degrees", -45.0, 45.0, 0.0) },
@@ -220,7 +228,7 @@ class SettingsPage(
                     R.string.vr_foveation_off, R.string.vr_foveation_low,
                     R.string.vr_foveation_medium, R.string.vr_foveation_high,
                 ),
-                read = { stringIndex(it, "vr", "foveation", FOVEATION_LEVELS) },
+                read = { stringIndex(it, "vr", "foveation", FOVEATION_LEVELS, FOVEATION_DEFAULT) },
                 write = { c, index -> c.setString("vr", "foveation", FOVEATION_LEVELS[index]) },
             )
             choice(
@@ -294,7 +302,7 @@ class SettingsPage(
         section(R.string.section_controls) {
             choice(
                 R.string.controls_mode, R.string.controls_mode_helper,
-                listOf(R.string.controls_mode_wii_remote, R.string.controls_mode_gamepad),
+                listOf(R.string.controls_mode_wii_remote, R.string.controls_mode_gamepad, R.string.controls_mode_none),
                 read = { stringIndex(it, "vr", "controller_mode", CONTROLLER_MODES) },
                 write = { c, index -> c.setString("vr", "controller_mode", CONTROLLER_MODES[index]) },
             )
@@ -308,7 +316,7 @@ class SettingsPage(
             info(R.string.controls_map_a, activity.getString(R.string.controls_map_a_value))
             info(R.string.controls_map_b, activity.getString(R.string.controls_map_b_value))
             info(R.string.controls_map_12, activity.getString(R.string.controls_map_12_value))
-            info(R.string.controls_map_minus_plus, activity.getString(R.string.controls_map_minus_plus_value))
+            info(R.string.controls_map_plus, activity.getString(R.string.controls_map_plus_value))
             info(R.string.controls_map_stick, activity.getString(R.string.controls_map_stick_value))
             info(R.string.controls_map_z, activity.getString(R.string.controls_map_z_value))
             info(R.string.controls_map_c, activity.getString(R.string.controls_map_c_value))
@@ -749,9 +757,10 @@ class SettingsPage(
         val SEATS = listOf("cockpit", "custom")
         // The runtime's default ("boost") first: an absent key reads as index 0.
         val PERFORMANCE_LEVELS = listOf("boost", "sustained_high", "sustained_low", "power_savings", "default")
-        // runtime_config.h's kVrFoveationLevels, the default ("off") first.
+        // runtime_config.h's kVrFoveationLevels, and its Quest default.
         val FOVEATION_LEVELS = listOf("off", "low", "medium", "high")
-        val CONTROLLER_MODES = listOf("wii_remote", "gamepad")
+        val FOVEATION_DEFAULT = FOVEATION_LEVELS.indexOf("medium")
+        val CONTROLLER_MODES = listOf("wii_remote", "gamepad", "none")
         val INTERPOLATION_FPS = listOf(0L, 1L, 72L, 90L, 120L)
         val RESOLUTIONS = listOf(1.0, 1.5, 2.0, 3.0, 4.0)
         val SUPPORTED_RESOLUTIONS = listOf(0.0, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0)

@@ -3,7 +3,11 @@
 // build in the seated frame, without a GPU.
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <limits>
+#include <memory>
 
 #include "gfx/cockpit.hpp"
 
@@ -255,6 +259,147 @@ TEST_F(CockpitGeometry, RuntimeHandMeshIsSkinnedWithoutNans) {
   const auto vertices = geometry(cockpit);
   ASSERT_EQ(vertices.size(), 3u) << "the runtime mesh replaces the glove";
   EXPECT_TRUE(all_finite(vertices));
+}
+
+// A 26-joint mesh with its bind poses turned and spread out, and a tiny
+// triangle rigidly on each joint, like the runtime's hand mesh.
+std::shared_ptr<aurora::gfx::cockpit::HandMesh> jointed_mesh() {
+  using namespace aurora::gfx::cockpit;
+  auto mesh = std::make_shared<HandMesh>();
+  for (int j = 0; j < 26; ++j) {
+    const float angle = 0.2f * float(j);
+    const float pose[7]{0, std::sin(angle * 0.5f), 0, std::cos(angle * 0.5f), 0.01f * float(j % 5),
+                        -0.02f * float(j / 5), -0.015f * float(j)};
+    mesh->bind[j] = from_pose(pose);
+    mesh->inverseBind[j] = inverse(mesh->bind[j]);
+    mesh->parents[j] = j - 1;
+    for (V offset : {V{0, 0, 0}, V{0.002f, 0, 0}, V{0, 0, 0.002f}}) {
+      AuroraVRHandVertex vertex{};
+      const V p = point(mesh->bind[j].data(), offset);
+      std::memcpy(vertex.position, p.data(), sizeof(vertex.position));
+      vertex.joints[0] = int16_t(j);
+      vertex.joints[1] = vertex.joints[2] = vertex.joints[3] = -1;
+      vertex.weights[0] = 1;
+      mesh->indices.push_back(uint16_t(mesh->vertices.size()));
+      mesh->vertices.push_back(vertex);
+    }
+  }
+  return mesh;
+}
+
+// Tracked joints: each at `seatFromBind` times its bind pose, so the whole
+// hand is that rigid motion of the mesh.
+void set_tracked_joints(AuroraCockpitHand& hand, const aurora::gfx::cockpit::HandMesh& mesh,
+                        const aurora::gfx::cockpit::M& seatFromBind) {
+  using namespace aurora::gfx::cockpit;
+  hand.tracked = true;
+  hand.jointsValid = true;
+  for (int j = 0; j < 26; ++j) {
+    const M joint = compose(seatFromBind, mesh.bind[j]);
+    std::memcpy(hand.seatFromJoint[j], joint.data(), sizeof(hand.seatFromJoint[j]));
+    hand.jointRadii[j] = 0.008f;
+  }
+}
+
+aurora::gfx::cockpit::M rigid_motion() {
+  using namespace aurora::gfx::cockpit;
+  const float pose[7]{0.2f, -0.3f, 0.1f, 0.9273618f, 0.15f, -0.25f, -0.35f};
+  return from_pose(pose);
+}
+
+TEST_F(CockpitGeometry, TrackedJointsSkinTheRuntimeMeshRigidly) {
+  using namespace aurora::gfx::cockpit;
+  const auto mesh = jointed_mesh();
+  {
+    std::lock_guard lock(meshMutex);
+    meshes[1] = mesh;
+  }
+  AuroraCockpit cockpit{};
+  cockpit.nativeWheel = true;
+  const M motion = rigid_motion();
+  set_tracked_joints(cockpit.hands[1], *mesh, motion);
+  const auto vertices = geometry(cockpit);
+  ASSERT_EQ(vertices.size(), mesh->vertices.size());
+  for (size_t i = 0; i < vertices.size(); ++i) {
+    const auto& bindVertex = mesh->vertices[mesh->indices[i]].position;
+    const V expected = point(motion.data(), {bindVertex[0], bindVertex[1], bindVertex[2]});
+    for (int axis = 0; axis < 3; ++axis)
+      EXPECT_NEAR(vertices[i].position[axis], expected[axis], 1e-5f) << "vertex " << i << " axis " << axis;
+  }
+}
+
+TEST_F(CockpitGeometry, TrackedJointsIgnoreSqueezeHeldAndGrip) {
+  using namespace aurora::gfx::cockpit;
+  const auto mesh = jointed_mesh();
+  {
+    std::lock_guard lock(meshMutex);
+    meshes[0] = mesh;
+  }
+  AuroraCockpit cockpit{};
+  cockpit.nativeWheel = true;
+  set_tracked_joints(cockpit.hands[0], *mesh, rigid_motion());
+  set_identity(cockpit.hands[0].seatFromGrip, {0, 0, 0});
+  const auto reference = geometry(cockpit);
+  cockpit.hands[0].squeeze = 1.0f;
+  cockpit.hands[0].held = true;
+  set_identity(cockpit.hands[0].seatFromGrip, {0.5f, 0.5f, 0.5f});
+  const auto moved = geometry(cockpit);
+  ASSERT_EQ(moved.size(), reference.size());
+  for (size_t i = 0; i < moved.size(); ++i)
+    for (int axis = 0; axis < 3; ++axis)
+      EXPECT_EQ(moved[i].position[axis], reference[i].position[axis]);
+}
+
+float distance_to_segment(V p, V a, V b) {
+  using namespace aurora::gfx::cockpit;
+  const V ab = sub(b, a);
+  const float length = dot(ab, ab);
+  const float t = length > 0 ? std::clamp(dot(sub(p, a), ab) / length, 0.0f, 1.0f) : 0.0f;
+  const V d = sub(p, add(a, mul(ab, t)));
+  return std::sqrt(dot(d, d));
+}
+
+TEST_F(CockpitGeometry, TrackedJointsWithoutAMeshDrawASkeletonOnTheBones) {
+  using namespace aurora::gfx::cockpit;
+  const auto mesh = jointed_mesh(); // only for joint poses; no runtime mesh is set
+  AuroraCockpit cockpit{};
+  cockpit.nativeWheel = true;
+  set_tracked_joints(cockpit.hands[0], *mesh, rigid_motion());
+  const auto& hand = cockpit.hands[0];
+  const auto at = [&](int j) { return V{hand.seatFromJoint[j][3], hand.seatFromJoint[j][7], hand.seatFromJoint[j][11]}; };
+  const auto vertices = geometry(cockpit);
+  ASSERT_FALSE(vertices.empty());
+  ASSERT_TRUE(all_finite(vertices));
+  constexpr int metacarpal[5]{2, 6, 11, 16, 21}, tip[5]{5, 10, 15, 20, 25};
+  for (const auto& vertex : vertices) {
+    float nearest = 1e9f;
+    for (int finger = 0; finger < 5; ++finger) {
+      nearest = std::min(nearest, distance_to_segment(vertex.position, at(1), at(metacarpal[finger])));
+      for (int j = metacarpal[finger]; j < tip[finger]; ++j)
+        nearest = std::min(nearest, distance_to_segment(vertex.position, at(j), at(j + 1)));
+    }
+    const V fromPalm = sub(vertex.position, at(0));
+    nearest = std::min(nearest, std::sqrt(dot(fromPalm, fromPalm)));
+    EXPECT_LT(nearest, 0.031f) << "every skeleton vertex lies on a bone, a joint or the palm";
+  }
+}
+
+TEST_F(CockpitGeometry, NonFiniteJointsFallBackToTheGrip) {
+  using namespace aurora::gfx::cockpit;
+  const auto mesh = jointed_mesh();
+  AuroraCockpit cockpit{};
+  cockpit.nativeWheel = true;
+  set_tracked_joints(cockpit.hands[1], *mesh, rigid_motion());
+  set_identity(cockpit.hands[1].seatFromGrip, {0.2f, -0.3f, -0.4f});
+  cockpit.hands[1].seatFromJoint[7][5] = std::numeric_limits<float>::quiet_NaN();
+  const auto broken = geometry(cockpit);
+  cockpit.hands[1].jointsValid = false;
+  const auto grip = geometry(cockpit);
+  ASSERT_TRUE(all_finite(broken));
+  ASSERT_EQ(broken.size(), grip.size()) << "a non-finite joint draws the glove at the grip";
+  for (size_t i = 0; i < broken.size(); ++i)
+    for (int axis = 0; axis < 3; ++axis)
+      EXPECT_EQ(broken[i].position[axis], grip[i].position[axis]);
 }
 
 } // namespace

@@ -14,6 +14,11 @@ struct DrawData {
   // Eye depth/stencil format siblings. Shader modules are shared with mono.
   gfx::PipelineRef stereoPipeline = 0;
   gfx::PipelineRef stereoScreenPipeline = 0;
+  // Constant-alpha (kCompositeSourceBlend) siblings of pipeline and stereoPipeline, set only
+  // on the perspective draws of a pipeline an eye re-issues at a composite
+  // (note_composite_source_pipeline).
+  gfx::PipelineRef compositeSourcePipeline = 0;
+  gfx::PipelineRef stereoCompositeSourcePipeline = 0;
   gfx::Range vertRange;
   gfx::Range idxRange;
   gfx::Range uniformRange;
@@ -34,6 +39,11 @@ struct DrawData {
 
 constexpr uint32_t GXPipelineConfigVersion = 21;
 
+// PipelineConfig::stereoStencil: the eye's Depth24PlusStencil8 target, and the constant-alpha
+// blend an eye uses to re-issue a composite's source draws (see UniformReplayLayout).
+constexpr uint32_t kStereoStencilFormat = 1u;
+constexpr uint32_t kCompositeSourceBlend = 2u;
+
 constexpr GXFogType effective_pipeline_fog_type(GXFogType fogType, GXZTexOp zTextureOp, bool zCompLocBeforeTex,
                                                 GXBlendMode blendMode, GXLogicOp logicOp) noexcept {
   const bool usesLateZTexture = zTextureOp != GX_ZT_DISABLE && !zCompLocBeforeTex;
@@ -44,6 +54,8 @@ constexpr GXFogType effective_pipeline_fog_type(GXFogType fogType, GXZTexOp zTex
 struct PipelineConfig {
   uint32_t version = GXPipelineConfigVersion;
   uint32_t msaaSamples = 1;
+  // Bits of kStereoStencilFormat and kCompositeSourceBlend. One field, so the on-disk
+  // pipeline recipes recorded before the second bit existed stay valid.
   uint32_t stereoStencil = 0;
   ShaderConfig shaderConfig;
   GXCompare depthFunc;
@@ -65,7 +77,7 @@ inline bool valid_pipeline_config(const PipelineConfig& config) noexcept {
   };
   const bool validSamples =
       config.msaaSamples == 1 || config.msaaSamples == 2 || config.msaaSamples == 4 || config.msaaSamples == 8;
-  return config.version == GXPipelineConfigVersion && validSamples && config.stereoStencil <= 1 && in_range(config.depthFunc, GX_ALWAYS) &&
+  return config.version == GXPipelineConfigVersion && validSamples && config.stereoStencil <= (kStereoStencilFormat | kCompositeSourceBlend) && in_range(config.depthFunc, GX_ALWAYS) &&
          in_range(config.cullMode, GX_CULL_ALL) && in_range(config.blendMode, GX_BM_SUBTRACT) &&
          in_range(config.blendFacSrc, GX_BL_INVDSTALPHA) && in_range(config.blendFacDst, GX_BL_INVDSTALPHA) &&
          in_range(config.blendOp, GX_LO_SET) && in_range(config.pixelFmt, GX_PF_YUV420);
@@ -87,7 +99,12 @@ struct DrawEncodeState {
 
 void render(const DrawData& data, const wgpu::RenderPassEncoder& pass, DrawEncodeState& state,
             bool requireReadyPipeline, const gfx::Range* uniformRangeOverride = nullptr,
-            gfx::PipelineRef pipelineOverride = 0);
+            gfx::PipelineRef pipelineOverride = 0, const wgpu::Color* blendConstantOverride = nullptr);
+
+// Gives the draws of `pipeline` their constant-alpha siblings from its next draw on: an eye
+// re-issues them at a composite (gfx::link_composite_source). Called with the renderer lock
+// the draw paths hold, as the composite is recorded.
+void note_composite_source_pipeline(gfx::PipelineRef pipeline) noexcept;
 
 void queue_surface(const u8* dlStart, uint32_t dlSize, bool bigEndian) noexcept;
 } // namespace aurora::gx

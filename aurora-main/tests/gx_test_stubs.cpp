@@ -357,7 +357,8 @@ void push_draw_command<clear::DrawData>(clear::DrawData data) {
 }
 template <>
 PipelineRef pipeline_ref<gx::PipelineConfig>(const gx::PipelineConfig& config) {
-  return 0;
+  // Distinct configs get distinct refs, as the real cache's config hash does.
+  return xxh3_hash(config, static_cast<HashType>(ShaderType::GX));
 }
 template <>
 void push_draw_command<gx::DrawData>(gx::DrawData data) {

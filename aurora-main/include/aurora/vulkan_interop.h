@@ -133,6 +133,15 @@ bool aurora_vulkan_set_stereo_targets_with_panel(uint64_t frameToken,
 bool aurora_vulkan_cancel_stereo_targets(uint64_t frameToken);
 
 /**
+ * Releases Dawn's imports of buffers the caller is about to free (the eyes'
+ * ring, when the render resolution changes), which would otherwise keep every
+ * old buffer alive for the bridge's lifetime. Dawn's own reference to each
+ * buffer lasts until its queue is done with it, so the caller need not wait for
+ * Dawn. Call with no frame token pending; false if one is, releasing nothing.
+ */
+bool aurora_vulkan_forget_stereo_buffers(struct AHardwareBuffer* const* buffers, uint32_t count);
+
+/**
  * Removes the sink and releases the cached Dawn imports. The worker must be
  * idle. Returns false only when Dawn could not be drained, in which case the
  * bridge is retained for the process lifetime.

@@ -13,7 +13,9 @@ namespace mkw::vr {
 // AnimalCrossing-VR-MR-Standalone obtains its white hands from this Meta
 // runtime extension, not from a distributable model asset. Use the same API,
 // with a procedural fallback on PC runtimes that do not expose Meta meshes.
-inline bool LoadRuntimeHandMeshes(OpenXRRuntime& runtime) {
+// `existing` are the tracked hands' trackers (OpenXRInput::HandTracker), used
+// where there is one; otherwise a tracker is made just for the mesh.
+inline bool LoadRuntimeHandMeshes(OpenXRRuntime& runtime, const XrHandTrackerEXT* existing = nullptr) {
     for (uint32_t h = 0; h < 2; ++h)
         aurora_set_vr_hand_mesh(h, nullptr, 0, nullptr, 0, nullptr, nullptr, 0);
     const auto& extensions = runtime.EnabledExtensions();
@@ -28,12 +30,18 @@ inline bool LoadRuntimeHandMeshes(OpenXRRuntime& runtime) {
     if (!create || !destroy || !meshFn) return false;
     bool any = false;
     for (uint32_t h = 0; h < 2; ++h) {
-        XrHandTrackerCreateInfoEXT info{XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT};
-        info.hand = h ? XR_HAND_RIGHT_EXT : XR_HAND_LEFT_EXT;
-        info.handJointSet = XR_HAND_JOINT_SET_DEFAULT_EXT;
-        XrHandTrackerEXT tracker = XR_NULL_HANDLE;
-        if (XR_FAILED(create(runtime.Session(), &info, &tracker))) continue;
-        struct Guard { XrHandTrackerEXT tracker; PFN_xrDestroyHandTrackerEXT destroy; ~Guard() { destroy(tracker); } } guard{tracker, destroy};
+        XrHandTrackerEXT tracker = existing != nullptr ? existing[h] : XR_NULL_HANDLE;
+        const bool owned = tracker == XR_NULL_HANDLE;
+        if (owned) {
+            XrHandTrackerCreateInfoEXT info{XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT};
+            info.hand = h ? XR_HAND_RIGHT_EXT : XR_HAND_LEFT_EXT;
+            info.handJointSet = XR_HAND_JOINT_SET_DEFAULT_EXT;
+            if (XR_FAILED(create(runtime.Session(), &info, &tracker))) continue;
+        }
+        struct Guard {
+            XrHandTrackerEXT tracker; PFN_xrDestroyHandTrackerEXT destroy; bool owned;
+            ~Guard() { if (owned) destroy(tracker); }
+        } guard{tracker, destroy, owned};
         XrHandTrackingMeshFB mesh{XR_TYPE_HAND_TRACKING_MESH_FB};
         if (XR_FAILED(meshFn(tracker, &mesh)) || mesh.jointCountOutput != 26 ||
             !mesh.vertexCountOutput || mesh.vertexCountOutput > 65535 || !mesh.indexCountOutput ||

@@ -24,6 +24,9 @@ enum class OpenXRControllerMode : uint8_t {
     WiiRemote,
     // One ordinary gamepad, read through PAD as a GameCube controller.
     Gamepad,
+    // Nothing to the game: the virtual gamepad is unplugged, so the controllers
+    // hold no port. They still open the settings panel.
+    None,
 };
 
 struct OpenXRWiiRemoteSample {
@@ -40,7 +43,7 @@ struct OpenXRWiiRemoteSample {
     float distance_meters = 0.0f;
 };
 
-// Live switch between the two presentations; the settings bar and the launch
+// Live switch between the presentations; the settings bar and the launch
 // configuration both go through it.
 void OpenXRSetControllerMode(OpenXRControllerMode mode) noexcept;
 OpenXRControllerMode OpenXRGetControllerMode() noexcept;
@@ -343,8 +346,10 @@ struct HandInputs {
 // Adapted from DolphinXR's default "OpenXR Wii Remote" profile
 // (Data/Sys/Profiles/Wiimote):
 //   right A -> A, right trigger -> B, right B -> C, right stick up/down -> 1/2,
-//   left X -> -, left menu -> +,
+//   left X and left menu -> +,
 //   left trigger -> Z, left stick -> Nunchuk stick.
+// + is on left X as well because the PlayStation VR2's controllers give no
+// usable left menu, and - has no button because Mario Kart Wii never reads it.
 // HOME has no button; left Y opens the settings panel (openxr_settings_panel.h).
 // The grips press nothing: they take hold of the wheel (openxr_driving.h), and C
 // is the game's look-behind, which a hand on the wheel would otherwise hold down.
@@ -360,8 +365,7 @@ inline uint32_t RemoteButtons(const HandInputs& left, const HandInputs& right) n
     press(right.secondary, kButtonC);
     press(right.stick_y > kPressThreshold, kButtonOne);
     press(right.stick_y < -kPressThreshold, kButtonTwo);
-    press(left.primary, kButtonMinus);
-    press(left.menu, kButtonPlus);
+    press(left.primary || left.menu, kButtonPlus);
     press(left.trigger > kPressThreshold, kButtonZ);
     return hold;
 }

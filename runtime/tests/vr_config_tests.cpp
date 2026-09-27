@@ -23,17 +23,23 @@ int main() {
     Require(!Parse("[vr]\nfoveation = \"ultra\"\n").vrFoveation.has_value());
     Require(!Parse("[vr]\nfoveation = 2\n").vrFoveation.has_value());
     Require(!Parse("[vr]\n").vrFoveation.has_value());
+#if defined(__ANDROID__)
+    Require(std::string_view(RuntimeConfigFile::kVrFoveationDefault) == "medium");
+#else
     Require(std::string_view(RuntimeConfigFile::kVrFoveationDefault) == "off");
+#endif
     Require(RuntimeConfigFile::VrFoveationLevelIndex("off") == 0);
     Require(RuntimeConfigFile::VrFoveationLevelIndex("low") == 1);
     Require(RuntimeConfigFile::VrFoveationLevelIndex("medium") == 2);
     Require(RuntimeConfigFile::VrFoveationLevelIndex("high") == 3);
     Require(RuntimeConfigFile::VrFoveationLevelIndex("ultra") == 0);
 
-    // [vr] single_pass_eyes: each eye replayed in one render pass.
-    Require(Parse("[vr]\nsingle_pass_eyes = true\n").vrSinglePassEyes == true);
-    Require(Parse("[vr]\nsingle_pass_eyes = false\n").vrSinglePassEyes == false);
-    Require(!Parse("[vr]\n").vrSinglePassEyes.has_value());
+    // [vr] hand_tracking: the cockpit hands follow the headset's hand tracking.
+    Require(Parse("[vr]\nhand_tracking = true\n").vrHandTracking == true);
+    Require(Parse("[vr]\nhand_tracking = false\n").vrHandTracking == false);
+    Require(!Parse("[vr]\n").vrHandTracking.has_value());
+    Require(!Parse("[vr]\nhand_tracking = 1\n").vrHandTracking.has_value());
+    Require(!RuntimeConfigFile::kVrHandTrackingDefault);
 
     // [vr] immersive_window and flat_screen: one race view in two keys, Flat
     // Screen mode winning, so a file that predates the window reads as before.

@@ -144,7 +144,7 @@ Aurora (`lib/webgpu/fdm.cpp`, `lib/gfx/foveation.hpp`) builds one map per eye,
 32 pixels per texel (42x44 for 1344x1408 eyes). The map is centred on that eye's
 forward direction and rebuilt when the eye's size, field of view or level
 changes. It is bound to a second view of the eye texture that only a
-single-render-pass immersive eye renders through (`single_pass_eyes`). Density
+single-render-pass immersive eye renders through (every eye, by default). Density
 bytes are 255, 127 and 63: a fragment covers 1/density pixels rounded down to a
 supported size, so a half written as 128 could round back to one pixel.
 Changing the level is live. The launch decides whether the device has density
@@ -179,8 +179,49 @@ at 0.8, and 492 to 525 MHz at 1.3, the unfoveated windows running at the higher 
 
 So an eye's time on these tracks is mostly geometry and full-resolution tile stores, which a
 density map does not reduce (the stores stay full size for non-subsampled images). Foveation
-stays off by default; it pays only when `render_scale` makes the eyes pixel-bound, as at 1.3 on
-Luigi Circuit.
+pays only when `render_scale` makes the eyes pixel-bound, as at 1.3 on Luigi Circuit; it
+defaults to `medium` anyway, so it is already on when the render scale is raised and can be
+changed without a restart.
+
+### Quest 1 renderer compatibility
+
+Quest 1 identifies itself as Android device `monterey` and uses an Adreno 540
+driver that misrenders Aurora's general filtered EFB-copy shader. On that
+device, `GXCopyDisp` keeps the destination equal to the resolved EFB region so
+WebGPU can use `CopyTextureToTexture`; the later presentation pass still scales
+the result. Live RGB5A3 menu copies use a minimal RGBA passthrough shader for
+the same reason. Other Android devices retain the normal filtered and
+format-converting paths.
+
+Quest 1 must be built with the `quest1` flavour (`Build-Quest.ps1 -Headset
+quest1`). It targets the Snapdragon 835's Kryo CPU; the modern flavour targets
+`cortex-a77`, whose instructions can terminate the game with `SIGILL` on Quest
+1. Each variant's exported game kit records this CPU target, and the APK build,
+PC game build, on-headset build and package import all verify it. This prevents
+a kit left by another flavour from producing a library that can crash with
+`SIGILL`.
+
+The final Quest 1 firmware also cannot reliably promote this app's 2D setup
+panel into an immersive activity. Its APK therefore exposes two library
+entries: **WiiCompiled VR** starts the game directly in VR, while
+**WiiCompiled Settings** opens the setup/settings panel. After changing a
+setting, close the panel and start WiiCompiled VR from the library. The Play
+button in the settings panel explains this limitation instead of opening a
+black panel. Modern Quest builds keep the normal single launcher, whose Play
+button starts VR directly.
+
+The workaround was isolated on a physical Quest 1: it changed the boot/menu
+output from flickering black or white frames to a complete menu with character
+and vehicle previews. It does intentionally skip Wii-era RGB5A3 quantization on
+that device.
+
+Pipeline compilation is also scheduled differently on Quest 1. Its Adreno
+serializes much of `vkCreateGraphicsPipelines`, so a large equal-priority worker
+pool starved the translated game and OpenXR pacing threads without shortening
+the compile materially. Quest 1 uses two nice-level 5 workers and does not
+prewarm cached recipes in the background; a cached recipe is promoted and its
+workers are awakened when the game first requests it. Newer Android headsets
+and desktop retain the normal worker pool and prewarm behavior.
 
 ### Controllers
 
@@ -193,8 +234,27 @@ aimed at the virtual screen; see "Controllers" in `OPENXR.md` for the mapping
 and the geometry. With `controller_mode = "gamepad"` it stays an ordinary pad:
 A/B → South/East, X/Y → West/North, index triggers → trigger axes, grips →
 shoulders, thumbsticks → sticks (clicks → stick buttons), left menu → Start,
-and every existing binding, dead zone and overlay setting applies. Bindings are
+and every existing binding, dead zone and overlay setting applies. With
+`controller_mode = "none"` the virtual joystick is unplugged, leaving the ports
+to a Bluetooth gamepad; left Y still opens the settings panel. Bindings are
 suggested for `oculus/touch_controller` and `khr/simple_controller`.
+
+The manifest declares hand tracking (`horizonos.permission.HAND_TRACKING`, the
+deprecated `com.oculus.permission.HAND_TRACKING` for older builds, and
+`oculus.software.handtracking` as optional). Both permissions are `normal` on a
+Quest 3 (`adb shell pm list permissions -g -f`), so there is no prompt. Without
+the feature flag Horizon OS keeps the app controllers-only: the game process logs
+`setting hand mode control settings to ControllersOnly` / `sethandmanifest 0`,
+and putting the controllers down logs `going to controller mode because hands are
+disabled by manifest flag`; with it, `Is hands or controller` /
+`sethandmanifest 2`. Bare hands then drive `khr/simple_controller` (a pinch is
+select, the left palm-up pinch the menu), which the runtime ignores apart from
+the menu gesture unless `[vr] hand_tracking` is on; see "Tracked hands" in
+`OPENXR.md`. The Quest 3 runtime (`libvrapiimpl.so` in the `com.meta.xr` APEX's
+VrDriver.apk) implements `XR_EXT_hand_tracking_data_source`,
+`XR_FB_hand_tracking_aim`, `XR_EXT_hand_interaction`, microgestures and the
+wide-motion modes; Meta's manifest filter skips the wide-motion modes unless the
+app also declares `com.oculus.software.body_tracking`.
 
 ### Android platform glue
 
@@ -273,12 +333,13 @@ palette. **Home** has the Play button and reports a missing or incomplete `DATA`
 (the check is the runtime's own `IsDvdDataRoot`: `files/` and `sys/fst.bin`).
 **Settings** edits `Config.toml` in tabs: VR (race view: immersive, immersive window or flat
 screen, camera, rotation, driver hiding,
-seat, hand steering, lean back, render scale, VR interpolation, virtual screen
-size and distance),
+seat, hand steering, tracked hands, lean back, render scale, VR interpolation,
+virtual screen size and distance),
 Graphics (resolution, widescreen, bloom, shader stutter), Controls (controller
 mode, vibration, the Wii Remote mapping), Audio, and About (paths, OpenXR
-logging). The launch-time geometry (`render_scale`, `hud_distance_meters`,
-`hud_width_meters`) is only reachable here, not from the in-headset panel.
+logging). The launch-time geometry (`hud_distance_meters`, `hud_width_meters`)
+is only reachable here, not from the in-headset panel; `render_scale` is also the
+panel's live **VR → Render resolution** slider (OPENXR.md).
 
 **Patches**, between the two, is the PC launcher's mods page (`PatchesPage`,
 `ModLibrary`). Import takes one or more picked files, asks for a name and makes
@@ -619,9 +680,12 @@ creates that folder itself so it owns it, and imports the newest package the nex
 once per package. An import selects the game it just installed.
 
 Players get the same build from WheelWizard VR: Settings → WiiCompiled → Meta Quest → **Build**.
-WheelWizard asks which game, whether to include the game files, for Retro Rewind whether to
-include its pack, for the Quest app's APK and where to save the package, then runs the installed
-setup:
+WheelWizard asks which Quest (Quest 2, 3, 3S and Pro, or the original Quest, whose app it fetches
+from the installed release under its `Quest1` name), whether to include the game files, whether to
+build Retro Rewind with its pack (off builds the base game; the pack only travels with the mod, so
+one switch decides both) and where to save the package. The APK is downloaded from the GitHub
+release the installation came from, or chosen by hand for an unpublished build; it then runs the
+installed setup:
 
 ```
 WiiCompiled-Setup.exe --build-quest --install-dir <install> --quest-apk <app.apk> --output <file.wcgame>
@@ -754,11 +818,17 @@ Android facts this design rests on, all measured on a Quest 3:
   also learned `--target-os windows|macos|linux|android` for
   `generate-data-init` and `translate-mod`, for pipelines that generate on
   another host.
-- `android/`: the Gradle project, one app with no flavours.
+- `android/`: the Gradle project, with `modernQuest` (the default script
+  target) and `quest1` headset flavours. They share the application ID and
+  storage, but select the appropriate CPU baseline, supported-device manifest,
+  and launcher behavior.
   `app/src/main/cpp/CMakeLists.txt` adds the repository's `runtime/` as a
   subdirectory with those Android choices and builds both game kit probes
   (the Retro Rewind one only when the translation includes the mod), which
-  `exportDebugQuestGameKit` turns into the single kit the app carries.
+  each variant's `export<Variant>QuestGameKit` task (for example
+  `exportModernQuestDebugQuestGameKit`) turns into the single kit that
+  variant's APK carries, read from the CMake tree whose `MKW_ANDROID_CPU`
+  matches the flavour.
 - `android/nod-jni`: Gradle's `buildNodJni` task runs `cargo build --release
   --locked --target aarch64-linux-android` with the NDK's clang as linker and C
   compiler. `stageNodJni` puts `libnod_jni.so` into the APK's `arm64-v8a`
@@ -776,8 +846,10 @@ installer's `BuildWorkspace/generated`, produced by the normal Windows pipeline)
 ```powershell
 powershell -ExecutionPolicy Bypass -File android/Prepare-QuestDependencies.ps1        # SDL3 3.4.4 AAR into android/app/libs
 powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 -Install             # the app, its game kit and toolchain, debug-signed (the first run also builds Dawn from source)
+powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 -Headset quest1 -Install  # Quest 1: Kryo CPU and direct-VR library entry
 powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Install         # your game, against that kit, into Import (or WheelWizard VR's Build for Quest)
 powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Product retro_rewind -Mod <RetroRewind6> -Install  # the mod and its pack (needs translate-mod output with --retro-wfc-payload)
+powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Headset quest1 -Install  # game package from the Quest 1 kit
 adb push MarioKart.iso /sdcard/Download/                                               # then Select disc image in the launcher
 ```
 
@@ -901,10 +973,10 @@ the app:
 | `debug.wiicompiled.vtxpad 0` | Turns the stride padding off, to re-check a driver update |
 | `debug.wiicompiled.validation 1` | Keeps WebGPU validation and robustness on in release builds |
 | `debug.wiicompiled.panel_layer 0` | Draws the headset settings panel into the eye images instead of on its own quad layer (`OPENXR.md`, Settings in the headset); read about once a second, so it can be switched while the panel is open |
-| `debug.wiicompiled.eye_passes 0` | Replays each eye in one render pass per recorded pass, as before `single_pass_eyes` (`OPENXR.md`); `1` forces the single pass and an empty value restores the setting. Read about once a second, for A/B timing inside one session |
+| `debug.wiicompiled.eye_passes 0` | Replays each eye in one render pass per recorded pass, as before eyes were drawn in a single pass (`OPENXR.md`); `1` or an empty value restores the single pass. Read about once a second, for A/B timing inside one session |
 | `debug.wiicompiled.foveation <0-3>` | Overrides the foveation level (off, low, medium, high) within one session; an empty value restores the setting. Needs a session launched with foveation on. Read about once a second |
 | `debug.wiicompiled.fdm 0` | Launches without fragment density maps at all, whatever `foveation` says, which also drops their flag from every pipeline; `1` asks for them even with `foveation = "off"` |
-| `debug.wiicompiled.inject <n>:<button>` | Presses `a`, `b`, `x`, `y`, `start`, `up`, `down`, `left` or `right` for 12 XR frames each time `<n>` changes. As a Wii Remote, `x`/`y`/`start` are 1/2/+, the directions push the Nunchuk stick, and `home`, `c` and `z` also exist. `panel` presses the settings panel's button (left Y, or both thumbsticks as a gamepad), opening or closing it (see `OPENXR.md`) |
+| `debug.wiicompiled.inject <n>:<button>` | Presses `a`, `b`, `x`, `y`, `start`, `up`, `down`, `left` or `right` for 12 XR frames each time `<n>` changes. As a Wii Remote, `x`/`y`/`start` are 1/2/+, the directions push the Nunchuk stick, and `home`, `c` and `z` also exist. `panel` presses the settings panel's button (left Y, or both thumbsticks as a gamepad), opening or closing it (see `OPENXR.md`). `flick` plays the bare hands' flick, one 150 ms shake of the remote (a trick off a ramp, a wheelie on a bike), with the controllers or none |
 | `debug.wiicompiled.fpslog 1` | Logs the game's rendered frame rate every 5 s, with per-frame averages of the producer's waits for the frame worker's DONE and SEALED phases and of the worker's seal, permit wait, prepare and encode stretches, and of the draw calls the recorded frame holds and the primitives that merged into them (an overlay that stops draws merging shows up there first). A third line reports the GX thread's command ring (records, waits, busy share). A second line gives the GPU time per frame from timestamp queries on every pass (`mono` native render, `eyeL`/`eyeR` replays, `screen`, `panel`, `efbcopy`, `palette`, `peek`, plus `passes-span` from the first pass begin to the last pass end and `between-passes` for copies and idle gaps). The compositor's `VrApi` log line gives headset FPS, `GPU%`, `CPU%`, clock levels and app GPU time (`App=`) |
 
 A `Config.toml` written with `adb push` (or `sed -i` in `adb shell`) belongs
@@ -1096,7 +1168,8 @@ or `EndAccess` errors); a black mirror too points at Aurora itself.
   profiled on the XR2. The first run compiles every bundled pipeline recipe
   (about half a minute); later runs load Dawn's pipeline cache from `Cache/`
   next to `DATA`. `render_scale` defaults to 0.8 here (1.0 on
-  PC); lower it further if the compositor reports missed frames.
+  PC); lower it further if the compositor reports missed frames. It can be
+  changed during a race from the headset panel (VR → Render resolution).
   Foveated rendering (above) is off by default: at `render_scale` 0.8 it saves
   nothing measurable, above that 8 to 22% of the eyes' GPU time.
 - **Lifecycle.** Backgrounding (the Quest menu, guardian) pauses the session

@@ -92,6 +92,22 @@ public:
     if (!guard.owns_lock() || encoded || !token || token != wanted) return false;
     token = 0; return true;
   }
+  // Before the runtime destroys these images: the drain retires every copy into
+  // them, and their wraps go because a new swapchain may get the same handles.
+  bool Forget(void* const* images, uint32_t n) {
+    {
+      std::lock_guard guard(mutex);
+      if (token) return false;
+    }
+    if (!api.drain(webgpu::g_device.Get())) return false;
+    std::lock_guard guard(mutex);
+    std::erase_if(imports, [&](const Import& entry) {
+      return std::find(images, images + n, reinterpret_cast<void*>(static_cast<uintptr_t>(entry.image))) !=
+             images + n;
+    });
+    active = {};
+    return true;
+  }
   bool Encode(wgpu::CommandEncoder& encoder, const stereo::SinkFrame& frame) {
     std::lock_guard guard(mutex);
     if (!token || encoded || frame.frameToken != token) return false;
@@ -187,6 +203,11 @@ bool aurora_vulkan_win32_cancel(uint64_t token) {
   using namespace aurora::vulkan_win32;
   return bridge && bridge->Cancel(token);
 }
+bool aurora_vulkan_win32_forget_targets(void* const* images, uint32_t count) {
+  using namespace aurora::vulkan_win32;
+  if (!bridge) return true;
+  return images && bridge->Forget(images, count);
+}
 bool aurora_vulkan_win32_disable() {
   using namespace aurora::vulkan_win32;
   if (!bridge) return true;
@@ -214,6 +235,7 @@ bool aurora_vulkan_win32_set_targets(uint64_t, const AuroraD3D12StereoTarget*, u
 bool aurora_vulkan_win32_set_targets_with_panel(uint64_t, const AuroraD3D12StereoTarget*, uint32_t,
                                                 const AuroraD3D12StereoTarget*) { return false; }
 bool aurora_vulkan_win32_cancel(uint64_t) { return false; }
+bool aurora_vulkan_win32_forget_targets(void* const*, uint32_t) { return true; }
 bool aurora_vulkan_win32_disable() { return true; }
 void* aurora_vulkan_win32_lock_queue() { return nullptr; }
 void aurora_vulkan_win32_unlock_queue(void*) {}

@@ -6,6 +6,7 @@
 
 #include "vr/camera_toggle.h"
 #include "vr/openxr_driving.h"
+#include "vr/openxr_hand_tracking.h"
 #include "vr/openxr_runtime.h"
 #include "vr/openxr_settings_panel.h"
 #include "vr/openxr_wii_remote.h"
@@ -56,6 +57,11 @@ struct OpenXRPointerScreen {
 //   left / right thumbstick-> left / right stick axes, clicks -> stick buttons
 //   left menu              -> Start
 //
+// None: the virtual joystick is unplugged, so the controllers hold no port and
+// another controller (a desktop gamepad, a Bluetooth remote) plays in their
+// place. The game sees them idle, the way it does while the settings panel has
+// them; they still open the panel and toggle the first-person camera.
+//
 // Both are bound for the Oculus Touch profile; khr/simple_controller gets
 // select/menu and the poses so an unknown runtime still offers something.
 //
@@ -65,6 +71,15 @@ struct OpenXRPointerScreen {
 // the left stick's X axis in both presentations and that grip no longer reaches
 // the game (a shoulder on the gamepad; as a Wii Remote the grips are unbound,
 // so a hand on the wheel cannot hold down a button).
+//
+// Tracked hands ([vr] hand_tracking, with hand steering): two hand trackers
+// (XR_EXT_hand_tracking) located every frame give the cockpit the hands' own
+// joints, from the controllers' touch sensors while they are held and from the
+// cameras once they are put down. On the Quest a hand that drives
+// khr/simple_controller instead of the Touch profile has bare-hand buttons
+// (openxr_hand_tracking.h): with the option off it presses nothing but the menu
+// gesture, so the manifest's hand-tracking permission changes nothing for
+// players who leave it off.
 //
 // A right-thumbstick click on its own toggles the first-person camera, as its
 // F10 checkbox does (first_person_toggle_click).
@@ -80,7 +95,8 @@ struct OpenXRPointerScreen {
 // run on the XR pacing thread. The Wii Remote bridge is internally locked, so
 // the game thread may read it concurrently, and the virtual gamepad is only
 // published here: OpenXRApplyVirtualGamepad() performs the SDL writes on the
-// game thread, keeping SDL's joystick lock off this thread entirely.
+// game thread, and plugs the joystick in or out as the controller mode
+// changes, keeping SDL's joystick lock off this thread during a session.
 class OpenXRInput final {
 public:
     explicit OpenXRInput(OpenXRLogCallback logger = {});
@@ -105,6 +121,13 @@ public:
 
     // The cockpit state the last Sync published (also OpenXRReadDriving()).
     const DrivingSnapshot& Driving() const noexcept { return m_driving; }
+    // The tracked hands' joints in the seated frame, as the last Sync located
+    // them; read on the pacing thread only.
+    const hand_tracking::HandJointFrame& HandJoints() const noexcept { return m_joint_frame; }
+    // A hand's tracker while tracked hands keep one, else XR_NULL_HANDLE.
+    XrHandTrackerEXT HandTracker(uint32_t hand) const noexcept {
+        return hand < kHands ? m_hand_trackers[hand] : XR_NULL_HANDLE;
+    }
 
     // Publishes a remote with nothing held, at rest and not pointing, and stops
     // the haptics, for frames without focused input.
@@ -114,7 +137,6 @@ public:
     void ApplyHaptic(uint32_t hand, float amplitude, XrDuration duration);
 
     bool IsCreated() const noexcept { return m_created; }
-    bool HasVirtualGamepad() const noexcept { return m_joystick_id != 0; }
     const std::string& LastError() const noexcept { return m_last_error; }
 
 private:
@@ -126,8 +148,6 @@ private:
     void DestroyPoseSpaces();
     void LoadInputClock();
     XrTime InputSampleTime(XrTime predicted_display_time) const;
-    bool AttachVirtualGamepad();
-    void DetachVirtualGamepad();
     // `withheld` publishes a remote at rest with nothing held and no pointer,
     // while still tracking motion so releasing it does not read as a jolt.
     void PublishWiiRemote(XrTime input_time, const OpenXRPointerScreen& screen,
@@ -140,6 +160,15 @@ private:
     void UpdateDriving(XrTime display_time, const driving::SeatFrame& seat,
                        std::array<wii_remote::HandInputs, kHands>& hands, bool withheld);
     void ResetDriving();
+    // Tracked hands: the extension's functions at Create, the trackers as the
+    // settings ask for them, and both hands located for `time`, their joints
+    // in `seat` when it is valid.
+    void LoadHandTracking();
+    void UpdateSimultaneousHandsAndControllers(bool wanted);
+    void UpdateHandTrackers();
+    void DestroyHandTrackers();
+    void LocateHands(XrTime time, const driving::SeatFrame& seat);
+    void LogInteractionProfiles();
     void UpdateRumble();
     void StopRumble();
     bool Check(XrResult result, const char* operation);
@@ -171,8 +200,6 @@ private:
     bool m_panel_select_held = false;
     std::array<float, 2> m_horizon{1.0f, 0.0f};
     bool m_haptics_active[kHands]{};
-    uint32_t m_joystick_id = 0; // SDL_JoystickID; 0 when detached
-    void* m_joystick = nullptr; // SDL_Joystick*
     ClickToggle m_first_person_click;
     SteeringWheel m_wheel;
     WheelReferenceLatch m_wheel_reference;
@@ -182,14 +209,63 @@ private:
     bool m_wheel_uses_geometry = false;
     bool m_wheel_bike = false;
     DrivingSnapshot m_driving{};
+
+    // Tracked hands.
+    struct TrackedHand {
+        bool active = false; // joints located this frame
+        bool seated = false; // and written into m_joint_frame, in the seated frame
+        hand_tracking::Source source = hand_tracking::Source::None;
+        hand_tracking::JointPositions positions{}; // application space
+        // XR_FB_hand_tracking_aim: the runtime's own pinch and menu gesture.
+        bool aim_valid = false;
+        bool aim_pinching = false;
+        bool aim_menu = false;
+        bool aim_system_gesture = false;
+    };
+    PFN_xrCreateHandTrackerEXT m_create_hand_tracker = nullptr;
+    PFN_xrDestroyHandTrackerEXT m_destroy_hand_tracker = nullptr;
+    PFN_xrLocateHandJointsEXT m_locate_hand_joints = nullptr;
+    bool m_hand_data_source = false; // XR_EXT_hand_tracking_data_source
+    bool m_hand_aim = false;         // XR_FB_hand_tracking_aim
+    // XR_META_simultaneous_hands_and_controllers: resumed while tracked hands
+    // are on, so a controller put down gives its hand to the cameras at once.
+    PFN_xrResumeSimultaneousHandsAndControllersTrackingMETA m_resume_simultaneous = nullptr;
+    PFN_xrPauseSimultaneousHandsAndControllersTrackingMETA m_pause_simultaneous = nullptr;
+    bool m_simultaneous = false;
+    bool m_simultaneous_failed = false;
+    XrHandTrackerEXT m_hand_trackers[kHands]{};
+    bool m_hand_trackers_failed = false;
+    bool m_logged_hand_restart = false;
+    std::array<TrackedHand, kHands> m_tracked_hands{};
+    hand_tracking::HandJointFrame m_joint_frame{};
+    std::array<hand_tracking::Source, kHands> m_logged_sources{hand_tracking::Source::None,
+                                                               hand_tracking::Source::None};
+    XrTime m_sources_logged_at = 0;
+    // Per frame, from the actions: a controller is in the hand (its squeeze is
+    // bound), and the hand drives simple_controller (Android only).
+    std::array<bool, kHands> m_squeeze_active{};
+    std::array<bool, kHands> m_hand_driven{};
+    std::array<bool, kHands> m_pinch{};
+    // Bare-hand driving: each hand's bare latch (camera joints, last grasp) and
+    // item pinch gate.
+    std::array<hand_tracking::BareLatch, kHands> m_bare_latch{};
+    std::array<hand_tracking::PinchGate, kHands> m_pinch_gate{};
+    // A flick of the bare hands plays one shake on the remote's accelerometer
+    // from this input time (0 when none is playing).
+    hand_tracking::FlickDetector m_flick;
+    XrTime m_flick_start = 0;
+    bool m_injected_flick_held = false;
+    uint64_t m_profile_serial = 0;
+
     bool m_created = false;
     bool m_logged_sync_failure = false;
     bool m_logged_pointer = false;
     std::string m_last_error;
 };
 
-// Game thread: writes the gamepad the pacing thread last published, if any.
-// Does nothing when no OpenXR controllers are attached.
+// Game thread: plugs the virtual gamepad in or out as the controller mode asks,
+// then writes the gamepad the pacing thread last published, if any. Does
+// nothing when no OpenXR controllers are attached.
 void OpenXRApplyVirtualGamepad() noexcept;
 
 } // namespace mkw::vr

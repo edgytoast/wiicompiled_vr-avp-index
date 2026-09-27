@@ -12,6 +12,7 @@
 #include "../internal.hpp"
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
 #include <tracy/Tracy.hpp>
 
 #include <algorithm>
@@ -2210,6 +2211,11 @@ struct CachedPipelineState {
   mutable gfx::PipelineRef stereoRef = 0;
   mutable gfx::PipelineRef screenRef = 0;
   mutable gfx::PipelineRef stereoScreenRef = 0;
+  // Constant-alpha siblings, while ref is in s_compositeSourcePipelines. Checked again only when
+  // compositeSourceGeneration falls behind that set (resolve_composite_source_pipelines).
+  mutable gfx::PipelineRef compositeSourceRef = 0;
+  mutable gfx::PipelineRef stereoCompositeSourceRef = 0;
+  mutable u32 compositeSourceGeneration = 0;
   HashType configHash = 0;
   // Carried here so the draw can be recorded without keeping the PipelineConfig that produced it alive; it is the only
   // field of the config the draw itself still needs.
@@ -2278,13 +2284,49 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
   return state;
 }
 
+// The pipelines an eye re-issues at a composite (gfx::link_composite_source). Only the draw
+// paths touch it, under the renderer lock they hold.
+static absl::flat_hash_set<gfx::PipelineRef> s_compositeSourcePipelines;
+// Advanced whenever that set changes, so each cached pipeline state checks its membership once.
+static u32 s_compositeSourceGeneration = 1;
+constexpr size_t kMaxCompositeSourcePipelines = 1024;
+
+static void note_composite_source_pipeline_impl(gfx::PipelineRef pipeline) noexcept {
+  if (s_compositeSourcePipelines.size() >= kMaxCompositeSourcePipelines) {
+    s_compositeSourcePipelines.clear();
+  }
+  if (s_compositeSourcePipelines.insert(pipeline).second && ++s_compositeSourceGeneration == 0) {
+    s_compositeSourceGeneration = 1;
+  }
+}
+
+// A perspective draw pays one compare here. Its pipeline state builds the constant-alpha siblings
+// from its own config, which is live now, once it is in the set; the config never has to be kept.
+static void resolve_composite_source_pipelines(const CachedPipelineState& state) {
+  if (state.compositeSourceGeneration == s_compositeSourceGeneration)
+    LIKELY { return; }
+  state.compositeSourceGeneration = s_compositeSourceGeneration;
+  if (!s_compositeSourcePipelines.contains(state.ref)) {
+    state.compositeSourceRef = 0;
+    state.stereoCompositeSourceRef = 0;
+    return;
+  }
+  if (state.compositeSourceRef == 0) {
+    PipelineConfig config = *state.config;
+    config.stereoStencil = kCompositeSourceBlend;
+    state.compositeSourceRef = gfx::pipeline_ref(config);
+    config.stereoStencil = kCompositeSourceBlend | kStereoStencilFormat;
+    state.stereoCompositeSourceRef = gfx::pipeline_ref(config);
+  }
+}
+
 // Lazily cache eye-format siblings alongside the ordinary pipeline. Steady-state
 // draws only read the refs: no extra config population/hashing on the Quest CPU.
 // Shader modules are shared by the depth-format variants.
 static void resolve_replay_pipelines(const CachedPipelineState& state, bool screen) {
   if (state.stereoRef && (!screen || state.stereoScreenRef)) return;
   PipelineConfig config = *state.config;
-  config.stereoStencil = 1;
+  config.stereoStencil = kStereoStencilFormat;
   if (!state.stereoRef) state.stereoRef = gfx::pipeline_ref(config);
   if (screen && !state.stereoScreenRef) {
     config.shaderConfig.exactScreenDepth = 1;
@@ -2499,6 +2541,7 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
   const bool stereo = aurora::stereo_frame_provider_active();
   const bool screen = !replayLayout.perspective && !replayLayout.nativeEfbEffect;
   if (stereo) resolve_replay_pipelines(pipelineState, screen);
+  if (stereo && replayLayout.perspective) resolve_composite_source_pipelines(pipelineState);
   s_lastDrawRecordedInterpolation = interpolationIdentityActive;
 
   uint32_t instanceCount = 1;
@@ -2514,6 +2557,9 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
       .exactScreenDepthPipeline = stereo && screen ? pipelineState.screenRef : 0,
       .stereoPipeline = stereo ? pipelineState.stereoRef : 0,
       .stereoScreenPipeline = stereo && screen ? pipelineState.stereoScreenRef : 0,
+      .compositeSourcePipeline = stereo && replayLayout.perspective ? pipelineState.compositeSourceRef : 0,
+      .stereoCompositeSourcePipeline =
+          stereo && replayLayout.perspective ? pipelineState.stereoCompositeSourceRef : 0,
       .vertRange = vertRange,
       .idxRange = idxRange,
       .uniformRange = uniformRanges.current,
@@ -2697,3 +2743,7 @@ bool handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
 }
 
 } // namespace aurora::gx::fifo
+
+void aurora::gx::note_composite_source_pipeline(gfx::PipelineRef pipeline) noexcept {
+  fifo::note_composite_source_pipeline_impl(pipeline);
+}

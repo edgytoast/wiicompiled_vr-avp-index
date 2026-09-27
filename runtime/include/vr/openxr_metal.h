@@ -49,6 +49,11 @@ public:
     bool QueryGraphicsRequirements(OpenXRRuntime& runtime);
     bool BindAurora(OpenXRRuntime& runtime);
 
+    // As OpenXRD3D12Backend::SetRenderScale: the writable pair is rebuilt at the
+    // new size the next time Aurora writes it; Aurora drops its IOSurface imports
+    // of a replaced pair before it is destroyed.
+    void SetRenderScale(float scale);
+
     OpenXRBeginStatus BeginFrame(const OpenXRPresentation& presentation, OpenXRBackendFrame& frame);
     OpenXRSubmissionStatus WaitForSubmission(const OpenXRBackendFrame& frame, uint32_t timeout_ms = UINT32_MAX);
     bool TryCancelPendingFrame(OpenXRBackendFrame& frame);

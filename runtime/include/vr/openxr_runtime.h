@@ -4,7 +4,9 @@
 
 #include "vr/openxr_config.h"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -40,6 +42,28 @@ struct OpenXRViewConfiguration {
     uint32_t render_width = 0;
     uint32_t render_height = 0;
 };
+
+struct OpenXREyeSize {
+    uint32_t width = 0;
+    uint32_t height = 0;
+
+    bool operator==(const OpenXREyeSize& other) const noexcept {
+        return width == other.width && height == other.height;
+    }
+    bool operator!=(const OpenXREyeSize& other) const noexcept { return !(*this == other); }
+};
+
+// A view's image at `scale` of the size the runtime recommends, never below one
+// pixel or above the runtime's maximum. The size the session starts at, and the
+// one a backend rebuilds its eyes at when the render scale changes live.
+inline OpenXREyeSize OpenXRScaledEyeSize(const XrViewConfigurationView& view, float scale) noexcept {
+    const auto scaled = [scale](uint32_t recommended, uint32_t maximum) {
+        const double value = std::round(static_cast<double>(recommended) * static_cast<double>(scale));
+        return static_cast<uint32_t>(std::clamp(value, 1.0, static_cast<double>(std::max(maximum, 1u))));
+    };
+    return {scaled(view.recommendedImageRectWidth, view.maxImageRectWidth),
+            scaled(view.recommendedImageRectHeight, view.maxImageRectHeight)};
+}
 
 struct OpenXRRuntimeInfo {
     std::string runtime_name;
@@ -209,6 +233,9 @@ public:
     XrSpace ViewSpace() const { return m_view_space; }
     XrSessionState SessionState() const { return m_session_state; }
     uint64_t SessionRunSerial() const { return m_session_run_serial; }
+    // Advances each time the runtime reports that a hand's interaction profile
+    // changed (a controller picked up or put down).
+    uint64_t InteractionProfileSerial() const { return m_interaction_profile_serial; }
     XrReferenceSpaceType AppSpaceType() const { return m_app_space_type; }
     XrEnvironmentBlendMode EnvironmentBlendMode() const { return m_blend_mode; }
 
@@ -281,6 +308,7 @@ private:
 
     FramePhase m_frame_phase = FramePhase::Idle;
     uint64_t m_session_run_serial = 0;
+    uint64_t m_interaction_profile_serial = 0;
     uint64_t m_next_frame_serial = 1;
     uint64_t m_active_frame_serial = 0;
     XrTime m_active_frame_display_time = 0;

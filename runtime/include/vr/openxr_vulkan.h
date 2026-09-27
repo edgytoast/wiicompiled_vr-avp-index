@@ -51,6 +51,10 @@ public:
     bool QueryGraphicsRequirements(OpenXRRuntime& runtime);
     bool BindAurora(OpenXRRuntime& runtime);
 
+    // As OpenXRD3D12Backend::SetRenderScale. The shared eye buffers are
+    // reallocated along with the first pair rebuilt at the new size.
+    void SetRenderScale(float scale);
+
     OpenXRBeginStatus BeginFrame(const OpenXRPresentation& presentation, OpenXRBackendFrame& frame);
     OpenXRSubmissionStatus WaitForSubmission(const OpenXRBackendFrame& frame,
                                              uint32_t timeout_ms = UINT32_MAX);
