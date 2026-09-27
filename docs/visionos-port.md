@@ -138,12 +138,17 @@ to race; `[controls]` bindings apply as on the desktop. Haptics are no-ops.
 
 ### Platform glue
 
-- **Static library products.** The products are `libWiiCompiledGame.a` and
-  `libRetroRewindGame.a` (`runtime/cmake/PublicProducts.cmake`); the app links
-  one with `-force_load` so the registration shards' static initialisers
-  survive. `main()` becomes `mkw_runtime_main`, called on a 64 MiB game thread
-  by the bridge in `runtime/src/platform/visionos/visionos_host.mm`
-  (`runtime/include/platform/visionos/visionos_host.h`).
+- **The game is a framework loaded at Play.** The products are
+  `WiiCompiledGame.framework` and `RetroRewindGame.framework`
+  (`runtime/cmake/PublicProducts.cmake`), embedded and signed with the app. The
+  app does not link them: `visionos/App/GameLibrary.swift` loads the framework
+  with `dlopen` when the player presses Play and looks the C bridge up by name
+  (`runtime/include/platform/visionos/visionos_host.h`), as the Quest launcher
+  loads `libmain.so`. That order matters: dozens of the runtime's globals read
+  `Config.toml` in their static initialisers, which run when the framework
+  loads, so the launcher's Settings tab has to have written the file first.
+  `main()` becomes `mkw_runtime_main`, called on a 64 MiB game thread by the
+  bridge in `runtime/src/platform/visionos/visionos_host.mm`.
 - **SDL without a window.** Aurora selects SDL's `offscreen` video driver and
   renders through a detached `CAMetalLayer` (`aurora-main/lib/dawn/MetalBinding.mm`,
   `aurora-main/lib/window.cpp`): SDL never touches UIKit, so the game thread
@@ -171,11 +176,21 @@ to race; `[controls]` bindings apply as on the desktop. Haptics are no-ops.
 
 ### The app
 
-`visionos/App/` is a SwiftUI app: a launcher `WindowGroup` (disc status, the
-folder paths, the immersion switch, Play) and an `ImmersiveSpace` whose content
+`visionos/App/` is a SwiftUI app: a launcher `WindowGroup` with a Play tab
+(disc status, the folder paths, the immersion switch, Play) and a Settings tab,
+and an `ImmersiveSpace` whose content
 is a `CompositorLayer` (dedicated layout, `bgra8Unorm_srgb`, `depth32Float`,
 foveation off). The layer's `LayerRenderer` is passed to the provider and the
-game thread starts. A watchdog polls the bridge: when the runtime returns, the
+game thread starts; the launcher window then closes itself, and the game's
+audio is anchored to the listener rather than to that window so it plays on.
+
+The Settings tab mirrors the Quest launcher's Settings page
+(`android/.../launcher/SettingsPage.kt`) for what the Vision Pro supports:
+camera, headset (render scale, frame interpolation), virtual screen, rendering,
+controls, volume, files and diagnostics. It edits `Config.toml` with
+`visionos/App/TomlConfig.swift`, a port of the Quest's `TomlConfig.kt` that
+follows `RuntimeConfigFile::WriteSetting` line for line, so comments and keys it
+does not know survive. Every change is saved at once and applies at Play. A watchdog polls the bridge: when the runtime returns, the
 launcher says so; when the immersive space is dismissed (the layer is
 invalidated) the app asks the runtime to quit, since it would otherwise carry on
 rendering to an invisible mirror. **A second run needs a relaunch of the app**:

@@ -329,9 +329,8 @@ function(mkw_configure_product target)
         target_link_libraries(${target} PRIVATE
             "${MKW_IOKIT_FRAMEWORK}" "${MKW_COREFOUNDATION_FRAMEWORK}")
     elseif(MKW_PLATFORM_VISIONOS)
-        # The product is a static library on visionOS (below); these are the frameworks its
-        # objects need beyond what SDL3 and Dawn carry in their own link interfaces, recorded
-        # here so the app that links the product inherits them.
+        # The product is a framework on visionOS (below); these are the system frameworks its
+        # objects need beyond what SDL3 and Dawn carry in their own link interfaces.
         foreach(framework Metal IOSurface QuartzCore Foundation CoreFoundation
                           CompositorServices ARKit GameController AVFoundation AudioToolbox CoreAudio)
             target_link_libraries(${target} PUBLIC "-framework ${framework}")
@@ -398,7 +397,7 @@ function(mkw_configure_product target)
         message(FATAL_ERROR "Missing Wii first-run bootstrap payload: ${MKW_WII_BOOTSTRAP_SOURCE_DIR}")
     endif()
     if(MKW_PLATFORM_VISIONOS)
-        # A static library has no directory to sit next to; the app bundles these resources
+        # A framework has no executable directory of its own; the app bundles these resources
         # itself (visionos/CMakeLists.txt) where ExecutableDirectory() finds them.
         return()
     endif()
@@ -430,6 +429,21 @@ function(mkw_configure_product target)
         "$<TARGET_FILE_DIR:${target}>/initial_pipeline_cache.db")
 endfunction()
 
+# visionOS: a product as an embeddable framework (visionos/CMakeLists.txt embeds and signs it;
+# the app finds it at Frameworks/<name>.framework and loads it with dlopen).
+function(mkw_visionos_game_framework target name)
+    set_target_properties(${target} PROPERTIES
+        OUTPUT_NAME ${name}
+        FRAMEWORK TRUE
+        FRAMEWORK_VERSION A
+        MACOSX_FRAMEWORK_IDENTIFIER "org.wiicompiled.vision.${name}"
+        XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "org.wiicompiled.vision.${name}"
+        XCODE_ATTRIBUTE_INSTALL_PATH "@rpath"
+        XCODE_ATTRIBUTE_DEFINES_MODULE NO
+        XCODE_ATTRIBUTE_SKIP_INSTALL YES)
+    target_link_libraries(${target} PRIVATE c++)
+endfunction()
+
 # Android ships each product as the shared library SDLActivity loads; the base
 # game keeps SDL's conventional "main" name and Retro Rewind gets its own so a
 # dual-flavour app can bundle both without a name clash.
@@ -437,10 +451,12 @@ if(MKW_PLATFORM_ANDROID)
     add_library(WiiCompiled SHARED "${MKW_BASE_PRODUCT_SOURCE}" ${MKW_BASE_REGISTRATION_SOURCES})
     set_target_properties(WiiCompiled PROPERTIES OUTPUT_NAME main)
 elseif(MKW_PLATFORM_VISIONOS)
-    # visionOS ships each product as a static library the SwiftUI app links with -force_load,
-    # so no object of the runtime or the registration shards is dropped for want of a reference.
-    add_library(WiiCompiled STATIC "${MKW_BASE_PRODUCT_SOURCE}" ${MKW_BASE_REGISTRATION_SOURCES})
-    set_target_properties(WiiCompiled PROPERTIES OUTPUT_NAME WiiCompiledGame)
+    # visionOS ships each product as a framework the SwiftUI app embeds and loads with dlopen
+    # when the player presses Play, as the Quest's launcher loads libmain.so: the runtime's
+    # static initialisers read Config.toml, and they must run after the launcher's settings
+    # page has written it, not at app launch.
+    add_library(WiiCompiled SHARED "${MKW_BASE_PRODUCT_SOURCE}" ${MKW_BASE_REGISTRATION_SOURCES})
+    mkw_visionos_game_framework(WiiCompiled WiiCompiledGame)
 else()
     add_executable(WiiCompiled "${MKW_BASE_PRODUCT_SOURCE}" ${MKW_BASE_REGISTRATION_SOURCES})
 endif()
@@ -468,8 +484,8 @@ if(MKW_HAVE_RETRO_REWIND)
         add_library(RetroRewind SHARED "${MKW_RETRO_REWIND_PRODUCT_SOURCE}" ${MKW_RETRO_REGISTRATION_SOURCES})
         set_target_properties(RetroRewind PROPERTIES OUTPUT_NAME main_retro_rewind)
     elseif(MKW_PLATFORM_VISIONOS)
-        add_library(RetroRewind STATIC "${MKW_RETRO_REWIND_PRODUCT_SOURCE}" ${MKW_RETRO_REGISTRATION_SOURCES})
-        set_target_properties(RetroRewind PROPERTIES OUTPUT_NAME RetroRewindGame)
+        add_library(RetroRewind SHARED "${MKW_RETRO_REWIND_PRODUCT_SOURCE}" ${MKW_RETRO_REGISTRATION_SOURCES})
+        mkw_visionos_game_framework(RetroRewind RetroRewindGame)
     else()
         add_executable(RetroRewind "${MKW_RETRO_REWIND_PRODUCT_SOURCE}" ${MKW_RETRO_REGISTRATION_SOURCES})
     endif()

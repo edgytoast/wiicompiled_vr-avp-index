@@ -2,8 +2,8 @@
 #
 # One Xcode project (the only generator that signs, embeds Swift and produces a
 # visionOS bundle) holding the runtime tree (../runtime, which on visionOS
-# yields the products as static libraries) and this app, which links one
-# product with -force_load and drives it through
+# yields the products as frameworks) and this app, which embeds one product,
+# loads it with dlopen when the player presses Play and drives it through
 # runtime/include/platform/visionos/visionos_host.h.
 #
 #   cmake -S visionos -B build-visionos -G Xcode \
@@ -48,7 +48,7 @@ set(MKW_VISIONOS_APP_NAME "WiiCompiled Vision" CACHE STRING "Name shown on the H
 set(CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED NO)
 set(CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED NO)
 set(CMAKE_XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "")
-# Nothing in the app is loaded dynamically; skip the shared flavours the dependencies offer.
+# Only the game framework is loaded dynamically; skip the shared flavours the dependencies offer.
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(PNG_SHARED OFF CACHE BOOL "" FORCE)
 set(PNG_TOOLS OFF CACHE BOOL "" FORCE)
@@ -57,7 +57,7 @@ set(PNG_FRAMEWORK OFF CACHE BOOL "" FORCE)
 
 # The runtime tree. Its own CMakeLists detects visionOS from CMAKE_SYSTEM_NAME,
 # turns OpenXR on with the CompositorServices provider and makes the products
-# static libraries (runtime/cmake/PublicProducts.cmake).
+# frameworks (runtime/cmake/PublicProducts.cmake).
 set(MKW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../runtime" runtime)
 
@@ -81,11 +81,13 @@ set(MKW_VISIONOS_APP_SOURCES
     "${MKW_VISIONOS_APP_DIR}/WiiCompiledVisionApp.swift"
     "${MKW_VISIONOS_APP_DIR}/GameModel.swift"
     "${MKW_VISIONOS_APP_DIR}/LauncherView.swift"
-    "${MKW_VISIONOS_APP_DIR}/ImmersiveGameView.swift")
+    "${MKW_VISIONOS_APP_DIR}/ImmersiveGameView.swift"
+    "${MKW_VISIONOS_APP_DIR}/GameLibrary.swift"
+    "${MKW_VISIONOS_APP_DIR}/TomlConfig.swift"
+    "${MKW_VISIONOS_APP_DIR}/GameStorage.swift"
+    "${MKW_VISIONOS_APP_DIR}/SettingsView.swift")
 
-add_executable(WiiCompiledVision MACOSX_BUNDLE
-    ${MKW_VISIONOS_APP_SOURCES}
-    "${MKW_VISIONOS_APP_DIR}/BridgingHeader.h")
+add_executable(WiiCompiledVision MACOSX_BUNDLE ${MKW_VISIONOS_APP_SOURCES})
 set_target_properties(WiiCompiledVision PROPERTIES
     OUTPUT_NAME "WiiCompiledVision"
     MACOSX_BUNDLE_INFO_PLIST "${MKW_VISIONOS_APP_DIR}/Info.plist"
@@ -100,7 +102,6 @@ set_target_properties(WiiCompiledVision PROPERTIES
     XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS "xros xrsimulator"
     XCODE_ATTRIBUTE_XROS_DEPLOYMENT_TARGET "${CMAKE_OSX_DEPLOYMENT_TARGET}"
     XCODE_ATTRIBUTE_SWIFT_VERSION "5.0"
-    XCODE_ATTRIBUTE_SWIFT_OBJC_BRIDGING_HEADER "${MKW_VISIONOS_APP_DIR}/BridgingHeader.h"
     XCODE_ATTRIBUTE_CLANG_ENABLE_MODULES YES
     XCODE_ATTRIBUTE_CLANG_CXX_LIBRARY "libc++"
     XCODE_ATTRIBUTE_ENABLE_PREVIEWS NO
@@ -110,24 +111,25 @@ set_target_properties(WiiCompiledVision PROPERTIES
     XCODE_ATTRIBUTE_CODE_SIGN_STYLE Automatic
     XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "${MKW_VISIONOS_TEAM}"
     XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${MKW_VISIONOS_APP_DIR}/WiiCompiledVision.entitlements"
-    # The game's static initialisers and the OpenXR provider's exported xr*
-    # symbols come with -force_load below; dead stripping the rest is fine.
     XCODE_ATTRIBUTE_DEAD_CODE_STRIPPING YES
     XCODE_ATTRIBUTE_SWIFT_OPTIMIZATION_LEVEL "-O"
     XCODE_ATTRIBUTE_SWIFT_ACTIVE_COMPILATION_CONDITIONS "${MKW_VISIONOS_SWIFT_CONDITIONS}"
     XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS NO)
-target_include_directories(WiiCompiledVision PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../runtime/include")
-# The product archive carries the runtime's objects (mkw_runtime_common is consumed as objects) and
-# the registration shards, some of which register themselves from static initialisers no symbol
-# refers to; the whole archive is loaded. Its link interface brings SDL3, Dawn, Aurora, the
-# provider and the frameworks along.
-target_link_libraries(WiiCompiledVision PRIVATE ${MKW_VISIONOS_GAME_TARGET} "c++")
-target_link_options(WiiCompiledVision PRIVATE "LINKER:-force_load,$<TARGET_FILE:${MKW_VISIONOS_GAME_TARGET}>")
+# The game is not linked: it is a framework (runtime/cmake/PublicProducts.cmake) embedded in the
+# app and loaded with dlopen when the player presses Play (visionos/App/GameLibrary.swift), so
+# the runtime's static initialisers read the Config.toml the launcher's settings page wrote.
+# Embedding signs it with the app's identity.
+add_dependencies(WiiCompiledVision ${MKW_VISIONOS_GAME_TARGET})
+set_target_properties(WiiCompiledVision PROPERTIES
+    XCODE_EMBED_FRAMEWORKS ${MKW_VISIONOS_GAME_TARGET}
+    XCODE_EMBED_FRAMEWORKS_CODE_SIGN_ON_COPY ON
+    XCODE_EMBED_FRAMEWORKS_REMOVE_HEADERS_ON_COPY ON
+    XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS "@executable_path/Frameworks")
 
 # The runtime's read-only resources, where RuntimePlatform::ExecutableDirectory() looks for them
 # (the bundle root is the resource directory on the iOS family): the first-run NAND payload, the
 # DSP coefficient ROM and the transferable pipeline cache. The Ninja products copy the same files
-# next to the executable (mkw_configure_product), which a static library cannot.
+# next to the executable (mkw_configure_product), which a framework cannot.
 set(MKW_VISIONOS_RUNTIME_ASSETS "${CMAKE_CURRENT_SOURCE_DIR}/../runtime/assets")
 # They go through Xcode's own Copy Bundle Resources phase, which runs before the bundle
 # is sealed; a post-build copy lands after code signing and invalidates the signature.

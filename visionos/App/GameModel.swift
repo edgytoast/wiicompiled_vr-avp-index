@@ -5,8 +5,8 @@ import CompositorServices
 import Foundation
 import SwiftUI
 
-/// The game's state as the launcher sees it, over the C bridge
-/// (runtime/include/platform/visionos/visionos_host.h).
+/// The game's state as the launcher sees it: its files (GameStorage) and, once loaded at
+/// Play, the runtime's C bridge (GameLibrary, runtime/include/platform/visionos/visionos_host.h).
 @MainActor
 final class GameModel: ObservableObject {
     static let launcherWindowID = "launcher"
@@ -52,20 +52,36 @@ final class GameModel: ObservableObject {
         } catch {
             lastError = "Could not set up the game's audio: \(error.localizedDescription)"
         }
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let resources = Bundle.main.resourcePath ?? Bundle.main.bundlePath
-        mkw_visionos_set_directories(documents.path, resources)
-        if !mkw_visionos_prepare_game_directory() {
-            lastError = String(cString: mkw_visionos_last_error())
+        GameStorage.exportDirectories()
+        if let message = GameStorage.prepare() {
+            lastError = message
         }
-        gameDirectory = String(cString: mkw_visionos_game_directory())
-        configPath = String(cString: mkw_visionos_config_path())
-        discDirectory = String(cString: mkw_visionos_disc_directory())
+        gameDirectory = GameStorage.gameDirectory.path
+        configPath = GameStorage.configFile.path
+        discDirectory = GameStorage.discDirectory.path
         refreshDisc()
     }
 
     func refreshDisc() {
-        discPresent = mkw_visionos_disc_present()
+        discPresent = GameStorage.discStatus == .ready
+    }
+
+    /// Loads the game framework: its static initialisers read Config.toml now, with whatever
+    /// the Settings page wrote. Before the immersive space opens, so the layer's arrival can
+    /// start the game at once. False with the phase set to failed.
+    func loadGame() -> Bool {
+        if let message = GameStorage.prepare() {
+            phase = .failed(message: message)
+            return false
+        }
+        do {
+            let library = try GameLibrary.load()
+            library.setDirectories(data: GameStorage.documents.path, resources: GameStorage.resources.path)
+            return true
+        } catch {
+            phase = .failed(message: error.localizedDescription)
+            return false
+        }
     }
 
     var canStart: Bool {
@@ -86,7 +102,7 @@ final class GameModel: ObservableObject {
     nonisolated func attach(_ layerRenderer: LayerRenderer) {
         // An OS object: the pointer the provider bridges back to cp_layer_renderer_t and retains.
         let pointer = Unmanaged.passUnretained(layerRenderer).toOpaque()
-        mkw_visionos_set_layer_renderer(pointer)
+        GameLibrary.shared?.setLayerRenderer(pointer)
         // visionOS's look-and-pinch selection. Apps never see the gaze itself, but a
         // pinch carries the ray from the eyes to where the user was looking when it
         // began, which the provider turns into the game's pointer and its press.
@@ -117,22 +133,20 @@ final class GameModel: ObservableObject {
         }
         // Stable per pinch: the same event id arrives for every phase of one gesture.
         let id = UInt64(bitPattern: Int64(event.id.hashValue))
-        if let ray = event.selectionRay {
-            mkw_visionos_spatial_event(id, phase, chirality, true,
-                                       Float(ray.origin.x), Float(ray.origin.y), Float(ray.origin.z),
-                                       Float(ray.direction.x), Float(ray.direction.y), Float(ray.direction.z))
-        } else {
-            mkw_visionos_spatial_event(id, phase, chirality, false, 0, 0, 0, 0, 0, 0)
+        let ray = event.selectionRay.map {
+            (origin: SIMD3<Float>(Float($0.origin.x), Float($0.origin.y), Float($0.origin.z)),
+             direction: SIMD3<Float>(Float($0.direction.x), Float($0.direction.y), Float($0.direction.z)))
         }
+        GameLibrary.shared?.spatialEvent(id: id, phase: phase, chirality: chirality, ray: ray)
     }
 
     private func startGame() {
-        guard phase == .opening || phase == .idle else { return }
-        if mkw_visionos_start_game() {
+        guard phase == .opening || phase == .idle, let library = GameLibrary.shared else { return }
+        if library.startGame() {
             phase = .running
             startWatchdog()
         } else {
-            phase = .failed(message: String(cString: mkw_visionos_last_error()))
+            phase = .failed(message: library.lastError)
         }
     }
 
@@ -148,19 +162,20 @@ final class GameModel: ObservableObject {
     }
 
     private func poll() {
-        if !mkw_visionos_game_running() {
+        guard let library = GameLibrary.shared else { return }
+        if !library.gameRunning {
             watchdog?.invalidate()
             watchdog = nil
-            phase = .ended(exitCode: mkw_visionos_exit_code())
+            phase = .ended(exitCode: library.exitCode)
             return
         }
-        if mkw_visionos_layer_invalidated() {
-            mkw_visionos_request_quit()
+        if library.layerInvalidated {
+            library.requestQuit()
         }
     }
 
     func requestQuit() {
-        mkw_visionos_request_quit()
+        GameLibrary.shared?.requestQuit()
     }
 
     var wantsRoom: Bool {

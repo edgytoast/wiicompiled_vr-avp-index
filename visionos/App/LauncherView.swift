@@ -2,15 +2,30 @@
 
 import SwiftUI
 
-/// The window the app opens with: where the game files go, whether they are
-/// there, and the button that opens the immersive space.
+/// The window the app opens with: a Play tab (where the game files go, whether they
+/// are there, and the button that opens the immersive space) and a Settings tab.
 struct LauncherView: View {
+    var body: some View {
+        TabView {
+            PlayView()
+                .tabItem { Label("Play", systemImage: "play.fill") }
+            NavigationStack {
+                SettingsView()
+                    .navigationTitle("Settings")
+            }
+            .tabItem { Label("Settings", systemImage: "gearshape") }
+        }
+    }
+}
+
+private struct PlayView: View {
     @EnvironmentObject private var model: GameModel
     @Environment(\.openImmersiveSpace) private var openImmersiveSpace
     @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
     @Environment(\.dismissWindow) private var dismissWindow
 
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 20) {
             Text("\(model.gameTitle) for Apple Vision Pro")
                 .font(.largeTitle.bold())
@@ -20,7 +35,7 @@ struct LauncherView: View {
                     Label(model.discPresent ? "Extracted disc found" : "No extracted disc yet",
                           systemImage: model.discPresent ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                         .foregroundStyle(model.discPresent ? .green : .orange)
-                    Text("Copy the extracted Mario Kart Wii (PAL) disc, the folder holding sys/ and files/, into the DATA folder below with the Files app or through Finder file sharing. Settings live in Config.toml next to it.")
+                    Text("Copy the extracted Mario Kart Wii (PAL) disc, the folder holding sys/ and files/, into the DATA folder below with the Files app or through Finder file sharing. The Settings tab edits Config.toml next to it.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                     PathRow(title: "Disc (DATA)", path: model.discDirectory)
@@ -66,7 +81,8 @@ struct LauncherView: View {
             }
         }
         .padding(28)
-        .frame(minWidth: 640)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        }
         .onAppear {
             model.refreshDisc()
             // `simctl launch ... --autoplay` (or an Xcode scheme argument) presses Play for
@@ -99,6 +115,8 @@ struct LauncherView: View {
     }
 
     private func start() async {
+        // The game framework is loaded now, after the Settings tab had its say.
+        guard model.loadGame() else { return }
         model.markOpening()
         switch await openImmersiveSpace(id: GameModel.immersiveSpaceID) {
         case .opened:
