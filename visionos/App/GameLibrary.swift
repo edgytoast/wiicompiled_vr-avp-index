@@ -17,7 +17,7 @@ final class GameLibrary: @unchecked Sendable {
 
     private typealias SetDirectories = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?) -> Void
     private typealias SetPointer = @convention(c) (UnsafeMutableRawPointer?) -> Void
-    private typealias SpatialEvent = @convention(c) (UInt64, Int32, Int32, Bool, Float, Float, Float, Float, Float, Float) -> Void
+    private typealias SpatialEvent = @convention(c) (UInt64, Int32, Int32, Bool, Float, Float, Float, Float, Float, Float, Bool, Float, Float, Float) -> Void
     private typealias BoolFunction = @convention(c) () -> Bool
     private typealias IntFunction = @convention(c) () -> Int32
     private typealias VoidFunction = @convention(c) () -> Void
@@ -97,13 +97,13 @@ final class GameLibrary: @unchecked Sendable {
 
     func setLayerRenderer(_ renderer: UnsafeMutableRawPointer) { setLayerRendererFunction(renderer) }
 
-    func spatialEvent(id: UInt64, phase: Int32, chirality: Int32, ray: (origin: SIMD3<Float>, direction: SIMD3<Float>)?) {
-        if let ray {
-            spatialEventFunction(id, phase, chirality, true, ray.origin.x, ray.origin.y, ray.origin.z,
-                                 ray.direction.x, ray.direction.y, ray.direction.z)
-        } else {
-            spatialEventFunction(id, phase, chirality, false, 0, 0, 0, 0, 0, 0)
-        }
+    func spatialEvent(id: UInt64, phase: Int32, chirality: Int32, ray: (origin: SIMD3<Float>, direction: SIMD3<Float>)?,
+                      pose: SIMD3<Float>?) {
+        let origin = ray?.origin ?? .zero
+        let direction = ray?.direction ?? .zero
+        let position = pose ?? .zero
+        spatialEventFunction(id, phase, chirality, ray != nil, origin.x, origin.y, origin.z,
+                             direction.x, direction.y, direction.z, pose != nil, position.x, position.y, position.z)
     }
 
     var layerInvalidated: Bool { layerInvalidatedFunction() }

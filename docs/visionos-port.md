@@ -21,8 +21,8 @@ input tuning on hardware are the open work. See
 - **KartPad** showed that
   the translated game runs on the iOS family: Aurora on Dawn/Metal, SDL3, a
   static library inside an app bundle. Its lessons carried over: the guest's 4
-  GiB flat address space has to sit low (16 GiB) because the iOS family's
-  virtual address space is small; `/tmp` is not writable (use `TMPDIR`);
+  GiB flat address space has to be placed with care because the iOS family's
+  virtual address space is small (16 GiB there; 480 GiB here, below); `/tmp` is not writable (use `TMPDIR`);
   Dawn's `ios-arm64` prebuilt cannot be reused for another Apple platform, so
   Dawn is built from source for the SDK at hand (`scripts/build-dawn-ios-simulator.sh`
   there, `visionos/Build-VisionOSDawn.sh` here); the app exports its
@@ -106,8 +106,35 @@ opaque eyes and cover the room either way.
 ### Input
 
 The Vision Pro has no controllers. `xr_visionos_input.mm` derives the OpenXR
-action state from the ARKit hand skeletons, for the `oculus/touch_controller`
-and `khr/simple_controller` profiles the runtime suggests bindings for:
+action state from the ARKit hand skeletons, and the provider is a real
+`XR_EXT_hand_tracking` runtime (`xr_visionos_hand_tracking.mm`, with
+`XR_EXT_hand_tracking_data_source` and `XR_FB_hand_tracking_aim`), so the
+runtime's bare-hand driving (`OPENXR.md`, "Steering wheel and hand steering")
+runs here exactly as on a Quest with the controllers put down.
+
+**Drive with your hands** (`[vr] hand_tracking`, on by default here). While the
+runtime holds hand trackers the hands are bare hands and the provider answers
+the `khr/simple_controller` bindings:
+
+| Gesture | Effect |
+| --- | --- |
+| Close a hand on the wheel or handlebar | Holds it (grasp from the fingers' flexion) and holds the gas; turn to steer. |
+| Pinch (thumb to index) with an open free hand | Uses an item (Z). |
+| Flick both hands up on the wheel, or a free hand | A trick or wheelie (one shake of the remote, Wii Remote mode). |
+| Little-finger pinch | Pause (+). visionOS keeps its palm-up system gesture to itself. |
+| Index pinch, no hand on the wheel | A (select); the pointer is by gaze, below. |
+
+The joints come from `ar_hand_tracking_provider_query_anchors_at_timestamp` at
+the frame's predicted time, so every 90 Hz frame has a fresh sample (the latest
+anchors repeat between ARKit's ~30 Hz updates, which the flick detector would
+read as a hand standing still). ARKit has no palm joint; the provider
+synthesizes one between the wrist and the middle knuckle. No hand of ours is
+drawn: the app's `upperLimbVisibility(.visible)` composites the wearer's own
+hands over the immersive race, and `BuildCockpit` sends none. Manual drift has
+no gesture: choose Automatic drift. The headset panel's "Drive with your
+hands" checkbox reads out each hand's grasp, hold and pinch for tuning.
+
+**Off**, the hands play a Touch controller instead, as before:
 
 | Gesture | Action |
 | --- | --- |
@@ -115,26 +142,33 @@ and `khr/simple_controller` profiles the runtime suggests bindings for:
 | Middle-finger pinch | A (right) / X (left) |
 | Ring-finger pinch | B (right) / Y (left) |
 | Little-finger pinch | menu |
-| Fist (fingers curled) | squeeze / grip |
-| Grip pose | At the palm, from the hand skeleton (hand steering). |
-| Aim pose, left hand | From the wrist through the index knuckle. |
-| Aim pose, right hand (the Wii pointer) | Look and pinch, below. |
+| Fist (fingers curled) | squeeze / grip (a fist near the wheel takes hold of it) |
 
-**Pointing is by gaze.** Aiming a hand at a screen a few metres away proved
-far too coarse to land on a menu button. visionOS never exposes the gaze
-itself, but every pinch in an immersive space arrives as a spatial event
-(`LayerRenderer.onSpatialEvent`, forwarded through `mkw_visionos_spatial_event`)
-carrying the ray from the eyes to where the user was looking when the fingers
-met. The provider aims the pointer hand's aim pose along that ray, presses
-select 50 ms later (so the game sees the pointer arrive before the click) and
-holds it at least 100 ms; the pointer then stays parked on that spot until the
-next pinch. Either hand's pinch drives the one pointer. Before the first pinch
-there is no pointer.
+In both modes: the grip pose is at the palm, from the hand skeleton; the left
+aim pose runs from the wrist through the index knuckle; the right aim pose (the
+Wii pointer) is look and pinch, below.
 
-That is enough for the menus, the settings panel and hand steering (see
-`OPENXR.md`, "Steering wheel and hand steering"), not for racing at speed. A
-Bluetooth game controller (SDL3's GameController backend) is the intended way
-to race; `[controls]` bindings apply as on the desktop. Haptics are no-ops.
+**Pointing is by gaze, adjusted by hand, pressed on release.** Aiming a
+hand at a screen a few metres away proved far too coarse to land on a menu
+button, and a press at the instant of the pinch landed where the eyes happened
+to be. visionOS never exposes the gaze itself, but every pinch in an immersive
+space arrives as a spatial event (`LayerRenderer.onSpatialEvent`, forwarded
+through `mkw_visionos_spatial_event`) carrying the ray from the eyes to where
+the user was looking when the fingers met, and, for as long as the pinch is
+held, the pinching hand's pose. The provider aims the pointer hand's aim pose
+along that ray at once, then moves it with the hand (the hand's displacement,
+times a gain of 1.5, applied to the target at 2 m), so a wrong landing is
+corrected by a small motion; when the fingers part it presses select where the
+pointer is, for 120 ms, and the pointer stays parked there until the next
+pinch. Either hand's pinch works, each with its own state, and the skeleton's
+own index pinch never presses select, so nothing fires before the adjustment.
+A pinch the system cancels presses nothing. Before the first pinch there is no
+pointer.
+
+That is enough for the menus, the settings panel and, with "Drive with your
+hands", a race. A Bluetooth game controller (SDL3's GameController backend)
+still works and is the way to race with the option off; `[controls]` bindings
+apply as on the desktop. Haptics are no-ops.
 
 ### Platform glue
 
@@ -154,8 +188,13 @@ to race; `[controls]` bindings apply as on the desktop. Haptics are no-ops.
   `aurora-main/lib/window.cpp`): SDL never touches UIKit, so the game thread
   need not be the main thread. Aurora's frame worker stays enabled here
   (`aurora.cpp`), unlike macOS; the headset owns the display.
-- **Guest memory.** The flat guest space is reserved at 16 GiB
-  (`runtime/include/guest_flat_memory.h`); `vm_allocate` replaces
+- **Guest memory.** The flat guest space is reserved at 480 GiB
+  (`runtime/include/guest_flat_memory.h`). It sat at 16 GiB up to visionOS 26;
+  visionOS 27 maps read-only system regions over 6 to 63 GiB, reserves 64 to
+  448 GiB with no access, and starts the process's own allocations at 448 GiB,
+  leaving 448 to 512 GiB (the entitlement's ceiling) as the only room. When the
+  reservation fails, the fatal message carries the process's map and which
+  bases were free (`ReserveDiagnostics`). `vm_allocate` replaces
   `mach_vm_allocate`, whose header the SDK refuses; the alias backing files go
   to `TMPDIR` (`guest_flat_memory_macos.cpp`). The app carries the
   `extended-virtual-addressing` and `increased-memory-limit` entitlements
@@ -305,9 +344,11 @@ stronger than the Quest's XR2 but drives two 1920 x 1824 eyes at 90 Hz).
 
 ## Known gaps and next steps
 
-- Hands only: racing needs a Bluetooth controller; a virtual on-hand steering
-  wheel gesture set is the obvious follow-up (the hand-steering code path in
-  `OPENXR.md` already takes hand poses).
+- Bare-hand driving is untuned on this headset: the grasp thresholds
+  (`kGraspOpenRadians`, `kGraspClosedRadians` in `openxr_hand_tracking.h`) and
+  the flick speeds were set on a Quest 3; ARKit's skeleton may want different
+  ones. Manual drift has no gesture. With the option off, racing needs a
+  Bluetooth controller.
 - Foveated rendering is off; CompositorServices' rasterization rate maps would
   have to shape Dawn's eye passes, the same problem the Quest solved with a
   Dawn patch (`docs/quest-port.md`, "Foveated rendering").

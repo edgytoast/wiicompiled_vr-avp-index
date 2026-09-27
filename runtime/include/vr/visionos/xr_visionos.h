@@ -88,14 +88,15 @@ XrResult xr_visionos_set_frame_environment(XrSession session, bool alpha_blend);
 // App bridge -> provider: a spatial event of the immersive space (a pinch,
 // visionOS's look-and-pinch selection). visionOS never exposes the gaze itself,
 // but each pinch carries the ray from the eyes to where the user looked when it
-// began, so the provider aims the pointer hand's aim pose along it and presses
-// select for the pinch's duration. `phase`: 0 active, 1 ended, 2 cancelled.
-// `chirality`: 0 unknown, 1 left, 2 right. The ray is in the immersive space's
-// coordinates (the ARKit world origin the drawables use); `has_ray` false when
-// the event carries none.
+// began, and while it is held the pinching hand's pose: the provider aims the
+// pointer along the ray, lets the hand fine-tune it for as long as the pinch
+// lasts, and presses select when the fingers part. `phase`: 0 active, 1 ended,
+// 2 cancelled. `chirality`: 0 unknown, 1 left, 2 right. The ray and the pose are
+// in the immersive space's coordinates (the ARKit world origin the drawables
+// use); `has_ray` / `has_pose` false when the event carries none.
 void xr_visionos_spatial_event(uint64_t event_id, int phase, int chirality, bool has_ray, float origin_x,
                                float origin_y, float origin_z, float direction_x, float direction_y,
-                               float direction_z);
+                               float direction_z, bool has_pose, float pose_x, float pose_y, float pose_z);
 
 // Diagnostics for the app: the last error the provider logged, or "".
 const char* xr_visionos_last_error(void);

@@ -98,9 +98,9 @@ bool mkw_visionos_layer_invalidated(void) {
 
 void mkw_visionos_spatial_event(uint64_t event_id, int phase, int chirality, bool has_ray, float origin_x,
                                 float origin_y, float origin_z, float direction_x, float direction_y,
-                                float direction_z) {
+                                float direction_z, bool has_pose, float pose_x, float pose_y, float pose_z) {
     xr_visionos_spatial_event(event_id, phase, chirality, has_ray, origin_x, origin_y, origin_z, direction_x,
-                              direction_y, direction_z);
+                              direction_y, direction_z, has_pose, pose_x, pose_y, pose_z);
 }
 
 bool mkw_visionos_start_game(void) {

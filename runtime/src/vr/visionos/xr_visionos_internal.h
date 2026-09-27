@@ -81,14 +81,35 @@ struct ViewGeometry {
 
 struct HandJointSample {
     simd_float3 position{};
+    // world_from_joint's rotation, ARKit's own joint axes (only the positions
+    // are read by anything that cares about axes; see ReadHand).
+    simd_quatf orientation = simd_quaternion(0.0f, 0.0f, 0.0f, 1.0f);
+    // ARKit is measuring this joint, not estimating it (a fingertip hidden
+    // behind the palm is estimated). The pose is usable either way while the
+    // hand itself is tracked.
     bool tracked = false;
 };
+
+// One hand's skeleton, all 26 joints in XR_HAND_JOINT_*_EXT order so the same
+// array serves xrLocateHandJointsEXT and the gesture code. ARKit has no palm
+// joint; ReadHand synthesizes it at the middle of the hand.
+inline constexpr size_t kHandJointCount = XR_HAND_JOINT_COUNT_EXT;
 
 struct HandSample {
     bool tracked = false;
     int64_t timeNanos = 0;
     simd_float4x4 worldFromAnchor = matrix_identity_float4x4;
-    HandJointSample wrist, indexKnuckle, indexTip, middleKnuckle, middleTip, ringTip, littleTip, thumbTip, forearm;
+    std::array<HandJointSample, kHandJointCount> joints{};
+
+    const HandJointSample& joint(XrHandJointEXT which) const noexcept { return joints[static_cast<size_t>(which)]; }
+    const HandJointSample& wrist() const noexcept { return joint(XR_HAND_JOINT_WRIST_EXT); }
+    const HandJointSample& indexKnuckle() const noexcept { return joint(XR_HAND_JOINT_INDEX_PROXIMAL_EXT); }
+    const HandJointSample& indexTip() const noexcept { return joint(XR_HAND_JOINT_INDEX_TIP_EXT); }
+    const HandJointSample& middleKnuckle() const noexcept { return joint(XR_HAND_JOINT_MIDDLE_PROXIMAL_EXT); }
+    const HandJointSample& middleTip() const noexcept { return joint(XR_HAND_JOINT_MIDDLE_TIP_EXT); }
+    const HandJointSample& ringTip() const noexcept { return joint(XR_HAND_JOINT_RING_TIP_EXT); }
+    const HandJointSample& littleTip() const noexcept { return joint(XR_HAND_JOINT_LITTLE_TIP_EXT); }
+    const HandJointSample& thumbTip() const noexcept { return joint(XR_HAND_JOINT_THUMB_TIP_EXT); }
 };
 
 enum class LayerState {
@@ -154,6 +175,10 @@ public:
     bool DevicePose(int64_t timeNanos, simd_float4x4& worldFromDevice) noexcept;
     // The latest hand anchors.
     void Hands(std::array<HandSample, 2>& hands) noexcept;
+    // The hands predicted (or interpolated) to `timeNanos` by ARKit, for
+    // xrLocateHandJointsEXT: a fresh sample every XR frame, where the latest
+    // anchors repeat between ARKit's updates. False when the query fails.
+    bool HandsAt(int64_t timeNanos, std::array<HandSample, 2>& hands) noexcept;
     bool HandTrackingAuthorized() const noexcept { return m_handTrackingAuthorized.load(); }
 
     id<MTLDevice> Device() const noexcept { return m_device; }
@@ -193,6 +218,10 @@ private:
     ar_device_anchor_t m_deviceAnchor = nullptr;
     ar_hand_anchor_t m_leftHand = nullptr;
     ar_hand_anchor_t m_rightHand = nullptr;
+    // Separate anchors for the timestamp queries, so they never disturb the
+    // latest-anchor pair the actions read.
+    ar_hand_anchor_t m_leftHandAt = nullptr;
+    ar_hand_anchor_t m_rightHandAt = nullptr;
     std::atomic_bool m_trackingStarted{false};
     std::atomic_bool m_handTrackingAuthorized{false};
 };
@@ -258,18 +287,28 @@ struct Session {
     std::array<HandSample, 2> hands{};
     std::array<HandSample, 2> previousHands{};
     int64_t lastSyncNanos = 0;
+    // XR_EXT_hand_tracking (xr_visionos_hand_tracking.mm). While one exists
+    // the hands are bare hands: the interaction profile is khr/simple_controller.
+    std::vector<void*> handTrackers; // HandTracker*, owned
 };
 
-// visionOS's look-and-pinch selection as the provider keeps it (xr_visionos_input.mm):
-// the ray of the pinch in progress, or of the last one, and the pinch's timing.
+// visionOS's look-and-pinch selection as the provider keeps it, one per hand
+// (xr_visionos_input.mm): the ray of the pinch in progress or of the last one,
+// the hand's pose as it began and as it is now (the drag that fine-tunes the
+// pointer), and the pinch's timing (the press comes at its release).
 struct GazePinch {
     uint64_t eventId = 0;
     bool active = false;
     bool hasRay = false;
     simd_float3 origin{};
-    simd_float3 direction{0.0f, 0.0f, -1.0f};
+    // The gaze ray as the pinch began.
+    simd_float3 gazeDirection{0.0f, 0.0f, -1.0f};
+    bool hasPose = false;
+    simd_float3 poseAtStart{};
+    simd_float3 pose{};
     int64_t beganNanos = 0;
     int64_t endedNanos = 0;
+    bool cancelled = false;
 };
 
 struct Instance {
@@ -298,11 +337,39 @@ const std::string* PathString(Instance& instance, XrPath path) noexcept;
 bool LocateSpaceInWorld(Session& session, const Space& space, int64_t timeNanos, simd_float4x4& worldFromSpace,
                         XrSpaceLocationFlags& flags, simd_float3* linearVelocity) noexcept;
 
+// Queues an event for xrPollEvent. Called under the instance mutex.
+void PushEvent(Instance& instance, const XrEventDataBuffer& event);
+
 // Input (xr_visionos_input.mm): the entry points it owns, resolved by xrGetInstanceProcAddr.
 PFN_xrVoidFunction LookupInputFunction(const char* name) noexcept;
 void DestroyInstanceInput(Instance& instance) noexcept;
 // Hand poses for action spaces: world_from_pose for the action's binding on `hand`.
 bool LocateActionSpaceInWorld(Session& session, const Space& space, int64_t timeNanos, simd_float4x4& worldFromSpace,
                               XrSpaceLocationFlags& flags, simd_float3* linearVelocity) noexcept;
+
+// A hand's gestures from its skeleton, as the actions read them (xr_visionos_input.mm).
+struct Gestures {
+    float pinchIndex = 0.0f;
+    float pinchMiddle = 0.0f;
+    float pinchRing = 0.0f;
+    float pinchLittle = 0.0f;
+    float curl = 0.0f;
+    bool tracked = false;
+};
+Gestures GesturesOf(const HandSample& hand) noexcept;
+// The same, with the system's look-and-pinch merged into the pointer hand's.
+Gestures GesturesOfHand(const Session& session, uint32_t hand) noexcept;
+// A pinch or curl at or past this reads as a click.
+inline constexpr float kClickThreshold = 0.7f;
+// A hand's aim and grip frames from its joints, OpenXR style; false when the
+// joints that define them are not tracked.
+bool HandFrame(const HandSample& hand, uint32_t handIndex, simd_float4x4& worldFromAim,
+               simd_float4x4& worldFromGrip) noexcept;
+// Whether the hands read as bare hands (khr/simple_controller): a hand tracker exists.
+bool BareHands(const Session& session) noexcept;
+
+// XR_EXT_hand_tracking (xr_visionos_hand_tracking.mm).
+PFN_xrVoidFunction LookupHandTrackingFunction(const char* name) noexcept;
+void DestroySessionHandTrackers(Session& session) noexcept;
 
 } // namespace mkw::vr::visionos

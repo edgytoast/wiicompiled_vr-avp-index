@@ -1410,6 +1410,12 @@ private:
         const DrivingSnapshot driving = input_ != nullptr ? input_->Driving() : DrivingSnapshot{};
         if (driving.hand_steering && !hand_meshes_loaded_ && runtime_ != nullptr) {
             hand_meshes_loaded_ = true;
+#if defined(MKW_PLATFORM_VISIONOS)
+            // The headset composites the wearer's own hands over the race
+            // (upperLimbVisibility), so no hand of ours is drawn: not the
+            // gloves, not the joints. The wheel still is.
+            RT_LOG(RT_TAG_RUNTIME) << "[mkw-vr] cockpit hands: none (the headset shows your own)" << std::endl;
+#else
             // Tracked hands' trackers, when they exist, serve the mesh too.
             const XrHandTrackerEXT trackers[2]{input_ != nullptr ? input_->HandTracker(0) : XR_NULL_HANDLE,
                                                input_ != nullptr ? input_->HandTracker(1) : XR_NULL_HANDLE};
@@ -1417,6 +1423,7 @@ private:
             RT_LOG(RT_TAG_RUNTIME) << "[mkw-vr] cockpit hands: "
                                    << (loaded ? "the runtime's hand mesh" : "procedural gloves (no runtime hand mesh)")
                                    << std::endl;
+#endif
         }
         cockpit.active = driving.cockpit_active && position_valid && base_position_valid_ &&
                          (driving.synthetic_control || driving.hand_steering);
@@ -1437,6 +1444,13 @@ private:
             ViewFromBase(source.xr_frame.views[eye].pose, base_position_, true, 1.0f, lean_back_radians,
                          cockpit.eyeFromSeat[eye]);
         }
+#if defined(MKW_PLATFORM_VISIONOS)
+        // Real hands, see above: nothing to draw.
+        for (auto& hand : cockpit.hands) {
+            hand.tracked = false;
+            hand.jointsValid = false;
+        }
+#else
         const hand_tracking::HandJointFrame* joints = input_ != nullptr ? &input_->HandJoints() : nullptr;
         for (size_t hand = 0; hand < 2; ++hand) {
             auto& target = cockpit.hands[hand];
@@ -1454,6 +1468,7 @@ private:
                 }
             }
         }
+#endif
     }
 
     // The immersive window's eyes, aimed through the window itself: each keeps its position but looks

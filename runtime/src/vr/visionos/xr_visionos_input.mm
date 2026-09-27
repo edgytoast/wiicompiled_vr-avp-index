@@ -3,13 +3,17 @@
 // OpenXR actions for the visionOS provider, fed by ARKit hand tracking.
 //
 // Apple Vision Pro has no tracked controllers of its own, so the action
-// bindings openxr_input.cpp suggests (the Touch profile, then the simple
-// controller) are served from the hands: a pinch of the index finger is the
-// trigger and select, the middle, ring and little fingers pinched are the face
-// buttons and menu, curling the fingers is the grip squeeze, and the aim and
-// grip poses are built from the wrist and knuckles. There is no thumbstick, so
-// a race still wants a gamepad (SDL sees those directly); the hands carry the
-// menus, the pointer and hand steering. Haptics have nowhere to go.
+// bindings openxr_input.cpp suggests are served from the hands. While the app
+// tracks the hands (XR_EXT_hand_tracking, xr_visionos_hand_tracking.mm) they
+// are bare hands and answer the khr/simple_controller bindings, as bare hands
+// do on a Quest: an index pinch is select, a little-finger pinch the menu, and
+// the joints carry the rest (the grasp that holds the wheel, the item pinch,
+// the flick). Without a tracker the hands play a Touch controller: a pinch of
+// the index finger is the trigger and select, the middle, ring and little
+// fingers pinched are the face buttons and menu, curling the fingers is the
+// grip squeeze. Either way the aim and grip poses are built from the wrist and
+// knuckles. There is no thumbstick, so a race with the Touch mapping still
+// wants a gamepad (SDL sees those directly). Haptics have nowhere to go.
 
 #include "xr_visionos_internal.h"
 
@@ -49,46 +53,75 @@ struct Binding {
 // Suggested bindings by interaction profile, instance-wide.
 std::map<std::string, std::vector<Binding>> g_bindings;
 
+// The interaction profiles the hands can answer, in the order they are
+// preferred without a hand tracker.
+constexpr const char* kTouchProfile = "/interaction_profiles/oculus/touch_controller";
+constexpr const char* kSimpleProfile = "/interaction_profiles/khr/simple_controller";
+
 // Gesture thresholds, in metres.
 constexpr float kPinchFullMeters = 0.015f;
 constexpr float kPinchNoneMeters = 0.045f;
 constexpr float kCurlOpenMeters = 0.17f;
 constexpr float kCurlClosedMeters = 0.08f;
-constexpr float kClickThreshold = 0.7f;
 
 // The pointer hand: the one whose aim pose the game's Wii Remote pointer follows.
 constexpr uint32_t kPointerHand = 1;
 
-// Look-and-pinch selection (xr_visionos_spatial_event). The pointer is aimed
-// along the pinch's gaze ray at once; select follows a beat later, so the game
-// sees the pointer arrive over a button before the press, as with a real
-// remote, and stays down long enough for a 60 Hz poll to catch a brief pinch.
-constexpr int64_t kGazeSelectDelayNanos = 50'000'000;
-constexpr int64_t kGazeSelectHoldNanos = 100'000'000;
+// Look-and-pinch selection (xr_visionos_spatial_event), one state per hand.
+// A pinch aims the pointer along its gaze ray at once; while the fingers stay
+// together the hand fine-tunes it (the pointer moves with the hand from where
+// the gaze put it, as visionOS's own indirect drag does); when they part,
+// select is pressed where the pointer is and held long enough for a 60 Hz poll
+// to catch it. A pinch the system cancels presses nothing. The skeleton's own
+// index pinch never presses select on its own: it would fire the moment the
+// fingers met, before the aim was adjusted.
+constexpr int64_t kGazeSelectHoldNanos = 120'000'000;
+// Where the pointer's target is taken to lie for the drag: about the menu
+// screen's distance (hud_distance_meters, 2 m by default). Only the drag's
+// feel depends on it, not where the pointer lands.
+constexpr float kPointerPlaneMeters = 2.0f;
+// Pointer movement per hand movement at that distance, so a wrist's worth of
+// motion crosses a button and a forearm's worth crosses the screen.
+constexpr float kDragGain = 1.5f;
 std::mutex g_gazeMutex;
-GazePinch g_gazePinch;
+std::array<GazePinch, 2> g_gazePinches{};
+// The hand whose pinch aimed the pointer last; its ray is the pointer's until the next pinch.
+uint32_t g_pointerSource = kPointerHand;
 
-// The pinch as of `nowNanos`: whether select is down and where the pointer aims.
-GazePinch GazePinchNow() noexcept {
+GazePinch GazePinchNow(uint32_t hand) noexcept {
     std::lock_guard lock(g_gazeMutex);
-    return g_gazePinch;
+    return g_gazePinches[std::min<uint32_t>(hand, 1)];
 }
 
+// The pinch that aimed the pointer last (the one in progress, if any).
+GazePinch PointerPinchNow() noexcept {
+    std::lock_guard lock(g_gazeMutex);
+    return g_gazePinches[g_pointerSource];
+}
+
+// Where the pinch points now: the gaze ray it began with, moved by however far
+// the hand has travelled since, as seen at the pointer plane.
+simd_float3 PinchDirection(const GazePinch& pinch) noexcept {
+    simd_float3 direction = pinch.gazeDirection;
+    if (simd_length(direction) < 1.0e-6f) {
+        return simd_make_float3(0.0f, 0.0f, -1.0f);
+    }
+    direction = simd_normalize(direction);
+    if (!pinch.hasPose) {
+        return direction;
+    }
+    const simd_float3 target = pinch.origin + direction * kPointerPlaneMeters + (pinch.pose - pinch.poseAtStart) * kDragGain;
+    const simd_float3 moved = target - pinch.origin;
+    return simd_length(moved) < 1.0e-6f ? direction : simd_normalize(moved);
+}
+
+// Select is down for a beat after the pinch ended (not while it is held, and
+// never for a cancelled one).
 bool GazeSelectDown(const GazePinch& pinch, int64_t nowNanos) noexcept {
-    if (pinch.beganNanos == 0) {
+    if (pinch.beganNanos == 0 || pinch.active || pinch.cancelled || pinch.endedNanos == 0) {
         return false;
     }
-    if (nowNanos - pinch.beganNanos < kGazeSelectDelayNanos) {
-        return false;
-    }
-    if (pinch.active) {
-        return true;
-    }
-    // Ended: held for at least the minimum press, counted from the later of the
-    // press's own start and the end of the pinch.
-    const int64_t pressStart = pinch.beganNanos + kGazeSelectDelayNanos;
-    const int64_t releaseAt = std::max(pinch.endedNanos, pressStart) + kGazeSelectHoldNanos;
-    return nowNanos < std::max(releaseAt, pressStart + kGazeSelectHoldNanos);
+    return nowNanos - pinch.endedNanos < kGazeSelectHoldNanos;
 }
 
 // An OpenXR-style pose looking along `direction` from `origin`: -Z forward, +Y
@@ -147,14 +180,9 @@ float Pinch(const HandJointSample& a, const HandJointSample& b) noexcept {
     return Clamp01((kPinchNoneMeters - distance) / (kPinchNoneMeters - kPinchFullMeters));
 }
 
-struct Gestures {
-    float pinchIndex = 0.0f;
-    float pinchMiddle = 0.0f;
-    float pinchRing = 0.0f;
-    float pinchLittle = 0.0f;
-    float curl = 0.0f;
-    bool tracked = false;
-};
+} // namespace
+
+bool BareHands(const Session& session) noexcept { return !session.handTrackers.empty(); }
 
 Gestures GesturesOf(const HandSample& hand) noexcept {
     Gestures g{};
@@ -162,12 +190,12 @@ Gestures GesturesOf(const HandSample& hand) noexcept {
     if (!hand.tracked) {
         return g;
     }
-    g.pinchIndex = Pinch(hand.thumbTip, hand.indexTip);
-    g.pinchMiddle = Pinch(hand.thumbTip, hand.middleTip);
-    g.pinchRing = Pinch(hand.thumbTip, hand.ringTip);
-    g.pinchLittle = Pinch(hand.thumbTip, hand.littleTip);
-    if (hand.middleTip.tracked && hand.wrist.tracked) {
-        const float reach = simd_length(hand.middleTip.position - hand.wrist.position);
+    g.pinchIndex = Pinch(hand.thumbTip(), hand.indexTip());
+    g.pinchMiddle = Pinch(hand.thumbTip(), hand.middleTip());
+    g.pinchRing = Pinch(hand.thumbTip(), hand.ringTip());
+    g.pinchLittle = Pinch(hand.thumbTip(), hand.littleTip());
+    if (hand.middleTip().tracked && hand.wrist().tracked) {
+        const float reach = simd_length(hand.middleTip().position - hand.wrist().position);
         g.curl = Clamp01((kCurlOpenMeters - reach) / (kCurlOpenMeters - kCurlClosedMeters));
     }
     // A pinch is one gesture: the strongest one owns it, the others read as zero,
@@ -187,25 +215,35 @@ Gestures GesturesOf(const HandSample& hand) noexcept {
     return g;
 }
 
-// The pointer hand's gestures: the system's own pinch recognition (look and
-// pinch, either hand) presses its trigger and select, on top of what the hand
-// skeleton says. The pointer hand reads as present while a pinch is in flight
-// even when ARKit has lost the hand.
+// A hand's gestures with its index pinch, the trigger and select, taken from
+// the system's own pinch recognition rather than the skeleton: pressed when the
+// pinch is released (see the look-and-pinch notes above), for either hand. The
+// other fingers' pinches and the curl still come from the skeleton. The pointer
+// hand reads as present while a pinch is in flight even when ARKit has lost
+// the hand, and once any pinch has aimed the pointer.
 Gestures GesturesOfHand(const Session& session, uint32_t hand) noexcept {
     Gestures g = GesturesOf(session.hands[hand]);
-    if (hand == kPointerHand) {
-        const GazePinch pinch = GazePinchNow();
-        if (GazeSelectDown(pinch, NowNanos())) {
-            g.pinchIndex = 1.0f;
-            g.pinchMiddle = g.pinchRing = g.pinchLittle = 0.0f;
-            g.curl = 0.0f;
-            g.tracked = true;
-        } else if (pinch.hasRay) {
-            g.tracked = true;
-        }
+    g.pinchIndex = 0.0f;
+    const GazePinch pinch = GazePinchNow(hand);
+    if (GazeSelectDown(pinch, NowNanos())) {
+        g.pinchIndex = 1.0f;
+        g.pinchMiddle = g.pinchRing = g.pinchLittle = 0.0f;
+        g.curl = 0.0f;
+        g.tracked = true;
+    } else if (pinch.active) {
+        // Fingers together: no other pinch of this hand should read while the
+        // system owns the gesture.
+        g.pinchMiddle = g.pinchRing = g.pinchLittle = 0.0f;
+        g.curl = 0.0f;
+        g.tracked = true;
+    }
+    if (hand == kPointerHand && PointerPinchNow().hasRay) {
+        g.tracked = true;
     }
     return g;
 }
+
+namespace {
 
 // A binding path's hand and component: "/user/hand/left/input/trigger/value" ->
 // 0, "trigger/value". False for paths that are not a hand's.
@@ -279,11 +317,33 @@ bool ComponentValue(const Gestures& g, const std::string& component, float& valu
     return false;
 }
 
+// The interaction profile the hands answer: khr/simple_controller while they
+// are bare hands (a hand tracker exists), else the Touch bindings when
+// suggested, else the simple ones. Null when nothing suggested applies.
+const char* CurrentProfile(const Session& session) noexcept {
+    if (BareHands(session) && g_bindings.count(kSimpleProfile) != 0) {
+        return kSimpleProfile;
+    }
+    for (const char* profile : {kTouchProfile, kSimpleProfile}) {
+        if (g_bindings.count(profile) != 0) {
+            return profile;
+        }
+    }
+    return nullptr;
+}
+
 // Every binding of `action` for the hands `subaction` names (both when null),
-// as (hand, component) pairs.
+// as (hand, component) pairs. With a session, only the bindings of the
+// profile its hands answer now count, so an action bound only in the Touch
+// profile (the squeeze) reads inactive while the hands are bare; without one,
+// every suggested profile's (the pose actions, which are bound alike in all).
 void BindingsFor(Instance& instance, const Action& action, XrPath subaction,
-                 std::vector<std::pair<uint32_t, std::string>>& out) {
+                 std::vector<std::pair<uint32_t, std::string>>& out, const Session* session = nullptr) {
     out.clear();
+    const char* only = session != nullptr ? CurrentProfile(*session) : nullptr;
+    if (session != nullptr && only == nullptr) {
+        return;
+    }
     uint32_t wantedHand = 2;
     if (subaction != XR_NULL_PATH) {
         const std::string* text = PathString(instance, subaction);
@@ -299,6 +359,9 @@ void BindingsFor(Instance& instance, const Action& action, XrPath subaction,
         }
     }
     for (const auto& [profile, bindings] : g_bindings) {
+        if (only != nullptr && profile != only) {
+            continue;
+        }
         for (const Binding& binding : bindings) {
             if (binding.action != &action) {
                 continue;
@@ -316,22 +379,27 @@ void BindingsFor(Instance& instance, const Action& action, XrPath subaction,
     }
 }
 
+} // namespace
+
 // A hand's frame from its joints, OpenXR style: -Z along the index metacarpal
 // (where the finger points when extended), +Y out of the back of the hand, +X
 // to the hand's right. Built from joint positions alone so ARKit's own hand
 // anchor axes never matter.
 bool HandFrame(const HandSample& hand, uint32_t handIndex, simd_float4x4& worldFromAim,
                simd_float4x4& worldFromGrip) noexcept {
-    if (!hand.tracked || !hand.wrist.tracked || !hand.indexKnuckle.tracked || !hand.middleKnuckle.tracked) {
+    const HandJointSample& wrist = hand.wrist();
+    const HandJointSample& indexKnuckle = hand.indexKnuckle();
+    const HandJointSample& middleKnuckle = hand.middleKnuckle();
+    if (!hand.tracked || !wrist.tracked || !indexKnuckle.tracked || !middleKnuckle.tracked) {
         return false;
     }
-    simd_float3 forward = hand.indexKnuckle.position - hand.wrist.position;
+    simd_float3 forward = indexKnuckle.position - wrist.position;
     if (simd_length(forward) < 1.0e-4f) {
         return false;
     }
     forward = simd_normalize(forward);
-    simd_float3 right = handIndex == 1 ? hand.middleKnuckle.position - hand.indexKnuckle.position
-                                       : hand.indexKnuckle.position - hand.middleKnuckle.position;
+    simd_float3 right = handIndex == 1 ? middleKnuckle.position - indexKnuckle.position
+                                       : indexKnuckle.position - middleKnuckle.position;
     if (simd_length(right) < 1.0e-4f) {
         return false;
     }
@@ -344,12 +412,14 @@ bool HandFrame(const HandSample& hand, uint32_t handIndex, simd_float4x4& worldF
     right = simd_normalize(simd_cross(forward, up));
     const simd_float3 back = -forward;
     worldFromAim = simd_matrix(simd_make_float4(right, 0.0f), simd_make_float4(up, 0.0f), simd_make_float4(back, 0.0f),
-                               simd_make_float4(hand.indexKnuckle.position, 1.0f));
-    const simd_float3 palm = (hand.wrist.position + hand.middleKnuckle.position) * 0.5f;
+                               simd_make_float4(indexKnuckle.position, 1.0f));
+    const simd_float3 palm = (wrist.position + middleKnuckle.position) * 0.5f;
     worldFromGrip = simd_matrix(simd_make_float4(right, 0.0f), simd_make_float4(up, 0.0f), simd_make_float4(back, 0.0f),
                                 simd_make_float4(palm, 1.0f));
     return true;
 }
+
+namespace {
 
 uint32_t HandOfSubaction(Instance& instance, XrPath subaction) noexcept {
     const std::string* text = PathString(instance, subaction);
@@ -399,15 +469,16 @@ bool LocateActionSpaceInWorld(Session& session, const Space& space, int64_t time
     const bool aim = IsAimAction(instance, *action);
     if (aim && hand == kPointerHand) {
         // The pointer is not the hand's: pointing a hand at a screen a few metres
-        // away is too coarse to land on a button. A pinch aims it along the
-        // system's gaze ray, where the eyes were looking as the fingers met, and
-        // it stays there until the next pinch. Before the first pinch there is no
-        // pointer at all: the aim pose is simply not located.
-        const GazePinch pinch = GazePinchNow();
+        // away is too coarse to land on a button. A pinch (of either hand) aims
+        // it along the system's gaze ray, where the eyes were looking as the
+        // fingers met; while the pinch is held the hand moves it from there, and
+        // it stays where it was released until the next pinch. Before the first
+        // pinch there is no pointer at all: the aim pose is simply not located.
+        const GazePinch pinch = PointerPinchNow();
         if (!pinch.hasRay) {
             return false;
         }
-        worldFromSpace = simd_mul(PoseAlong(pinch.origin, pinch.direction), MatrixFromPose(space.poseInSpace));
+        worldFromSpace = simd_mul(PoseAlong(pinch.origin, PinchDirection(pinch)), MatrixFromPose(space.poseInSpace));
         flags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT |
                 XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
         if (linearVelocity != nullptr) {
@@ -448,7 +519,8 @@ void DestroyInstanceInput(Instance& instance) noexcept {
     instance.actionSets.clear();
     g_bindings.clear();
     std::lock_guard lock(g_gazeMutex);
-    g_gazePinch = {};
+    g_gazePinches = {};
+    g_pointerSource = kPointerHand;
 }
 
 } // namespace mkw::vr::visionos
@@ -456,35 +528,46 @@ void DestroyInstanceInput(Instance& instance) noexcept {
 // App bridge (visionos_host.mm <- the SwiftUI CompositorLayer's onSpatialEvent).
 void xr_visionos_spatial_event(uint64_t event_id, int phase, int chirality, bool has_ray, float origin_x,
                                float origin_y, float origin_z, float direction_x, float direction_y,
-                               float direction_z) {
+                               float direction_z, bool has_pose, float pose_x, float pose_y, float pose_z) {
     using namespace mkw::vr::visionos;
-    (void)chirality; // either hand's pinch drives the one pointer
+    // A pinch of unknown handedness counts as the pointer hand's.
+    const uint32_t hand = chirality == 1 ? 0u : chirality == 2 ? 1u : kPointerHand;
     const int64_t now = NowNanos();
     std::lock_guard lock(g_gazeMutex);
-    GazePinch& pinch = g_gazePinch;
+    GazePinch& pinch = g_gazePinches[hand];
     if (phase == 0) {
         if (!pinch.active || pinch.eventId != event_id) {
-            // A new pinch. Its ray is the gaze at the moment it began; later events of
-            // the same pinch repeat it (or carry none) while the hand moves.
+            // A new pinch. Its ray is the gaze at the moment it began; the events that
+            // follow for the same pinch bring the hand's pose as it moves.
             pinch = {};
             pinch.eventId = event_id;
             pinch.active = true;
             pinch.beganNanos = now;
+            g_pointerSource = hand;
         }
-        if (has_ray) {
+        if (has_ray && !pinch.hasRay) {
             pinch.hasRay = true;
             pinch.origin = simd_make_float3(origin_x, origin_y, origin_z);
-            pinch.direction = simd_make_float3(direction_x, direction_y, direction_z);
+            pinch.gazeDirection = simd_make_float3(direction_x, direction_y, direction_z);
+        }
+        if (has_pose) {
+            const simd_float3 pose = simd_make_float3(pose_x, pose_y, pose_z);
+            if (!pinch.hasPose) {
+                pinch.hasPose = true;
+                pinch.poseAtStart = pose;
+            }
+            pinch.pose = pose;
         }
         return;
     }
     if (pinch.eventId == event_id && pinch.active) {
+        if (has_pose && pinch.hasPose) {
+            pinch.pose = simd_make_float3(pose_x, pose_y, pose_z);
+        }
         pinch.active = false;
         pinch.endedNanos = now;
-        if (phase == 2) {
-            // Cancelled by the system: no press should come of it.
-            pinch.beganNanos = 0;
-        }
+        // Cancelled by the system: no press should come of it.
+        pinch.cancelled = phase == 2;
     }
 }
 
@@ -672,21 +755,16 @@ XrResult XRAPI_CALL GetCurrentInteractionProfile(XrSession session, XrPath topLe
         return XR_ERROR_HANDLE_INVALID;
     }
     std::lock_guard lock(object->mutex);
-    if (GetSession(session) == nullptr) {
+    Session* target = GetSession(session);
+    if (target == nullptr) {
         return XR_ERROR_HANDLE_INVALID;
     }
     if (interactionProfile == nullptr || interactionProfile->type != XR_TYPE_INTERACTION_PROFILE_STATE) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
     (void)topLevelUserPath;
-    // The hands answer the Touch bindings when suggested, else the simple ones.
-    for (const char* profile : {"/interaction_profiles/oculus/touch_controller", "/interaction_profiles/khr/simple_controller"}) {
-        if (g_bindings.count(profile) != 0) {
-            interactionProfile->interactionProfile = InternPath(*object, profile);
-            return XR_SUCCESS;
-        }
-    }
-    interactionProfile->interactionProfile = XR_NULL_PATH;
+    const char* profile = CurrentProfile(*target);
+    interactionProfile->interactionProfile = profile != nullptr ? InternPath(*object, profile) : XR_NULL_PATH;
     return XR_SUCCESS;
 }
 
@@ -751,7 +829,7 @@ XrResult ResolveState(Session*& target, Action*& action, const XrActionStateGetI
     if (!action->set->attached) {
         return XR_ERROR_ACTIONSET_NOT_ATTACHED;
     }
-    BindingsFor(*object, *action, getInfo->subactionPath, bindings);
+    BindingsFor(*object, *action, getInfo->subactionPath, bindings, target);
     return XR_SUCCESS;
 }
 

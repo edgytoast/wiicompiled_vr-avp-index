@@ -56,7 +56,9 @@ unsupported scenes appear as a head-locked virtual screen; a validated single-ca
 to immersive stereo rendering. VR is opt-in and falls back to the normal desktop renderer if the
 runtime or headset is unavailable. In first person you sit in the cockpit, where the steering wheel
 or handlebar turns with your steering, and hand steering by heurazy lets you grab it with the
-tracked controllers and turn it. On a Quest the hands can follow the headset's own hand tracking.
+tracked controllers and turn it. On a Quest the hands can follow the headset's own hand tracking,
+and on a Quest or an Apple Vision Pro you can race with bare hands: hold the wheel to steer and
+accelerate, flick your hands for a trick, pinch with an open hand to use an item.
 See [`OPENXR.md`](OPENXR.md) for setup, configuration, and the current limitations.
 
 **Music ducking.** 

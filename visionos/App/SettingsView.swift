@@ -80,6 +80,7 @@ struct SettingsView: View {
     private var window: Bool { immersive && store.bool("vr", "immersive_window", default: false) }
     private var firstPerson: Bool { immersive && store.bool("vr", "first_person", default: false) }
     private var cockpit: Bool { firstPerson && store.index("vr", "first_person_seat", of: Self.seats) == 0 }
+    private var handSteering: Bool { cockpit && store.bool("vr", "hand_steering", default: true) }
 
     private var camera: some View {
         Section("Camera") {
@@ -120,9 +121,13 @@ struct SettingsView: View {
                       selection: stringChoice("vr", "first_person_seat", Self.seats))
                 .disabled(!firstPerson)
             ToggleRow(title: "Hand steering",
-                      help: "In the cockpit, make a fist near the steering wheel or handlebar to grab it, and turn it to steer. Hand steering by heurazy.",
+                      help: "In the cockpit, close a hand on the steering wheel or handlebar to take hold of it, and turn it to steer. Hand steering by heurazy.",
                       isOn: boolBinding("vr", "hand_steering", default: true))
                 .disabled(!cockpit)
+            ToggleRow(title: "Drive with your hands",
+                      help: "Race with no controller: a hand closed on the wheel holds the gas, a pinch with an open free hand uses an item, flicking your hands up does a trick, and a little-finger pinch pauses. In menus, a pinch is A. Choose Automatic drift. Off, the finger pinches are a controller's buttons and a fist near the wheel still takes hold of it.",
+                      isOn: boolBinding("vr", "hand_tracking", default: true))
+                .disabled(!handSteering)
             SliderRow(title: "Lean back angle", help: "Tilts the race view back for playing reclined. 0 applies no tilt.",
                       range: -45...45, step: 1, format: { String(format: "%.0f°", $0) },
                       value: numberBinding("vr", "lean_back_degrees", in: -45...45, default: 0))
@@ -189,12 +194,12 @@ struct SettingsView: View {
     private var controls: some View {
         Section("Controls") {
             ChoiceRow(title: "Hands as controllers",
-                      help: "What your hands are to the game. None leaves the game to a Bluetooth game controller, the way to race; look at a menu button and pinch to press it either way.",
+                      help: "What your hands are to the game. None leaves the game to a Bluetooth game controller, the way to race; look at a menu button, pinch, adjust by moving your hand, and let go to press it either way.",
                       options: ["Wii Remote + Nunchuk", "Gamepad", "None"],
                       selection: stringChoice("vr", "controller_mode", Self.controllerModes))
             ToggleRow(title: "Vibration", help: "The game's rumble vibrates a connected game controller.",
                       isOn: boolBinding("controller", "rumble", default: true))
-            InfoRow(title: "Pointer", value: "Look and pinch")
+            InfoRow(title: "Pointer", value: "Look and pinch, adjust by hand, release to press")
             InfoRow(title: "A (right) / X (left)", value: "Middle-finger pinch")
             InfoRow(title: "B (right) / Y (left)", value: "Ring-finger pinch")
             InfoRow(title: "Menu", value: "Little-finger pinch")

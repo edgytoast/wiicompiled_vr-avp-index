@@ -372,6 +372,7 @@ if(MKW_ENABLE_OPENXR AND MKW_PLATFORM_VISIONOS)
     add_library(mkw_openxr_visionos STATIC
         "${CMAKE_CURRENT_LIST_DIR}/src/vr/visionos/xr_visionos_runtime.mm"
         "${CMAKE_CURRENT_LIST_DIR}/src/vr/visionos/xr_visionos_input.mm"
+        "${CMAKE_CURRENT_LIST_DIR}/src/vr/visionos/xr_visionos_hand_tracking.mm"
         "${CMAKE_CURRENT_LIST_DIR}/src/vr/visionos/xr_visionos_compositor.mm")
     target_include_directories(mkw_openxr_visionos PUBLIC "${CMAKE_CURRENT_LIST_DIR}/include")
     target_link_libraries(mkw_openxr_visionos PUBLIC mkw_openxr_headers)

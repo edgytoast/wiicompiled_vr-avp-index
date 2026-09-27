@@ -198,7 +198,7 @@ XrResult XRAPI_CALL LocateHandJointsEXT(XrHandTrackerEXT handTracker, const XrHa
         aim->pinchStrengthRing = gestures.pinchRing;
         aim->pinchStrengthLittle = gestures.pinchLittle;
     }
-    if (!sample.allJointsTracked()) {
+    if (!sample.tracked) {
         return XR_SUCCESS;
     }
     simd_float4x4 worldFromBase;
@@ -207,15 +207,20 @@ XrResult XRAPI_CALL LocateHandJointsEXT(XrHandTrackerEXT handTracker, const XrHa
         return XR_SUCCESS;
     }
     const simd_float4x4 baseFromWorld = Inverse(worldFromBase);
-    constexpr XrSpaceLocationFlags kLocated = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
-                                              XR_SPACE_LOCATION_POSITION_VALID_BIT |
-                                              XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT |
-                                              XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
+    // A tracked hand anchor always carries a full skeleton estimate, so every
+    // joint is valid, as OpenXR means it (a usable pose); only the joints
+    // ARKit is actually measuring are also tracked. A hand closed on the wheel
+    // hides its fingertips from the cameras, and the app locates a hand on the
+    // valid bits alone, as the Quest's runtime reports it.
+    constexpr XrSpaceLocationFlags kValid =
+        XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+    constexpr XrSpaceLocationFlags kTracked =
+        XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
     locations->isActive = XR_TRUE;
     for (size_t i = 0; i < kHandJointCount; ++i) {
         XrHandJointLocationEXT& out = locations->jointLocations[i];
         out.pose = PoseFromMatrix(simd_mul(baseFromWorld, MatrixFromJoint(sample.joints[i])));
-        out.locationFlags = kLocated;
+        out.locationFlags = kValid | (sample.joints[i].tracked ? kTracked : 0);
     }
     if (source != nullptr) {
         source->isActive = XR_TRUE;

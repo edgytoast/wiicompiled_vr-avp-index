@@ -137,7 +137,12 @@ final class GameModel: ObservableObject {
             (origin: SIMD3<Float>(Float($0.origin.x), Float($0.origin.y), Float($0.origin.z)),
              direction: SIMD3<Float>(Float($0.direction.x), Float($0.direction.y), Float($0.direction.z)))
         }
-        GameLibrary.shared?.spatialEvent(id: id, phase: phase, chirality: chirality, ray: ray)
+        // The pinching hand, wherever it goes while the pinch lasts: the provider moves the
+        // pointer with it from where the gaze put it, and presses when the pinch ends.
+        let pose = event.inputDevicePose.map {
+            SIMD3<Float>(Float($0.pose3D.position.x), Float($0.pose3D.position.y), Float($0.pose3D.position.z))
+        }
+        GameLibrary.shared?.spatialEvent(id: id, phase: phase, chirality: chirality, ray: ray, pose: pose)
     }
 
     private func startGame() {

@@ -603,6 +603,13 @@ from its touch sensors). The log says `OpenXR simultaneous hands and controllers
 when the option goes off). Meta documents that it cannot run together with passthrough and wide
 motion mode both on, and not while body tracking is; this app uses neither of the last two.
 
+The Apple Vision Pro takes the same path with nothing to put down: its OpenXR provider
+(`docs/visionos-port.md`, "Input") is an `XR_EXT_hand_tracking` runtime over ARKit's skeletons,
+reports the cameras as the data source, an index pinch as the aim state's pinch and a little-finger
+pinch as its menu (visionOS has no palm-up gesture to give away), and answers `khr/simple_controller`
+while the app holds hand trackers, so `hand_tracking` (on by default there, "Drive with your hands")
+turns the rules below on and off live. No hand is drawn there: the headset shows the wearer's own.
+
 With tracked hands on, bare hands drive. A hand is bare while it has no controller in it (its
 squeeze action inactive) and either drives `khr/simple_controller` or has camera-tracked joints (a
 free hand under simultaneous tracking may get no profile our actions are bound in),

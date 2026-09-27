@@ -237,9 +237,14 @@ inline constexpr bool kVrNativeSteeringWheelDefault = true;
 inline constexpr bool kVrHandSteeringDefault = true;
 // The cockpit hands follow the headset's hand tracking (the controllers' touch
 // sensors while they are held, the cameras once they are put down, when bare
-// hands also drive). Opt-in, and only offered on the Quest for now; the
-// launcher's Settings page shows the same default.
+// hands also drive). Opt-in on the Quest, which has controllers; on by default
+// on the Vision Pro, which has nothing but hands ("Drive with your hands").
+// Offered on those two; each launcher's Settings page shows the same default.
+#if defined(MKW_PLATFORM_VISIONOS)
+inline constexpr bool kVrHandTrackingDefault = true;
+#else
 inline constexpr bool kVrHandTrackingDefault = false;
+#endif
 // Hand steering tuning ranges; the defaults are mkw::vr::WheelTuning's.
 inline constexpr float kVrWheelDegreesMin = 20.0f, kVrWheelDegreesMax = 180.0f;
 inline constexpr float kVrWheelGrabDistanceMin = 0.15f, kVrWheelGrabDistanceMax = 0.8f;

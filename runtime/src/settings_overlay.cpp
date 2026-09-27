@@ -150,8 +150,10 @@ constexpr std::array<const char*, 3> kVrRaceViewLabels{"Immersive", "Immersive w
 // mixed-immersion space (the provider blends the layers over the surroundings).
 bool g_vrPassthrough = RuntimeConfigFile::VrPassthrough();
 #endif
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(MKW_PLATFORM_VISIONOS)
 bool g_vrHandTracking = RuntimeConfigFile::VrHandTracking();
+#endif
+#if defined(__ANDROID__)
 // Menu labels for the foveation levels, index-matched to RuntimeConfigFile::kVrFoveationLevels and to
 // aurora_set_stereo_foveation.
 constexpr std::array<const char*, 4> kVrFoveationLabels{"Off", "Low", "Medium", "High"};
@@ -1225,7 +1227,25 @@ void DrawVrSteeringWheelSettings() {
                           "back to the stick, which still aims items. The runtime's hand mesh is "
                           "used when hand steering was on at launch.");
     }
-#if defined(__ANDROID__)
+#if defined(MKW_PLATFORM_VISIONOS)
+    // The Vision Pro has nothing but hands, and shows the wearer's own.
+    ImGui::BeginDisabled(!g_vrHandSteering);
+    if (ImGui::Checkbox("Drive with your hands", &g_vrHandTracking)) {
+        RuntimeConfigFile::SetVrHandTracking(g_vrHandTracking);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "%s", mkw::vr::OpenXRHandTrackingAvailable()
+                      ? "Close a hand on the wheel to hold it, which also holds the gas, and turn it to "
+                        "steer; pinch with an open free hand to use an item; flick your hands up for a "
+                        "trick; pinch your little finger to pause. In menus, a pinch is A. Choose "
+                        "Automatic drift. Off, a fist near the wheel still takes hold of it and the "
+                        "finger pinches are the controller's buttons."
+                      : "This session started with hand steering and this option off, so it applies "
+                        "after a restart.");
+    }
+    ImGui::EndDisabled();
+#elif defined(__ANDROID__)
     ImGui::BeginDisabled(!g_vrHandSteering);
     if (ImGui::Checkbox("Tracked hands", &g_vrHandTracking)) {
         RuntimeConfigFile::SetVrHandTracking(g_vrHandTracking);
@@ -1245,6 +1265,8 @@ void DrawVrSteeringWheelSettings() {
                         "with hand steering and tracked hands off, so it applies after a restart.");
     }
     ImGui::EndDisabled();
+#endif
+#if defined(__ANDROID__) || defined(MKW_PLATFORM_VISIONOS)
     if (g_vrHandSteering && g_vrHandTracking) {
         const mkw::vr::DrivingSnapshot driving = mkw::vr::OpenXRReadDriving();
         const auto hand = [&](size_t side) {
@@ -1740,7 +1762,7 @@ void DrawVrCameraSettings() {
         RuntimeConfigFile::SetVrSteeringWheel(g_vrSteeringWheel);
         RuntimeConfigFile::SetVrNativeSteeringWheel(g_vrNativeSteeringWheel);
         RuntimeConfigFile::SetVrHandSteering(g_vrHandSteering);
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(MKW_PLATFORM_VISIONOS)
         g_vrHandTracking = RuntimeConfigFile::kVrHandTrackingDefault;
         RuntimeConfigFile::SetVrHandTracking(g_vrHandTracking);
 #endif

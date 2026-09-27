@@ -349,6 +349,8 @@ bool Compositor::StartTracking() {
         ar_data_providers_add_data_provider(providers, m_handTracking);
         m_leftHand = ar_hand_anchor_create();
         m_rightHand = ar_hand_anchor_create();
+        m_leftHandAt = ar_hand_anchor_create();
+        m_rightHandAt = ar_hand_anchor_create();
     }
     m_deviceAnchor = ar_device_anchor_create();
     // Hand tracking asks the wearer once; the answer only decides whether the
@@ -389,6 +391,8 @@ void Compositor::StopTracking() {
     m_deviceAnchor = nullptr;
     m_leftHand = nullptr;
     m_rightHand = nullptr;
+    m_leftHandAt = nullptr;
+    m_rightHandAt = nullptr;
     m_trackingStarted.store(false);
 }
 
@@ -421,9 +425,47 @@ HandJointSample JointSample(ar_hand_skeleton_t skeleton, const simd_float4x4& wo
     const simd_float4x4 anchorFromJoint = ar_skeleton_joint_get_anchor_from_joint_transform(joint);
     const simd_float4x4 worldFromJoint = simd_mul(worldFromAnchor, anchorFromJoint);
     sample.position = worldFromJoint.columns[3].xyz;
+    sample.orientation = simd_normalize(simd_quaternion(worldFromJoint));
     sample.tracked = ar_skeleton_joint_is_tracked(joint);
     return sample;
 }
+
+// ARKit's joint for each XR_HAND_JOINT_*_EXT slot but the palm, which ARKit
+// does not have. ARKit's "knuckle" is the metacarpophalangeal joint (OpenXR's
+// proximal), its "intermediate base" and "intermediate tip" the two
+// interphalangeal ones (OpenXR's intermediate and distal); the thumb's chain
+// starts at its knuckle, which stands for OpenXR's thumb metacarpal.
+struct JointName {
+    XrHandJointEXT slot;
+    ar_hand_skeleton_joint_name_t name;
+};
+constexpr std::array<JointName, kHandJointCount - 1> kJointNames{{
+    {XR_HAND_JOINT_WRIST_EXT, ar_hand_skeleton_joint_name_wrist},
+    {XR_HAND_JOINT_THUMB_METACARPAL_EXT, ar_hand_skeleton_joint_name_thumb_knuckle},
+    {XR_HAND_JOINT_THUMB_PROXIMAL_EXT, ar_hand_skeleton_joint_name_thumb_intermediate_base},
+    {XR_HAND_JOINT_THUMB_DISTAL_EXT, ar_hand_skeleton_joint_name_thumb_intermediate_tip},
+    {XR_HAND_JOINT_THUMB_TIP_EXT, ar_hand_skeleton_joint_name_thumb_tip},
+    {XR_HAND_JOINT_INDEX_METACARPAL_EXT, ar_hand_skeleton_joint_name_index_finger_metacarpal},
+    {XR_HAND_JOINT_INDEX_PROXIMAL_EXT, ar_hand_skeleton_joint_name_index_finger_knuckle},
+    {XR_HAND_JOINT_INDEX_INTERMEDIATE_EXT, ar_hand_skeleton_joint_name_index_finger_intermediate_base},
+    {XR_HAND_JOINT_INDEX_DISTAL_EXT, ar_hand_skeleton_joint_name_index_finger_intermediate_tip},
+    {XR_HAND_JOINT_INDEX_TIP_EXT, ar_hand_skeleton_joint_name_index_finger_tip},
+    {XR_HAND_JOINT_MIDDLE_METACARPAL_EXT, ar_hand_skeleton_joint_name_middle_finger_metacarpal},
+    {XR_HAND_JOINT_MIDDLE_PROXIMAL_EXT, ar_hand_skeleton_joint_name_middle_finger_knuckle},
+    {XR_HAND_JOINT_MIDDLE_INTERMEDIATE_EXT, ar_hand_skeleton_joint_name_middle_finger_intermediate_base},
+    {XR_HAND_JOINT_MIDDLE_DISTAL_EXT, ar_hand_skeleton_joint_name_middle_finger_intermediate_tip},
+    {XR_HAND_JOINT_MIDDLE_TIP_EXT, ar_hand_skeleton_joint_name_middle_finger_tip},
+    {XR_HAND_JOINT_RING_METACARPAL_EXT, ar_hand_skeleton_joint_name_ring_finger_metacarpal},
+    {XR_HAND_JOINT_RING_PROXIMAL_EXT, ar_hand_skeleton_joint_name_ring_finger_knuckle},
+    {XR_HAND_JOINT_RING_INTERMEDIATE_EXT, ar_hand_skeleton_joint_name_ring_finger_intermediate_base},
+    {XR_HAND_JOINT_RING_DISTAL_EXT, ar_hand_skeleton_joint_name_ring_finger_intermediate_tip},
+    {XR_HAND_JOINT_RING_TIP_EXT, ar_hand_skeleton_joint_name_ring_finger_tip},
+    {XR_HAND_JOINT_LITTLE_METACARPAL_EXT, ar_hand_skeleton_joint_name_little_finger_metacarpal},
+    {XR_HAND_JOINT_LITTLE_PROXIMAL_EXT, ar_hand_skeleton_joint_name_little_finger_knuckle},
+    {XR_HAND_JOINT_LITTLE_INTERMEDIATE_EXT, ar_hand_skeleton_joint_name_little_finger_intermediate_base},
+    {XR_HAND_JOINT_LITTLE_DISTAL_EXT, ar_hand_skeleton_joint_name_little_finger_intermediate_tip},
+    {XR_HAND_JOINT_LITTLE_TIP_EXT, ar_hand_skeleton_joint_name_little_finger_tip},
+}};
 
 void ReadHand(ar_hand_anchor_t anchor, HandSample& sample) noexcept {
     sample = {};
@@ -431,19 +473,23 @@ void ReadHand(ar_hand_anchor_t anchor, HandSample& sample) noexcept {
         return;
     }
     sample.tracked = true;
-    sample.timeNanos = NowNanos();
+    const CFTimeInterval stamp = ar_anchor_get_timestamp(anchor);
+    sample.timeNanos = stamp > 0.0 ? SecondsToNanos(stamp) : NowNanos();
     sample.worldFromAnchor = ar_anchor_get_origin_from_anchor_transform(anchor);
     ar_hand_skeleton_t skeleton = ar_hand_anchor_get_hand_skeleton(anchor);
-    sample.wrist = JointSample(skeleton, sample.worldFromAnchor, ar_hand_skeleton_joint_name_wrist);
-    sample.forearm = JointSample(skeleton, sample.worldFromAnchor, ar_hand_skeleton_joint_name_forearm_arm);
-    sample.indexKnuckle = JointSample(skeleton, sample.worldFromAnchor, ar_hand_skeleton_joint_name_index_finger_knuckle);
-    sample.indexTip = JointSample(skeleton, sample.worldFromAnchor, ar_hand_skeleton_joint_name_index_finger_tip);
-    sample.middleKnuckle =
-        JointSample(skeleton, sample.worldFromAnchor, ar_hand_skeleton_joint_name_middle_finger_knuckle);
-    sample.middleTip = JointSample(skeleton, sample.worldFromAnchor, ar_hand_skeleton_joint_name_middle_finger_tip);
-    sample.ringTip = JointSample(skeleton, sample.worldFromAnchor, ar_hand_skeleton_joint_name_ring_finger_tip);
-    sample.littleTip = JointSample(skeleton, sample.worldFromAnchor, ar_hand_skeleton_joint_name_little_finger_tip);
-    sample.thumbTip = JointSample(skeleton, sample.worldFromAnchor, ar_hand_skeleton_joint_name_thumb_tip);
+    for (const JointName& entry : kJointNames) {
+        sample.joints[static_cast<size_t>(entry.slot)] = JointSample(skeleton, sample.worldFromAnchor, entry.name);
+    }
+    // The palm: the middle of the hand, between the wrist and the middle
+    // finger's knuckle (where HandFrame puts the grip too), with the wrist's
+    // orientation. Only its position matters: the grasp and the flick read
+    // positions, and visionOS draws no hand of its own.
+    const HandJointSample& wrist = sample.wrist();
+    const HandJointSample& knuckle = sample.middleKnuckle();
+    HandJointSample& palm = sample.joints[XR_HAND_JOINT_PALM_EXT];
+    palm.tracked = wrist.tracked && knuckle.tracked;
+    palm.position = (wrist.position + knuckle.position) * 0.5f;
+    palm.orientation = wrist.orientation;
 }
 } // namespace
 
@@ -461,6 +507,29 @@ void Compositor::Hands(std::array<HandSample, 2>& hands) noexcept {
     }
     ReadHand(m_leftHand, hands[0]);
     ReadHand(m_rightHand, hands[1]);
+}
+
+bool Compositor::HandsAt(int64_t timeNanos, std::array<HandSample, 2>& hands) noexcept {
+    std::lock_guard lock(m_mutex);
+    hands = {};
+    if (m_handTracking == nullptr || m_leftHandAt == nullptr || m_rightHandAt == nullptr ||
+        ar_data_provider_get_state(m_handTracking) != ar_data_provider_state_running) {
+        return false;
+    }
+    if (ar_hand_tracking_provider_query_anchors_at_timestamp(m_handTracking, NanosToSeconds(timeNanos), m_leftHandAt,
+                                                             m_rightHandAt) != ar_hand_anchor_query_status_success) {
+        return false;
+    }
+    ReadHand(m_leftHandAt, hands[0]);
+    ReadHand(m_rightHandAt, hands[1]);
+    // The anchors carry the time they were measured at; the sample stands for
+    // the time it was asked for.
+    for (HandSample& hand : hands) {
+        if (hand.tracked) {
+            hand.timeNanos = timeNanos;
+        }
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------

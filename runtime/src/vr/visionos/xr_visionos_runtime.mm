@@ -28,7 +28,13 @@ cp_layer_renderer_t g_layerRenderer = nullptr;
 
 constexpr const char* kRuntimeName = "WiiCompiled visionOS (CompositorServices)";
 constexpr const char* kSystemName = "Apple Vision Pro";
-constexpr std::array<const char*, 2> kExtensions{"XR_KHR_convert_timespec_time", "XR_FB_display_refresh_rate"};
+// The hand-tracking trio is what openxr_input.cpp needs to drive bare hands
+// (xr_visionos_hand_tracking.mm): the joints, the "cameras, not a controller"
+// data source, and the pinch and menu gesture of the FB aim state.
+constexpr std::array<const char*, 5> kExtensions{"XR_KHR_convert_timespec_time", "XR_FB_display_refresh_rate",
+                                                 XR_EXT_HAND_TRACKING_EXTENSION_NAME,
+                                                 XR_EXT_HAND_TRACKING_DATA_SOURCE_EXTENSION_NAME,
+                                                 XR_FB_HAND_TRACKING_AIM_EXTENSION_NAME};
 
 // Swapchain formats offered, sRGB siblings first so the backend's preference lands on them.
 struct FormatInfo {
@@ -61,7 +67,11 @@ XrResult WriteArray(uint32_t capacity, uint32_t* count, T* output, const std::ve
     return XR_SUCCESS;
 }
 
+} // namespace
+
 void PushEvent(Instance& instance, const XrEventDataBuffer& event) { instance.events.push_back(event); }
+
+namespace {
 
 void PushSessionState(Instance& instance, Session& session, XrSessionState state) {
     session.state = state;
@@ -603,6 +613,7 @@ XRAPI_ATTR XrResult XRAPI_CALL xrDestroySession(XrSession session) {
     }
     object->spaces.clear();
     object->swapchains.clear();
+    DestroySessionHandTrackers(*object);
     Compositor::Get().StopTracking();
     instance.session.reset();
     Log("OpenXR session destroyed");
@@ -1441,6 +1452,10 @@ XRAPI_ATTR XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const 
     }
     if (PFN_xrVoidFunction input = LookupInputFunction(name); input != nullptr) {
         *function = input;
+        return XR_SUCCESS;
+    }
+    if (PFN_xrVoidFunction hands = LookupHandTrackingFunction(name); hands != nullptr) {
+        *function = hands;
         return XR_SUCCESS;
     }
     return XR_ERROR_FUNCTION_UNSUPPORTED;
