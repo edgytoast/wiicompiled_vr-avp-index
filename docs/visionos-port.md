@@ -116,7 +116,20 @@ and `khr/simple_controller` profiles the runtime suggests bindings for:
 | Ring-finger pinch | B (right) / Y (left) |
 | Little-finger pinch | menu |
 | Fist (fingers curled) | squeeze / grip |
-| Aim pose | From the wrist through the index knuckle; grip pose at the wrist. |
+| Grip pose | At the palm, from the hand skeleton (hand steering). |
+| Aim pose, left hand | From the wrist through the index knuckle. |
+| Aim pose, right hand (the Wii pointer) | Look and pinch, below. |
+
+**Pointing is by gaze.** Aiming a hand at a screen a few metres away proved
+far too coarse to land on a menu button. visionOS never exposes the gaze
+itself, but every pinch in an immersive space arrives as a spatial event
+(`LayerRenderer.onSpatialEvent`, forwarded through `mkw_visionos_spatial_event`)
+carrying the ray from the eyes to where the user was looking when the fingers
+met. The provider aims the pointer hand's aim pose along that ray, presses
+select 50 ms later (so the game sees the pointer arrive before the click) and
+holds it at least 100 ms; the pointer then stays parked on that spot until the
+next pinch. Either hand's pinch drives the one pointer. Before the first pinch
+there is no pointer.
 
 That is enough for the menus, the settings panel and hand steering (see
 `OPENXR.md`, "Steering wheel and hand steering"), not for racing at speed. A

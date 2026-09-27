@@ -31,6 +31,15 @@ void mkw_visionos_set_directories(const char* data_dir, const char* resources_di
 // the provider. Set it before starting the game; setting NULL detaches it.
 void mkw_visionos_set_layer_renderer(void* layer_renderer);
 
+// A spatial event of the immersive space (the CompositorLayer's onSpatialEvent):
+// visionOS's look-and-pinch selection, which the provider turns into the
+// game's pointer and select. `phase`: 0 active, 1 ended, 2 cancelled;
+// `chirality`: 0 unknown, 1 left, 2 right; the ray (when `has_ray`) is the
+// event's selectionRay in the space's coordinates.
+void mkw_visionos_spatial_event(uint64_t event_id, int phase, int chirality, bool has_ray, float origin_x,
+                                float origin_y, float origin_z, float direction_x, float direction_y,
+                                float direction_z);
+
 // True once the layer renderer was invalidated: the immersive space was
 // dismissed. The runtime then carries on without a headset, invisibly, so the
 // app asks it to quit (mkw_visionos_request_quit).

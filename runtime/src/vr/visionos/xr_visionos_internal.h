@@ -260,6 +260,18 @@ struct Session {
     int64_t lastSyncNanos = 0;
 };
 
+// visionOS's look-and-pinch selection as the provider keeps it (xr_visionos_input.mm):
+// the ray of the pinch in progress, or of the last one, and the pinch's timing.
+struct GazePinch {
+    uint64_t eventId = 0;
+    bool active = false;
+    bool hasRay = false;
+    simd_float3 origin{};
+    simd_float3 direction{0.0f, 0.0f, -1.0f};
+    int64_t beganNanos = 0;
+    int64_t endedNanos = 0;
+};
+
 struct Instance {
     std::mutex mutex;
     std::vector<std::string> enabledExtensions;

@@ -56,6 +56,59 @@ constexpr float kCurlOpenMeters = 0.17f;
 constexpr float kCurlClosedMeters = 0.08f;
 constexpr float kClickThreshold = 0.7f;
 
+// The pointer hand: the one whose aim pose the game's Wii Remote pointer follows.
+constexpr uint32_t kPointerHand = 1;
+
+// Look-and-pinch selection (xr_visionos_spatial_event). The pointer is aimed
+// along the pinch's gaze ray at once; select follows a beat later, so the game
+// sees the pointer arrive over a button before the press, as with a real
+// remote, and stays down long enough for a 60 Hz poll to catch a brief pinch.
+constexpr int64_t kGazeSelectDelayNanos = 50'000'000;
+constexpr int64_t kGazeSelectHoldNanos = 100'000'000;
+std::mutex g_gazeMutex;
+GazePinch g_gazePinch;
+
+// The pinch as of `nowNanos`: whether select is down and where the pointer aims.
+GazePinch GazePinchNow() noexcept {
+    std::lock_guard lock(g_gazeMutex);
+    return g_gazePinch;
+}
+
+bool GazeSelectDown(const GazePinch& pinch, int64_t nowNanos) noexcept {
+    if (pinch.beganNanos == 0) {
+        return false;
+    }
+    if (nowNanos - pinch.beganNanos < kGazeSelectDelayNanos) {
+        return false;
+    }
+    if (pinch.active) {
+        return true;
+    }
+    // Ended: held for at least the minimum press, counted from the later of the
+    // press's own start and the end of the pinch.
+    const int64_t pressStart = pinch.beganNanos + kGazeSelectDelayNanos;
+    const int64_t releaseAt = std::max(pinch.endedNanos, pressStart) + kGazeSelectHoldNanos;
+    return nowNanos < std::max(releaseAt, pressStart + kGazeSelectHoldNanos);
+}
+
+// An OpenXR-style pose looking along `direction` from `origin`: -Z forward, +Y
+// as close to the world's up as the direction allows.
+simd_float4x4 PoseAlong(simd_float3 origin, simd_float3 direction) noexcept {
+    simd_float3 forward = direction;
+    if (simd_length(forward) < 1.0e-6f) {
+        forward = simd_make_float3(0.0f, 0.0f, -1.0f);
+    }
+    forward = simd_normalize(forward);
+    simd_float3 worldUp = simd_make_float3(0.0f, 1.0f, 0.0f);
+    if (std::fabs(simd_dot(forward, worldUp)) > 0.999f) {
+        worldUp = simd_make_float3(0.0f, 0.0f, -1.0f);
+    }
+    const simd_float3 right = simd_normalize(simd_cross(forward, worldUp));
+    const simd_float3 up = simd_normalize(simd_cross(right, forward));
+    return simd_matrix(simd_make_float4(right, 0.0f), simd_make_float4(up, 0.0f), simd_make_float4(-forward, 0.0f),
+                       simd_make_float4(origin, 1.0f));
+}
+
 ActionSet* GetActionSet(XrActionSet handle) noexcept {
     Instance* instance = CurrentInstance();
     if (instance == nullptr) {
@@ -130,6 +183,26 @@ Gestures GesturesOf(const HandSample& hand) noexcept {
     // without a pinch, and a pinch must not read as a grab.
     if (best > 0.3f) {
         g.curl = 0.0f;
+    }
+    return g;
+}
+
+// The pointer hand's gestures: the system's own pinch recognition (look and
+// pinch, either hand) presses its trigger and select, on top of what the hand
+// skeleton says. The pointer hand reads as present while a pinch is in flight
+// even when ARKit has lost the hand.
+Gestures GesturesOfHand(const Session& session, uint32_t hand) noexcept {
+    Gestures g = GesturesOf(session.hands[hand]);
+    if (hand == kPointerHand) {
+        const GazePinch pinch = GazePinchNow();
+        if (GazeSelectDown(pinch, NowNanos())) {
+            g.pinchIndex = 1.0f;
+            g.pinchMiddle = g.pinchRing = g.pinchLittle = 0.0f;
+            g.curl = 0.0f;
+            g.tracked = true;
+        } else if (pinch.hasRay) {
+            g.tracked = true;
+        }
     }
     return g;
 }
@@ -323,13 +396,32 @@ bool LocateActionSpaceInWorld(Session& session, const Space& space, int64_t time
     if (hand > 1) {
         return false;
     }
+    const bool aim = IsAimAction(instance, *action);
+    if (aim && hand == kPointerHand) {
+        // The pointer is not the hand's: pointing a hand at a screen a few metres
+        // away is too coarse to land on a button. A pinch aims it along the
+        // system's gaze ray, where the eyes were looking as the fingers met, and
+        // it stays there until the next pinch. Before the first pinch there is no
+        // pointer at all: the aim pose is simply not located.
+        const GazePinch pinch = GazePinchNow();
+        if (!pinch.hasRay) {
+            return false;
+        }
+        worldFromSpace = simd_mul(PoseAlong(pinch.origin, pinch.direction), MatrixFromPose(space.poseInSpace));
+        flags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT |
+                XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
+        if (linearVelocity != nullptr) {
+            *linearVelocity = simd_make_float3(0.0f, 0.0f, 0.0f);
+        }
+        return true;
+    }
     const HandSample& sample = session.hands[hand];
     simd_float4x4 worldFromAim;
     simd_float4x4 worldFromGrip;
     if (!HandFrame(sample, hand, worldFromAim, worldFromGrip)) {
         return false;
     }
-    const simd_float4x4& worldFromPose = IsAimAction(instance, *action) ? worldFromAim : worldFromGrip;
+    const simd_float4x4& worldFromPose = aim ? worldFromAim : worldFromGrip;
     worldFromSpace = simd_mul(worldFromPose, MatrixFromPose(space.poseInSpace));
     flags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT |
             XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
@@ -339,7 +431,7 @@ bool LocateActionSpaceInWorld(Session& session, const Space& space, int64_t time
         simd_float4x4 previousGrip;
         if (previous.tracked && previous.timeNanos != 0 && sample.timeNanos > previous.timeNanos &&
             HandFrame(previous, hand, previousAim, previousGrip)) {
-            const simd_float4x4& before = IsAimAction(instance, *action) ? previousAim : previousGrip;
+            const simd_float4x4& before = aim ? previousAim : previousGrip;
             const float dt = static_cast<float>(sample.timeNanos - previous.timeNanos) * 1.0e-9f;
             if (dt > 1.0e-3f) {
                 *linearVelocity = (worldFromPose.columns[3].xyz - before.columns[3].xyz) / dt;
@@ -355,7 +447,48 @@ void DestroyInstanceInput(Instance& instance) noexcept {
     }
     instance.actionSets.clear();
     g_bindings.clear();
+    std::lock_guard lock(g_gazeMutex);
+    g_gazePinch = {};
 }
+
+} // namespace mkw::vr::visionos
+
+// App bridge (visionos_host.mm <- the SwiftUI CompositorLayer's onSpatialEvent).
+void xr_visionos_spatial_event(uint64_t event_id, int phase, int chirality, bool has_ray, float origin_x,
+                               float origin_y, float origin_z, float direction_x, float direction_y,
+                               float direction_z) {
+    using namespace mkw::vr::visionos;
+    (void)chirality; // either hand's pinch drives the one pointer
+    const int64_t now = NowNanos();
+    std::lock_guard lock(g_gazeMutex);
+    GazePinch& pinch = g_gazePinch;
+    if (phase == 0) {
+        if (!pinch.active || pinch.eventId != event_id) {
+            // A new pinch. Its ray is the gaze at the moment it began; later events of
+            // the same pinch repeat it (or carry none) while the hand moves.
+            pinch = {};
+            pinch.eventId = event_id;
+            pinch.active = true;
+            pinch.beganNanos = now;
+        }
+        if (has_ray) {
+            pinch.hasRay = true;
+            pinch.origin = simd_make_float3(origin_x, origin_y, origin_z);
+            pinch.direction = simd_make_float3(direction_x, direction_y, direction_z);
+        }
+        return;
+    }
+    if (pinch.eventId == event_id && pinch.active) {
+        pinch.active = false;
+        pinch.endedNanos = now;
+        if (phase == 2) {
+            // Cancelled by the system: no press should come of it.
+            pinch.beganNanos = 0;
+        }
+    }
+}
+
+namespace mkw::vr::visionos {
 
 } // namespace mkw::vr::visionos
 
@@ -647,7 +780,7 @@ XrResult XRAPI_CALL GetActionStateBoolean(XrSession session, const XrActionState
     bool active = false;
     bool current = false;
     for (const auto& [hand, component] : bindings) {
-        const Gestures g = GesturesOf(target->hands[hand]);
+        const Gestures g = GesturesOfHand(*target, hand);
         float value = 0.0f;
         bool boolean = false;
         if (!g.tracked || !ComponentValue(g, component, value, boolean)) {
@@ -687,7 +820,7 @@ XrResult XRAPI_CALL GetActionStateFloat(XrSession session, const XrActionStateGe
     bool active = false;
     float current = 0.0f;
     for (const auto& [hand, component] : bindings) {
-        const Gestures g = GesturesOf(target->hands[hand]);
+        const Gestures g = GesturesOfHand(*target, hand);
         float value = 0.0f;
         bool boolean = false;
         if (!g.tracked || !ComponentValue(g, component, value, boolean)) {

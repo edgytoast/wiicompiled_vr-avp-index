@@ -36,7 +36,7 @@ struct LauncherView: View {
                         get: { model.wantsRoom },
                         set: { model.wantsRoom = $0 }))
                         .disabled(model.phase == .running)
-                    Text("Races are fully immersive either way. Hands steer through pinches; a Bluetooth game controller is the way to actually race. Dismiss the immersive space (press the Digital Crown) to end the game.")
+                    Text("Races are fully immersive either way. In the menus, look at a button and pinch to press it. A Bluetooth game controller is the way to actually race. Dismiss the immersive space (press the Digital Crown) to end the game.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }

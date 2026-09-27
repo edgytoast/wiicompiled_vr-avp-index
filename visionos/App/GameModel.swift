@@ -77,8 +77,42 @@ final class GameModel: ObservableObject {
         // An OS object: the pointer the provider bridges back to cp_layer_renderer_t and retains.
         let pointer = Unmanaged.passUnretained(layerRenderer).toOpaque()
         mkw_visionos_set_layer_renderer(pointer)
+        // visionOS's look-and-pinch selection. Apps never see the gaze itself, but a
+        // pinch carries the ray from the eyes to where the user was looking when it
+        // began, which the provider turns into the game's pointer and its press.
+        nonisolated(unsafe) let renderer = layerRenderer
         Task { @MainActor in
+            renderer.onSpatialEvent = { events in
+                for event in events {
+                    Self.forward(event)
+                }
+            }
             self.startGame()
+        }
+    }
+
+    private nonisolated static func forward(_ event: SpatialEventCollection.Event) {
+        let phase: Int32
+        switch event.phase {
+        case .active: phase = 0
+        case .ended: phase = 1
+        case .cancelled: phase = 2
+        @unknown default: phase = 2
+        }
+        let chirality: Int32
+        switch event.chirality {
+        case .left?: chirality = 1
+        case .right?: chirality = 2
+        default: chirality = 0
+        }
+        // Stable per pinch: the same event id arrives for every phase of one gesture.
+        let id = UInt64(bitPattern: Int64(event.id.hashValue))
+        if let ray = event.selectionRay {
+            mkw_visionos_spatial_event(id, phase, chirality, true,
+                                       Float(ray.origin.x), Float(ray.origin.y), Float(ray.origin.z),
+                                       Float(ray.direction.x), Float(ray.direction.y), Float(ray.direction.z))
+        } else {
+            mkw_visionos_spatial_event(id, phase, chirality, false, 0, 0, 0, 0, 0, 0)
         }
     }
 

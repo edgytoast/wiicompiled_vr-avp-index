@@ -96,6 +96,13 @@ bool mkw_visionos_layer_invalidated(void) {
     return xr_visionos_layer_invalidated();
 }
 
+void mkw_visionos_spatial_event(uint64_t event_id, int phase, int chirality, bool has_ray, float origin_x,
+                                float origin_y, float origin_z, float direction_x, float direction_y,
+                                float direction_z) {
+    xr_visionos_spatial_event(event_id, phase, chirality, has_ray, origin_x, origin_y, origin_z, direction_x,
+                              direction_y, direction_z);
+}
+
 bool mkw_visionos_start_game(void) {
     if (g_running.exchange(true, std::memory_order_acq_rel)) {
         SetError("the game is already running");
