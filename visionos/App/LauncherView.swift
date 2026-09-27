@@ -8,6 +8,7 @@ struct LauncherView: View {
     @EnvironmentObject private var model: GameModel
     @Environment(\.openImmersiveSpace) private var openImmersiveSpace
     @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
+    @Environment(\.dismissWindow) private var dismissWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -101,7 +102,10 @@ struct LauncherView: View {
         model.markOpening()
         switch await openImmersiveSpace(id: GameModel.immersiveSpaceID) {
         case .opened:
-            break
+            // Out of the way once the game is on: visionOS only lets the last scene go
+            // after the space has opened, which is now. The game's audio is anchored to
+            // the listener, not this window (GameModel), so it plays on without it.
+            dismissWindow(id: GameModel.launcherWindowID)
         case .userCancelled:
             model.openingFailed("The immersive space was not opened.")
         case .error:

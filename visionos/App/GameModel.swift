@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import AVFAudio
 import CompositorServices
 import Foundation
 import SwiftUI
@@ -42,6 +43,15 @@ final class GameModel: ObservableObject {
     private var watchdog: Timer?
 
     init() {
+        // visionOS anchors an app's audio to its window scene by default, so the game fell
+        // silent when the launcher window closed. The game's sound belongs to the player,
+        // not to a window: anchor it to the listener's front, which outlives every scene.
+        do {
+            try AVAudioSession.sharedInstance().setIntendedSpatialExperience(
+                .headTracked(soundStageSize: .automatic, anchoringStrategy: .front))
+        } catch {
+            lastError = "Could not set up the game's audio: \(error.localizedDescription)"
+        }
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let resources = Bundle.main.resourcePath ?? Bundle.main.bundlePath
         mkw_visionos_set_directories(documents.path, resources)
