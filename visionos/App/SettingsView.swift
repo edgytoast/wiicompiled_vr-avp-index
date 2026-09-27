@@ -291,16 +291,34 @@ private struct HelpText: View {
     }
 }
 
+/// Title and description on the left, the control alone on the right. visionOS draws controls
+/// a little in front of the window's glass, so seen at an angle they drift over whatever lies
+/// next to them; keeping the text out of the control's column is what keeps it readable.
+private struct ControlRow<Control: View>: View {
+    let title: String
+    let help: String?
+    @ViewBuilder let control: () -> Control
+    var body: some View {
+        HStack(alignment: .center, spacing: 20) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                HelpText(text: help)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            control()
+                .fixedSize()
+        }
+        .padding(.vertical, 4)
+    }
+}
+
 private struct ToggleRow: View {
     let title: String
     let help: String?
     @Binding var isOn: Bool
-    // The switch shares a line with the title only; the description gets the full width below
-    // it, as the picker and slider rows do, so a long one never runs under the switch.
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Toggle(title, isOn: $isOn)
-            HelpText(text: help)
+        ControlRow(title: title, help: help) {
+            Toggle(title, isOn: $isOn).labelsHidden()
         }
     }
 }
@@ -313,7 +331,7 @@ private struct ChoiceRow: View {
     /// Shown when the file holds a value the options do not list (selection < 0).
     var custom: String? = nil
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        ControlRow(title: title, help: help) {
             Picker(title, selection: $selection) {
                 ForEach(options.indices, id: \.self) { Text(options[$0]).tag($0) }
                 if let custom, selection < 0 {
@@ -321,7 +339,7 @@ private struct ChoiceRow: View {
                 }
             }
             .pickerStyle(.menu)
-            HelpText(text: help)
+            .labelsHidden()
         }
     }
 }
@@ -335,13 +353,15 @@ private struct SliderRow: View {
     @Binding var value: Double
     /// Written to the file when the slider is let go, not at every step of the drag.
     @State private var dragging: Double?
+    // The text first and the bar last, so nothing lies beneath the bar for it to cover.
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(title)
                 Spacer()
                 Text(format(dragging ?? value)).monospacedDigit().foregroundStyle(.secondary)
             }
+            HelpText(text: help)
             Slider(value: Binding(get: { dragging ?? min(max(value, range.lowerBound), range.upperBound) },
                                   set: { dragging = $0 }),
                    in: range, step: step) { editing in
@@ -350,8 +370,9 @@ private struct SliderRow: View {
                     dragging = nil
                 }
             }
-            HelpText(text: help)
+            .padding(.top, 4)
         }
+        .padding(.vertical, 4)
     }
 }
 
