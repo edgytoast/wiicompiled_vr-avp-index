@@ -215,14 +215,20 @@ Gestures GesturesOf(const HandSample& hand) noexcept {
     return g;
 }
 
-// A hand's gestures with its index pinch, the trigger and select, taken from
-// the system's own pinch recognition rather than the skeleton: pressed when the
-// pinch is released (see the look-and-pinch notes above), for either hand. The
-// other fingers' pinches and the curl still come from the skeleton. The pointer
-// hand reads as present while a pinch is in flight even when ARKit has lost
-// the hand, and once any pinch has aimed the pointer.
+// A hand's gestures. On the virtual screen (menus, the flat-screen race) the
+// index pinch, the trigger and select, comes from the system's own pinch
+// recognition rather than the skeleton: pressed when the pinch is released
+// (see the look-and-pinch notes above), for either hand, so a button is chosen
+// before it is pressed. In an immersive race the skeleton's pinch stands as it
+// is, pressed the moment the fingers meet: there the pinch is an item or a
+// trick, where the delay would only be lag. The pointer hand reads as present
+// while a pinch is in flight even when ARKit has lost the hand, and once any
+// pinch has aimed the pointer.
 Gestures GesturesOfHand(const Session& session, uint32_t hand) noexcept {
     Gestures g = GesturesOf(session.hands[hand]);
+    if (LastFrameImmersive()) {
+        return g;
+    }
     g.pinchIndex = 0.0f;
     const GazePinch pinch = GazePinchNow(hand);
     if (GazeSelectDown(pinch, NowNanos())) {

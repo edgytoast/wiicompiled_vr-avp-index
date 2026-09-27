@@ -163,7 +163,11 @@ pointer is, for 120 ms, and the pointer stays parked there until the next
 pinch. Either hand's pinch works, each with its own state, and the skeleton's
 own index pinch never presses select, so nothing fires before the adjustment.
 A pinch the system cancels presses nothing. Before the first pinch there is no
-pointer.
+pointer. This holds on the virtual screen (menus, the flat-screen race); in an
+immersive race the skeleton's pinch stands as it is and presses at once, since
+there it is an item or a trick and the delay would only be lag. The provider
+tells the two apart by the layers of the last `xrEndFrame`: a projection layer
+means immersive.
 
 That is enough for the menus, the settings panel and, with "Drive with your
 hands", a race. A Bluetooth game controller (SDL3's GameController backend)

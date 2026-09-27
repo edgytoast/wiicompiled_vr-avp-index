@@ -254,6 +254,14 @@ void* xr_visionos_layer_renderer(void) {
 
 bool xr_visionos_layer_invalidated(void) { return Compositor::Get().State() == LayerState::Invalidated; }
 
+namespace mkw::vr::visionos {
+namespace {
+std::atomic_bool g_lastFrameImmersive{false};
+}
+void SetLastFrameImmersive(bool immersive) noexcept { g_lastFrameImmersive.store(immersive, std::memory_order_relaxed); }
+bool LastFrameImmersive() noexcept { return g_lastFrameImmersive.load(std::memory_order_relaxed); }
+} // namespace mkw::vr::visionos
+
 XrResult xr_visionos_swapchain_image_acquire_fence(XrSwapchain swapchain, uint32_t index, void** event,
                                                    uint64_t* value) {
     if (event == nullptr || value == nullptr) {
@@ -1072,6 +1080,9 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEndFrame(XrSession session, const XrFrameEndInf
         }
     }
     if (realized) {
+        SetLastFrameImmersive(std::any_of(composed.begin(), composed.end(), [](const ComposedLayer& layer) {
+            return layer.kind == ComposedLayer::Kind::Projection;
+        }));
         Compositor::Get().EndFrame(composed, alphaBlend);
     }
     return XR_SUCCESS;

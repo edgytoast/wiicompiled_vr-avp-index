@@ -367,6 +367,12 @@ bool HandFrame(const HandSample& hand, uint32_t handIndex, simd_float4x4& worldF
                simd_float4x4& worldFromGrip) noexcept;
 // Whether the hands read as bare hands (khr/simple_controller): a hand tracker exists.
 bool BareHands(const Session& session) noexcept;
+// Whether the last frame the app submitted was an immersive one (a projection
+// layer: a race all around the player) rather than the virtual screen alone
+// (menus, the flat-screen race). Set at xrEndFrame (xr_visionos_runtime.mm);
+// the pinch reads differently in each (GesturesOfHand).
+void SetLastFrameImmersive(bool immersive) noexcept;
+bool LastFrameImmersive() noexcept;
 
 // XR_EXT_hand_tracking (xr_visionos_hand_tracking.mm).
 PFN_xrVoidFunction LookupHandTrackingFunction(const char* name) noexcept;
