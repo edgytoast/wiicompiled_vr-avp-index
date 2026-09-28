@@ -2368,12 +2368,18 @@ void record_frame_telemetry() {
   previousProcessCpu100ns = processCpu100ns;
   previousThreadCpu100ns = threadCpu100ns;
 #endif
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(AURORA_VISIONOS)
   {
-    // `adb shell setprop debug.wiicompiled.fpslog 1` before launch logs the game's rendered frame rate every five
-    // seconds. The headset compositor's own log (logcat tag VrApi) repeats frames, so it cannot show this.
+    // `adb shell setprop debug.wiicompiled.fpslog 1` before launch (on the Vision Pro: the app launched with
+    // `--fpslog`, which sets MKW_FPSLOG=1) logs the game's rendered frame rate every five seconds. The headset
+    // compositor's own log repeats frames, so it cannot show this.
     static const bool fpsLog = [] {
+#if defined(__ANDROID__)
       const bool on = android_debug::property_int("debug.wiicompiled.fpslog", 0) == 1;
+#else
+      const char* value = std::getenv("MKW_FPSLOG");
+      const bool on = value != nullptr && value[0] == '1';
+#endif
       // The same switch turns on the per-pass GPU timestamps reported below the frame-rate line.
       gfx::gpu_timing_set_enabled(on);
       return on;

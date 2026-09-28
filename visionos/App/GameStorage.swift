@@ -46,6 +46,12 @@ enum GameStorage {
     static func exportDirectories() {
         setenv("MKW_APPLE_DATA_DIR", documents.path, 1)
         setenv("MKW_APPLE_RESOURCES_DIR", resources.path, 1)
+        // `--fpslog` (a launch argument, from devicectl or an Xcode scheme) has Aurora log the game's
+        // frame rate and where each frame's time went every five seconds, as the Quest's
+        // debug.wiicompiled.fpslog property does.
+        if CommandLine.arguments.contains("--fpslog") {
+            setenv("MKW_FPSLOG", "1", 1)
+        }
     }
 
     /// Creates the game folder and, when there is none, a first Config.toml with VR on and the

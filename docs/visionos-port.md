@@ -193,16 +193,23 @@ apply as on the desktop. Haptics are no-ops.
   need not be the main thread. Aurora's frame worker stays enabled here
   (`aurora.cpp`), unlike macOS; the headset owns the display.
 - **Guest memory.** The flat guest space is reserved at 480 GiB
-  (`runtime/include/guest_flat_memory.h`). It sat at 16 GiB up to visionOS 26;
-  visionOS 27 maps read-only system regions over 6 to 63 GiB, reserves 64 to
-  448 GiB with no access, and starts the process's own allocations at 448 GiB,
-  leaving 448 to 512 GiB (the entitlement's ceiling) as the only room. When the
-  reservation fails, the fatal message carries the process's map and which
-  bases were free (`ReserveDiagnostics`). `vm_allocate` replaces
+  (`runtime/include/guest_flat_memory.h`); `vm_allocate` replaces
   `mach_vm_allocate`, whose header the SDK refuses; the alias backing files go
   to `TMPDIR` (`guest_flat_memory_macos.cpp`). The app carries the
   `extended-virtual-addressing` and `increased-memory-limit` entitlements
-  (`visionos/App/WiiCompiledVision.entitlements`).
+  (`visionos/App/WiiCompiledVision.entitlements`). The translated code takes
+  the flat path (plain loads and stores at the fixed base): the Darwin backend
+  used to fall back to the checked path (`Memory::Read*`/`Write*`, a bounds
+  check, a page-table lookup and a deferred-read check per access) because
+  Apple Silicon's 16 KiB pages are larger than the Wii's 4 KiB, which cost the
+  video-background menus half their frame rate (28 FPS on the cup select) and
+  slowed every memory-heavy guest routine. The backend now protects deferred
+  EFB-read destinations at 16 KiB granularity and, on the fault the runtime's
+  POSIX handler routes to `HandleAccessViolation`, materializes every pending
+  read sharing the page before reopening it; the MMIO window is `PROT_NONE`
+  and a read there is reported fatally, as elsewhere. The executable-write
+  guard is not implemented (code and data share 16 KiB pages).
+  `MKW_CHECKED_GUEST_MEMORY=1` restores the checked path.
 - **Directories.** The app's `Documents/WiiCompiled` folder holds `Config.toml`,
   `DATA` (the extracted disc), `NAND` and `Logs`; it is visible in the Files
   app and through Finder file sharing (`UIFileSharingEnabled`). Bundled
@@ -339,8 +346,14 @@ runs, so the bridge fills `dvd_root` into the cached config as well as the file
 OpenXR input to the game, to HIDAPI, which it turns off on visionOS, so
 `aurora-main/cmake/AuroraSDL3Patches.cmake` loosens that dependency.
 
-Not done: frame timing measurements, comfort tuning of the projection quad
-depth, the gesture thresholds, `render_scale`. Things to expect to tune first on hardware: the constant depth the
+- Frame timing (`--fpslog` launch argument, Aurora's five-second frame log with
+  GPU pass timings and the GX thread's costliest records): with flat guest
+  memory the cup-select menu went from 28.5 FPS (game thread bound, GPU idle at
+  4.4 ms) to a locked 60, and a Ghost Valley 2 race holds 60 FPS in stereo with
+  a 5 to 6.5 ms GPU span per frame.
+
+Not done: comfort tuning of the projection quad depth, the gesture thresholds,
+`render_scale`. Things to expect to tune first on hardware: the constant depth the
 projection quads are drawn at (3 m in `xr_visionos_compositor.mm`, which sets
 how the compositor reprojects late frames), the gesture thresholds in
 `xr_visionos_input.mm`, and the default `render_scale` (1.0; the M2 is far

@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -20,15 +21,51 @@
 #include <string>
 #include <vector>
 
+#include "memory_access.h"
+#include "runtime_log.h"
+
+// Flat guest memory on Darwin (macOS and visionOS).
+//
+// The translated code reads and writes guest memory through the flat view at
+// kFixedFlatGuestBase with plain loads and stores. Three things the other
+// backends catch with page protections and a fault handler are handled here
+// too, on Apple Silicon's 16 KiB pages:
+//   - deferred EFB reads: the destination of a pending copy is made PROT_NONE
+//     (rounded out to host pages) and materialized when first touched;
+//   - MMIO reads: the 32 MiB window is PROT_NONE, and a touch is reported
+//     fatally, as elsewhere (writes there are caught inline, FlatWriteNeedsPolicy);
+//   - unmapped guest addresses read as zero and swallow writes: the 4 GiB
+//     reservation is demand-zero memory, so there is nothing to trap.
+// The executable-write guard (a diagnostic for mods patching untranslated code)
+// is not implemented here: a 16 KiB page holds code and data side by side.
+// MKW_CHECKED_GUEST_MEMORY=1 in the environment restores the checked path
+// (every access through Memory::Read*/Write*), which is what this backend
+// always used before and is several times slower for memory-heavy guest code.
+
 namespace GuestFlat {
 bool g_requiresCheckedAccess = false;
 namespace {
 struct Mapping { uint32_t base; uint64_t size; uint8_t* host; };
+struct GuardedRange { uint32_t start; uint32_t end; };
 std::mutex g_mutex;
 std::vector<Mapping> g_mappings;
 std::vector<RegionRequest> g_layout;
+std::vector<GuardedRange> g_deferred; // under g_mutex
 uint8_t* g_base = nullptr;
 bool g_active = false;
+uint64_t g_hostPage = 0x4000;
+std::atomic<uint32_t> g_countEfb{0};
+std::atomic<uint32_t> g_countMmio{0};
+
+constexpr uint32_t kMmioStart = 0xCC000000u;
+constexpr uint32_t kMmioSize = 0x02000000u;
+
+uint64_t PageDown(uint64_t address) { return address & ~(g_hostPage - 1); }
+uint64_t PageUp(uint64_t address) { return (address + g_hostPage - 1) & ~(g_hostPage - 1); }
+bool Overlaps(uint64_t aStart, uint64_t aEnd, uint64_t bStart, uint64_t bEnd) { return aStart < bEnd && bStart < aEnd; }
+bool Protect(uint64_t first, uint64_t last, int protection) {
+    return mprotect(g_base + first, static_cast<size_t>(last - first), protection) == 0;
+}
 
 uint64_t Offset(const RegionRequest& r) {
     if (r.backing == Backing::Mem1) return r.base & 0x1fffffffu;
@@ -143,7 +180,10 @@ std::string ReserveFailureMessage(kern_return_t failure) {
 bool IsActive() { return g_active; }
 void Initialize(const std::vector<RegionRequest>& regions) {
     std::lock_guard lock(g_mutex);
-    g_requiresCheckedAccess = static_cast<size_t>(getpagesize()) > kGuestPageSize;
+    g_hostPage = static_cast<uint64_t>(getpagesize());
+    // The flat path is the default whatever the page size (see the notes at the top).
+    const char* checked = std::getenv("MKW_CHECKED_GUEST_MEMORY");
+    g_requiresCheckedAccess = checked != nullptr && checked[0] == '1';
     if (g_active) { if (!Same(g_layout, regions)) throw std::runtime_error("flat guest layout cannot be remapped"); return; }
 #if defined(MKW_PLATFORM_VISIONOS)
     vm_address_t address = kFixedFlatGuestBase;
@@ -177,13 +217,110 @@ void Initialize(const std::vector<RegionRequest>& regions) {
         g_mappings.push_back({r.base, r.size, host});
     }
     for (auto& s : stores) close(s.fd);
+    if (!g_requiresCheckedAccess) {
+        // Hardware registers have no backing store: a read there is a missing HLE hook,
+        // reported from the fault handler rather than answered with a zero that would hang
+        // the caller in a status poll.
+        Protect(kMmioStart, static_cast<uint64_t>(kMmioStart) + kMmioSize, PROT_NONE);
+    }
     g_layout = regions; g_active = true;
+    RT_LOG(RT_TAG_MEMORY) << "flat guest memory: " << (g_requiresCheckedAccess ? "checked" : "flat")
+                          << " access, host page " << (g_hostPage >> 10) << " KiB" << std::endl;
 }
 uint8_t* HostPointer(uint32_t a) { for (const auto& m : g_mappings) if (a >= m.base && uint64_t(a - m.base) < m.size) return m.host + (a - m.base); return nullptr; }
-void ProtectDeferredRange(uint32_t, size_t) {}
-void UnprotectDeferredRange(uint32_t, size_t) {}
+
+void ProtectDeferredRange(uint32_t address, size_t length) {
+    if (RequiresCheckedAccess() || !g_active || length == 0) return;
+    const uint64_t end = static_cast<uint64_t>(address) + length;
+    if (end > kGuestSpaceSize) return;
+    std::lock_guard lock(g_mutex);
+    // Rounded out to host pages: the neighbours in the same page fault too, and the
+    // handler materializes every deferred read of the page, so nothing stale is served.
+    if (!Protect(PageDown(address), PageUp(end), PROT_NONE)) return;
+    g_deferred.push_back(GuardedRange{address, static_cast<uint32_t>(end)});
+}
+
+void UnprotectDeferredRange(uint32_t address, size_t length) {
+    if (RequiresCheckedAccess() || !g_active || length == 0) return;
+    std::lock_guard lock(g_mutex);
+    const uint64_t end = static_cast<uint64_t>(address) + length;
+    const auto it = std::find_if(g_deferred.begin(), g_deferred.end(), [&](const GuardedRange& range) {
+        return range.start == address && range.end == static_cast<uint32_t>(end);
+    });
+    if (it == g_deferred.end()) return;
+    g_deferred.erase(it);
+    // The pages open again unless another pending range still shares one of them.
+    const uint64_t first = PageDown(address);
+    const uint64_t last = PageUp(end);
+    const bool shared = std::any_of(g_deferred.begin(), g_deferred.end(), [&](const GuardedRange& range) {
+        return Overlaps(first, last, PageDown(range.start), PageUp(range.end));
+    });
+    if (!shared) Protect(first, last, PROT_READ | PROT_WRITE);
+}
+
 void RegisterExecutableRange(uint32_t, uint32_t) {}
-FaultCounters Counters() { return {}; }
-void LogFaultSummary() noexcept {}
-bool HandleAccessViolation(void*, bool) noexcept { return false; }
+
+FaultCounters Counters() {
+    FaultCounters counters;
+    counters.efb = g_countEfb.load(std::memory_order_relaxed);
+    counters.mmio = g_countMmio.load(std::memory_order_relaxed);
+    return counters;
+}
+
+void LogFaultSummary() noexcept {
+    static std::atomic<bool> reported{false};
+    if (reported.exchange(true, std::memory_order_relaxed)) return;
+    const FaultCounters counters = Counters();
+    RT_LOG(RT_TAG_MEMORY) << "shutdown summary: efb=" << counters.efb << " mmio=" << counters.mmio << std::endl;
+}
+
+bool HandleAccessViolation(void* faultAddress, bool isWrite) noexcept {
+    if (!g_active || g_base == nullptr || faultAddress == nullptr) return false;
+    const uintptr_t fault = reinterpret_cast<uintptr_t>(faultAddress);
+    const uintptr_t base = reinterpret_cast<uintptr_t>(g_base);
+    if (fault < base || fault - base >= kGuestSpaceSize) return false;
+    const uint32_t guestAddress = static_cast<uint32_t>(fault - base);
+
+    // A deferred (EFB) read. The page is opened, with every pending range that shares
+    // it (and the pages those spill into, and so on), then all of it is materialized.
+    uint64_t first = PageDown(guestAddress);
+    uint64_t last = first + g_hostPage;
+    bool covered = false;
+    {
+        std::lock_guard lock(g_mutex);
+        for (bool grew = true; grew;) {
+            grew = false;
+            for (auto it = g_deferred.begin(); it != g_deferred.end();) {
+                const uint64_t rangeFirst = PageDown(it->start);
+                const uint64_t rangeLast = PageUp(it->end);
+                if (!Overlaps(first, last, rangeFirst, rangeLast)) { ++it; continue; }
+                covered = true;
+                if (rangeFirst < first) { first = rangeFirst; grew = true; }
+                if (rangeLast > last) { last = rangeLast; grew = true; }
+                it = g_deferred.erase(it);
+            }
+        }
+        if (covered) Protect(first, last, PROT_READ | PROT_WRITE);
+    }
+    if (covered) {
+        g_countEfb.fetch_add(1, std::memory_order_relaxed);
+        try {
+            MemoryInline::ResolveDeferredReads(static_cast<uint32_t>(first), static_cast<size_t>(last - first));
+        } catch (const std::exception& error) {
+            RT_LOG(RT_TAG_MEMORY) << "FATAL deferred read materialization failed at 0x" << std::hex << guestAddress
+                                  << std::dec << ": " << error.what() << std::endl;
+            std::abort();
+        }
+        return true;
+    }
+
+    if (guestAddress >= kMmioStart && guestAddress - kMmioStart < kMmioSize) {
+        g_countMmio.fetch_add(1, std::memory_order_relaxed);
+        RT_LOG(RT_TAG_MEMORY) << "FATAL MMIO " << (isWrite ? "write" : "read") << " reached the flat memory path at 0x"
+                              << std::hex << std::uppercase << guestAddress << std::dec
+                              << " (hardware registers have no backing store; add HLE for this device)" << std::endl;
+        std::abort();
+    }
+    return false;
+}
 } // namespace GuestFlat
