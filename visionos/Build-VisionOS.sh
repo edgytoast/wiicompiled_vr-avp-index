@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Builds WiiCompiled Vision, the Apple Vision Pro app, from an existing translation.
 #
-#   visionos/Build-VisionOS.sh [--product base|retro_rewind] [--team TEAMID] [--simulator]
-#                              [--build-dir DIR] [--dawn-package FILE] [--jobs N]
-#                              [--install] [--open]
+#   visionos/Build-VisionOS.sh [--team TEAMID] [--retro-rewind-dir DIR | --without-retro-rewind]
+#                              [--simulator] [--build-dir DIR] [--dawn-package FILE]
+#                              [--jobs N] [--install] [--open]
 #
 # Steps: Dawn for the visionOS SDK (Build-VisionOSDawn.sh, cached), the Xcode
 # project (visionos/CMakeLists.txt, which pulls the runtime in), the build, and
@@ -16,13 +16,20 @@
 # behind. `generate-data-init --target-os macos` is the right flavour, but the
 # runtime's CMake rewrites the Windows/Linux blob assembly for Mach-O too.
 #
+# Retro Rewind rides along whenever the translation includes it (step C of that
+# guide, run against a RetroRewind6 folder): the app then embeds both games and
+# the launcher offers the choice. Pass that folder with --retro-rewind-dir so the
+# app knows which pack version it was made from and installs that one on the
+# headset; --without-retro-rewind leaves the mod out of the app.
+#
 # Signing: a free Apple ID's personal team can sign for a headset paired with
 # this Mac (Xcode > Settings > Accounts). Pass its id with --team, or leave it
 # out and pick the team once in the generated project; CMake remembers the value.
 set -euo pipefail
 
 repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-product="base"
+retro_rewind="AUTO"
+retro_rewind_dir="${MKW_VISIONOS_RETRO_REWIND_DIR:-}"
 team="${MKW_VISIONOS_TEAM:-}"
 simulator=0
 build_dir="${repo_root}/build-visionos"
@@ -33,7 +40,8 @@ open_project=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --product) product="${2:?}"; shift 2 ;;
+        --retro-rewind-dir) retro_rewind_dir="${2:?}"; retro_rewind="ON"; shift 2 ;;
+        --without-retro-rewind) retro_rewind="OFF"; shift ;;
         --team) team="${2:?}"; shift 2 ;;
         --simulator) simulator=1; shift ;;
         --build-dir) build_dir="${2:?}"; shift 2 ;;
@@ -41,11 +49,21 @@ while [[ $# -gt 0 ]]; do
         --jobs) jobs="${2:?}"; shift 2 ;;
         --install) install=1; shift ;;
         --open) open_project=1; shift ;;
-        -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
-case "${product}" in base|retro_rewind) ;; *) echo "--product must be base or retro_rewind" >&2; exit 2 ;; esac
+if [[ -n "${retro_rewind_dir}" ]]; then
+    # The pack itself or the folder holding it, as local-build-macos.command accepts.
+    if [[ ! -f "${retro_rewind_dir}/Binaries/Code.pul" && -f "${retro_rewind_dir}/RetroRewind6/Binaries/Code.pul" ]]; then
+        retro_rewind_dir="${retro_rewind_dir}/RetroRewind6"
+    fi
+    if [[ ! -f "${retro_rewind_dir}/Binaries/Code.pul" ]]; then
+        echo "ERROR: ${retro_rewind_dir} is not a RetroRewind6 folder (no Binaries/Code.pul)" >&2
+        exit 1
+    fi
+    retro_rewind_dir="$(CDPATH= cd -- "${retro_rewind_dir}" && pwd)"
+fi
 
 if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app/Contents/Developer ]]; then
     export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
@@ -77,7 +95,8 @@ cmake_args=(
     -DCMAKE_OSX_ARCHITECTURES=arm64
     -DCMAKE_OSX_DEPLOYMENT_TARGET=2.0
     "-DAURORA_DAWN_PACKAGE_URL=file://${dawn_package}"
-    "-DMKW_VISIONOS_PRODUCT=${product}"
+    "-DMKW_VISIONOS_RETRO_REWIND=${retro_rewind}"
+    "-DMKW_VISIONOS_RETRO_REWIND_ROOT=${retro_rewind_dir}"
     -DAURORA_SDL3_PROVIDER=vendor
 )
 if [[ -n "${team}" ]]; then cmake_args+=("-DMKW_VISIONOS_TEAM=${team}"); fi

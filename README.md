@@ -193,7 +193,9 @@ can be built as its **own static profile**: instead of applying `Code.pul` as ru
 the Kamek/Pulsar code is statically translated together with the base game into a separate native
 executable.
 
-Wheel Wizard drives this too.
+Wheel Wizard drives this too. On the Quest and the Apple Vision Pro the launcher's own game
+picker does the same: **Mario Kart Wii** or **Retro Rewind**, with the pack downloaded from
+Retro Rewind's server on the headset.
 
 ## Building from source
 

@@ -29,16 +29,31 @@ final class GameModel: ObservableObject {
     @Published var immersionStyle: any ImmersionStyle = .mixed
     @Published private(set) var lastError = ""
 
+    /// The game to play, as the Quest and PC launchers offer it: the unmodded game or Retro
+    /// Rewind. Remembered across launches; only offered when the app embeds both.
+    @Published var selectedGame: GameChoice {
+        didSet {
+            UserDefaults.standard.set(selectedGame.rawValue, forKey: GameModel.selectedGameKey)
+            if selectedGame == .retroRewind { refreshPack() }
+        }
+    }
+    /// What Retro Rewind's pack looks like on disk, and the install or update under way.
+    @Published private(set) var packStatus: RetroRewindPack.Status = .notInstalled
+    @Published private(set) var packProgress: RetroRewindPack.Progress?
+    @Published private(set) var packError = ""
+    /// The pack version the server offers this build, once asked; nil when up to date or unknown.
+    @Published private(set) var packUpdate: String?
+    private var packTask: Task<Void, Never>?
+    private static let selectedGameKey = "selectedGame"
+
     /// The game folder in the app's Documents directory, as the Files app shows it.
     let gameDirectory: String
     let configPath: String
     let discDirectory: String
-    /// The game this build carries (MKW_VISIONOS_PRODUCT in visionos/CMakeLists.txt).
-    #if MKW_VISIONOS_RETRO_REWIND
-    let gameTitle = "Retro Rewind"
-    #else
-    let gameTitle = "WiiCompiled"
-    #endif
+    let packDirectory: String
+    var gameTitle: String { selectedGame.title }
+    /// Whether the picker has anything to pick: the app was built with the mod translated.
+    let offersRetroRewind: Bool
 
     private var watchdog: Timer?
 
@@ -59,7 +74,12 @@ final class GameModel: ObservableObject {
         gameDirectory = GameStorage.gameDirectory.path
         configPath = GameStorage.configFile.path
         discDirectory = GameStorage.discDirectory.path
+        packDirectory = RetroRewindPack.directory.path
+        offersRetroRewind = RetroRewindBuild.available && GameLibrary.isEmbedded(GameChoice.retroRewind.frameworkName)
+        let remembered = GameChoice(rawValue: UserDefaults.standard.string(forKey: GameModel.selectedGameKey) ?? "")
+        selectedGame = offersRetroRewind ? (remembered ?? .base) : .base
         refreshDisc()
+        if selectedGame == .retroRewind { refreshPack() }
     }
 
     func refreshDisc() {
@@ -75,7 +95,7 @@ final class GameModel: ObservableObject {
             return false
         }
         do {
-            let library = try GameLibrary.load()
+            let library = try GameLibrary.load(selectedGame.frameworkName)
             library.setDirectories(data: GameStorage.documents.path, resources: GameStorage.resources.path)
             return true
         } catch {
@@ -85,8 +105,57 @@ final class GameModel: ObservableObject {
     }
 
     var canStart: Bool {
-        if case .idle = phase { return discPresent }
+        guard case .idle = phase, discPresent else { return false }
+        return selectedGame == .base || packReady
+    }
+
+    // MARK: Retro Rewind's pack
+
+    var packReady: Bool {
+        if case .ready = packStatus { return packTask == nil }
         return false
+    }
+
+    var packBusy: Bool { packTask != nil }
+
+    /// Rereads the pack on disk (the Code.pul hash is 1.7 MB of work, so off the main actor)
+    /// and asks the server what it offers this build.
+    func refreshPack() {
+        guard offersRetroRewind, packTask == nil else { return }
+        Task { [weak self] in
+            let status = await Task.detached(priority: .userInitiated) { RetroRewindPack.status }.value
+            let update = try? await RetroRewindPack.availableUpdate()
+            self?.packStatus = status
+            self?.packUpdate = update
+        }
+    }
+
+    /// Installs or updates the pack from Retro Rewind's server; the Play tab shows the progress.
+    func installPack() {
+        guard packTask == nil else { return }
+        packError = ""
+        packProgress = RetroRewindPack.Progress(title: "Preparing", fraction: nil, detail: "")
+        // The model lives as long as the app; the task holds it until the install ends.
+        packTask = Task {
+            do {
+                // Reported from URLSession's queue and the unpacking task; shown on the main actor.
+                try await RetroRewindPack.install { progress in
+                    Task { @MainActor in self.packProgress = progress }
+                }
+            } catch is CancellationError {
+                // The player stopped it; a partial base install was staged and is gone, a
+                // partial update runs again next time.
+            } catch {
+                packError = error.localizedDescription
+            }
+            packTask = nil
+            packProgress = nil
+            refreshPack()
+        }
+    }
+
+    func cancelPackInstall() {
+        packTask?.cancel()
     }
 
     func markOpening() {
@@ -186,5 +255,34 @@ final class GameModel: ObservableObject {
     var wantsRoom: Bool {
         get { immersionStyle is MixedImmersionStyle }
         set { immersionStyle = newValue ? .mixed : .full }
+    }
+}
+
+/// The games the app can carry, one embedded framework each (runtime/cmake/PublicProducts.cmake).
+enum GameChoice: String, CaseIterable, Identifiable {
+    case base
+    case retroRewind = "retro_rewind"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .base: return "WiiCompiled"
+        case .retroRewind: return "Retro Rewind"
+        }
+    }
+
+    var pickerTitle: String {
+        switch self {
+        case .base: return "Mario Kart Wii"
+        case .retroRewind: return "Retro Rewind"
+        }
+    }
+
+    var frameworkName: String {
+        switch self {
+        case .base: return "WiiCompiledGame"
+        case .retroRewind: return "RetroRewindGame"
+        }
     }
 }

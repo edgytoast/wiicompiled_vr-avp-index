@@ -30,6 +30,25 @@ private struct PlayView: View {
             Text("\(model.gameTitle) for Apple Vision Pro")
                 .font(.largeTitle.bold())
 
+            if model.offersRetroRewind {
+                GroupBox("Game") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Picker("Game", selection: $model.selectedGame) {
+                            ForEach(GameChoice.allCases) { choice in
+                                Text(choice.pickerTitle).tag(choice)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .disabled(model.phase != .idle)
+                        Text("Retro Rewind is the community's expansion: the retro tracks, custom tracks and its own online play. It needs the extracted disc as well, plus its pack below.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
             GroupBox("Game files") {
                 VStack(alignment: .leading, spacing: 8) {
                     Label(model.discPresent ? "Extracted disc found" : "No extracted disc yet",
@@ -44,6 +63,10 @@ private struct PlayView: View {
                         .buttonStyle(.bordered)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if model.selectedGame == .retroRewind {
+                RetroRewindPackView()
             }
 
             GroupBox("Headset") {
@@ -130,6 +153,98 @@ private struct PlayView: View {
             model.openingFailed("visionOS could not open the immersive space.")
         @unknown default:
             model.openingFailed("visionOS could not open the immersive space.")
+        }
+    }
+}
+
+/// Retro Rewind's pack: what is installed, what the server offers this build, and the
+/// download or update with its progress (GameModel, RetroRewindPack).
+private struct RetroRewindPackView: View {
+    @EnvironmentObject private var model: GameModel
+
+    var body: some View {
+        GroupBox("Retro Rewind pack") {
+            VStack(alignment: .leading, spacing: 8) {
+                statusLabel
+                Text(description)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                PathRow(title: "Pack", path: model.packDirectory)
+
+                if let progress = model.packProgress {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(progress.title).font(.callout.bold())
+                            Spacer()
+                            Text(progress.detail).font(.callout).foregroundStyle(.secondary)
+                        }
+                        if let fraction = progress.fraction {
+                            ProgressView(value: fraction)
+                        } else {
+                            ProgressView()
+                        }
+                    }
+                    .padding(.top, 4)
+                }
+
+                if !model.packError.isEmpty {
+                    Label(model.packError, systemImage: "xmark.octagon.fill").foregroundStyle(.red)
+                }
+
+                HStack {
+                    if model.packBusy {
+                        Button("Cancel", role: .cancel) { model.cancelPackInstall() }
+                            .buttonStyle(.bordered)
+                    } else {
+                        if let action = actionTitle {
+                            Button(action) { model.installPack() }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(model.phase != .idle)
+                        }
+                        Button("Check again") { model.refreshPack() }
+                            .buttonStyle(.bordered)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .onAppear { model.refreshPack() }
+    }
+
+    @ViewBuilder
+    private var statusLabel: some View {
+        switch model.packStatus {
+        case .notInstalled:
+            Label("No Retro Rewind pack yet", systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+        case .ready(let version):
+            if let update = model.packUpdate {
+                Label("Retro Rewind \(version) installed; \(update) is available", systemImage: "arrow.down.circle.fill")
+                    .foregroundStyle(.blue)
+            } else {
+                Label("Retro Rewind \(version) installed", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+            }
+        case .mismatch(let version):
+            Label("Retro Rewind \(version) does not match this app", systemImage: "xmark.octagon.fill").foregroundStyle(.red)
+        }
+    }
+
+    private var description: String {
+        let built = RetroRewindBuild.packVersion.isEmpty ? "" : " This app was built for Retro Rewind \(RetroRewindBuild.packVersion), so the pack stays at that version until the app is rebuilt."
+        switch model.packStatus {
+        case .notInstalled:
+            return "The pack (about 2 GB: tracks, characters, menus) is downloaded from Retro Rewind's own server into the folder below; it is not part of this app. Downloading takes a while and needs about 5 GB free." + built
+        case .ready:
+            return "The pack is what the modded game reads next to the extracted disc." + built
+        case .mismatch:
+            return "The pack's Binaries/Code.pul is not the one this app's Retro Rewind was translated from, and the game cannot run on it. Rebuild the app from this pack (visionos/Build-VisionOS.sh with the RetroRewind6 folder), or remove the folder below with the Files app and download the pack again." + built
+        }
+    }
+
+    private var actionTitle: String? {
+        switch model.packStatus {
+        case .notInstalled: return "Download Retro Rewind"
+        case .ready: return model.packUpdate.map { "Update to \($0)" }
+        case .mismatch: return nil
         }
     }
 }

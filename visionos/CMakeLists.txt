@@ -2,8 +2,9 @@
 #
 # One Xcode project (the only generator that signs, embeds Swift and produces a
 # visionOS bundle) holding the runtime tree (../runtime, which on visionOS
-# yields the products as frameworks) and this app, which embeds one product,
-# loads it with dlopen when the player presses Play and drives it through
+# yields the products as frameworks) and this app, which embeds the products
+# (the base game, and Retro Rewind when translated), loads the chosen one with
+# dlopen when the player presses Play and drives it through
 # runtime/include/platform/visionos/visionos_host.h.
 #
 #   cmake -S visionos -B build-visionos -G Xcode \
@@ -36,8 +37,9 @@ set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 
 project(WiiCompiledVision LANGUAGES C CXX OBJC OBJCXX Swift ASM)
 
-set(MKW_VISIONOS_PRODUCT base CACHE STRING "Which game the app carries: base (WiiCompiled) or retro_rewind")
-set_property(CACHE MKW_VISIONOS_PRODUCT PROPERTY STRINGS base retro_rewind)
+set(MKW_VISIONOS_RETRO_REWIND AUTO CACHE STRING "Carry Retro Rewind next to the base game: AUTO (when the translation has it), ON or OFF")
+set_property(CACHE MKW_VISIONOS_RETRO_REWIND PROPERTY STRINGS AUTO ON OFF)
+set(MKW_VISIONOS_RETRO_REWIND_ROOT "" CACHE PATH "The RetroRewind6 folder the mod was translated from; its version.txt tells the launcher which pack to install")
 set(MKW_VISIONOS_TEAM "" CACHE STRING "Apple developer team id for automatic signing (empty: sign in Xcode)")
 set(MKW_VISIONOS_BUNDLE_ID "org.wiicompiled.vision" CACHE STRING "Bundle identifier of the app")
 set(MKW_VISIONOS_APP_NAME "WiiCompiled Vision" CACHE STRING "Name shown on the Home View")
@@ -61,22 +63,61 @@ set(PNG_FRAMEWORK OFF CACHE BOOL "" FORCE)
 set(MKW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../runtime" runtime)
 
-if(MKW_VISIONOS_PRODUCT STREQUAL "retro_rewind")
-    if(NOT TARGET RetroRewind)
-        message(FATAL_ERROR "MKW_VISIONOS_PRODUCT=retro_rewind but the translation has no Retro Rewind shards")
+# The games the app carries, one framework each; the launcher's game picker loads the chosen
+# one at Play. Retro Rewind exists when the translation ran with the mod (docs/building-macos.md,
+# step C, gives generated/build_shards a RetroRewind target).
+set(MKW_VISIONOS_GAME_TARGETS WiiCompiled)
+if(MKW_VISIONOS_RETRO_REWIND STREQUAL "AUTO")
+    if(TARGET RetroRewind)
+        set(MKW_VISIONOS_WITH_RETRO_REWIND ON)
+    else()
+        set(MKW_VISIONOS_WITH_RETRO_REWIND OFF)
     endif()
-    set(MKW_VISIONOS_GAME_TARGET RetroRewind)
-    set(MKW_VISIONOS_GAME_TITLE "Retro Rewind")
-    set(MKW_VISIONOS_SWIFT_CONDITIONS "MKW_VISIONOS_RETRO_REWIND")
-elseif(MKW_VISIONOS_PRODUCT STREQUAL "base")
-    set(MKW_VISIONOS_GAME_TARGET WiiCompiled)
-    set(MKW_VISIONOS_GAME_TITLE "WiiCompiled")
-    set(MKW_VISIONOS_SWIFT_CONDITIONS "")
+elseif(MKW_VISIONOS_RETRO_REWIND)
+    if(NOT TARGET RetroRewind)
+        message(FATAL_ERROR "MKW_VISIONOS_RETRO_REWIND=ON but the translation has no Retro Rewind shards")
+    endif()
+    set(MKW_VISIONOS_WITH_RETRO_REWIND ON)
 else()
-    message(FATAL_ERROR "MKW_VISIONOS_PRODUCT must be base or retro_rewind")
+    set(MKW_VISIONOS_WITH_RETRO_REWIND OFF)
+endif()
+
+# The translated mod is bound to one Code.pul (the translator refuses to reuse a base translation
+# made without it), and the headset cannot retranslate the way the Quest and PC launchers rebuild.
+# So the app records which pack it was made from: the launcher installs that version of the pack
+# and refuses a pack whose Code.pul differs. The hash comes from the copy the translator consumed;
+# the version from the pack folder when the configure names it.
+set(MKW_VISIONOS_RR_AVAILABLE_SWIFT false)
+set(MKW_VISIONOS_RR_VERSION "")
+set(MKW_VISIONOS_RR_CODE_PUL_SHA256 "")
+if(MKW_VISIONOS_WITH_RETRO_REWIND)
+    list(APPEND MKW_VISIONOS_GAME_TARGETS RetroRewind)
+    set(MKW_VISIONOS_RR_AVAILABLE_SWIFT true)
+    set(_rr_code_pul "${CMAKE_CURRENT_SOURCE_DIR}/../PulsarPacks/completed/RetroRewind/RetroRewind6/Binaries/Code.pul")
+    if(MKW_VISIONOS_RETRO_REWIND_ROOT)
+        if(EXISTS "${MKW_VISIONOS_RETRO_REWIND_ROOT}/Binaries/Code.pul")
+            set(_rr_code_pul "${MKW_VISIONOS_RETRO_REWIND_ROOT}/Binaries/Code.pul")
+        endif()
+        if(EXISTS "${MKW_VISIONOS_RETRO_REWIND_ROOT}/version.txt")
+            file(STRINGS "${MKW_VISIONOS_RETRO_REWIND_ROOT}/version.txt" _rr_version_lines LIMIT_COUNT 1)
+            list(GET _rr_version_lines 0 MKW_VISIONOS_RR_VERSION)
+            string(STRIP "${MKW_VISIONOS_RR_VERSION}" MKW_VISIONOS_RR_VERSION)
+        endif()
+    endif()
+    if(EXISTS "${_rr_code_pul}")
+        file(SHA256 "${_rr_code_pul}" MKW_VISIONOS_RR_CODE_PUL_SHA256)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_rr_code_pul}")
+    else()
+        message(WARNING "No Code.pul at ${_rr_code_pul}: the launcher cannot check the installed pack against this build")
+    endif()
+    if(NOT MKW_VISIONOS_RR_VERSION)
+        message(STATUS "Retro Rewind pack version unknown (set MKW_VISIONOS_RETRO_REWIND_ROOT); the launcher will install the newest pack")
+    endif()
 endif()
 
 set(MKW_VISIONOS_APP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/App")
+set(MKW_VISIONOS_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated-sources")
+configure_file("${MKW_VISIONOS_APP_DIR}/RetroRewindBuild.swift.in" "${MKW_VISIONOS_GENERATED_DIR}/RetroRewindBuild.swift" @ONLY)
 set(MKW_VISIONOS_APP_SOURCES
     "${MKW_VISIONOS_APP_DIR}/WiiCompiledVisionApp.swift"
     "${MKW_VISIONOS_APP_DIR}/GameModel.swift"
@@ -85,7 +126,10 @@ set(MKW_VISIONOS_APP_SOURCES
     "${MKW_VISIONOS_APP_DIR}/GameLibrary.swift"
     "${MKW_VISIONOS_APP_DIR}/TomlConfig.swift"
     "${MKW_VISIONOS_APP_DIR}/GameStorage.swift"
-    "${MKW_VISIONOS_APP_DIR}/SettingsView.swift")
+    "${MKW_VISIONOS_APP_DIR}/SettingsView.swift"
+    "${MKW_VISIONOS_APP_DIR}/RetroRewindPack.swift"
+    "${MKW_VISIONOS_APP_DIR}/ZipArchive.swift"
+    "${MKW_VISIONOS_GENERATED_DIR}/RetroRewindBuild.swift")
 
 add_executable(WiiCompiledVision MACOSX_BUNDLE ${MKW_VISIONOS_APP_SOURCES})
 set_target_properties(WiiCompiledVision PROPERTIES
@@ -113,15 +157,14 @@ set_target_properties(WiiCompiledVision PROPERTIES
     XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${MKW_VISIONOS_APP_DIR}/WiiCompiledVision.entitlements"
     XCODE_ATTRIBUTE_DEAD_CODE_STRIPPING YES
     XCODE_ATTRIBUTE_SWIFT_OPTIMIZATION_LEVEL "-O"
-    XCODE_ATTRIBUTE_SWIFT_ACTIVE_COMPILATION_CONDITIONS "${MKW_VISIONOS_SWIFT_CONDITIONS}"
     XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS NO)
-# The game is not linked: it is a framework (runtime/cmake/PublicProducts.cmake) embedded in the
-# app and loaded with dlopen when the player presses Play (visionos/App/GameLibrary.swift), so
-# the runtime's static initialisers read the Config.toml the launcher's settings page wrote.
-# Embedding signs it with the app's identity.
-add_dependencies(WiiCompiledVision ${MKW_VISIONOS_GAME_TARGET})
+# The games are not linked: each is a framework (runtime/cmake/PublicProducts.cmake) embedded in
+# the app, and the chosen one is loaded with dlopen when the player presses Play
+# (visionos/App/GameLibrary.swift), so the runtime's static initialisers read the Config.toml the
+# launcher's settings page wrote. Embedding signs them with the app's identity.
+add_dependencies(WiiCompiledVision ${MKW_VISIONOS_GAME_TARGETS})
 set_target_properties(WiiCompiledVision PROPERTIES
-    XCODE_EMBED_FRAMEWORKS ${MKW_VISIONOS_GAME_TARGET}
+    XCODE_EMBED_FRAMEWORKS "${MKW_VISIONOS_GAME_TARGETS}"
     XCODE_EMBED_FRAMEWORKS_CODE_SIGN_ON_COPY ON
     XCODE_EMBED_FRAMEWORKS_REMOVE_HEADERS_ON_COPY ON
     XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS "@executable_path/Frameworks")
@@ -147,4 +190,8 @@ set_source_files_properties(${MKW_VISIONOS_BUNDLED_RESOURCES} PROPERTIES
     MACOSX_PACKAGE_LOCATION Resources
     HEADER_FILE_ONLY ON)
 
-message(STATUS "visionOS app: ${MKW_VISIONOS_APP_NAME} carrying ${MKW_VISIONOS_GAME_TITLE} (${MKW_VISIONOS_GAME_TARGET})")
+if(MKW_VISIONOS_WITH_RETRO_REWIND)
+    message(STATUS "visionOS app: ${MKW_VISIONOS_APP_NAME} carrying WiiCompiled and Retro Rewind (pack ${MKW_VISIONOS_RR_VERSION}, Code.pul ${MKW_VISIONOS_RR_CODE_PUL_SHA256})")
+else()
+    message(STATUS "visionOS app: ${MKW_VISIONOS_APP_NAME} carrying WiiCompiled")
+endif()

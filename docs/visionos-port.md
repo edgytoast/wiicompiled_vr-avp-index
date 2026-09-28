@@ -176,17 +176,38 @@ apply as on the desktop. Haptics are no-ops.
 
 ### Platform glue
 
-- **The game is a framework loaded at Play.** The products are
+- **The games are frameworks loaded at Play.** The products are
   `WiiCompiledGame.framework` and `RetroRewindGame.framework`
-  (`runtime/cmake/PublicProducts.cmake`), embedded and signed with the app. The
-  app does not link them: `visionos/App/GameLibrary.swift` loads the framework
-  with `dlopen` when the player presses Play and looks the C bridge up by name
+  (`runtime/cmake/PublicProducts.cmake`), both embedded and signed with the app
+  when the translation includes the mod. The app does not link them:
+  `visionos/App/GameLibrary.swift` loads the chosen one with `dlopen` when the
+  player presses Play and looks the C bridge up by name
   (`runtime/include/platform/visionos/visionos_host.h`), as the Quest launcher
   loads `libmain.so`. That order matters: dozens of the runtime's globals read
   `Config.toml` in their static initialisers, which run when the framework
   loads, so the launcher's Settings tab has to have written the file first.
   `main()` becomes `mkw_runtime_main`, called on a 64 MiB game thread by the
-  bridge in `runtime/src/platform/visionos/visionos_host.mm`.
+  bridge in `runtime/src/platform/visionos/visionos_host.mm`. One process
+  holds one game (they define the same runtime); switching means relaunching.
+- **Retro Rewind and its pack.** The Play tab's picker (`GameChoice`,
+  `GameModel.swift`) chooses the game, remembered in `UserDefaults`. The pack
+  the modded game reads (`[paths] retro_rewind_root = "RetroRewind6"`, next
+  to `DATA`) is fetched by `visionos/App/RetroRewindPack.swift`, a port of the
+  Quest's `RetroRewindPack.kt`: Retro Rewind's own feeds
+  (`RetroRewindInstall.txt`, `RetroRewindVersion.txt`,
+  `RetroRewindDelete.txt`), the base zip unpacked into a staging folder and
+  swapped in, updates applied in order with their deletions, `version.txt`
+  written last; only the zip's `RetroRewind6/` subtree is kept. Zips are read
+  with `ZipArchive.swift` (central directory, ZIP64, raw deflate through the
+  Compression framework), streamed to disk from a temporary download. One
+  thing the Quest and PC launchers do that this one cannot: rebuild the game
+  when the pack's `Code.pul` changes (the translator binds the mod, and the
+  base translation's inlining, to that file). So the configure records the
+  pack version and the `Code.pul` SHA-256 the translation used
+  (`RetroRewindBuild.swift`, generated from `App/RetroRewindBuild.swift.in`),
+  the launcher installs the pack only up to that version, and a pack whose
+  `Code.pul` differs is shown as a mismatch and not played until the app is
+  rebuilt from it.
 - **SDL without a window.** Aurora selects SDL's `offscreen` video driver and
   renders through a detached `CAMetalLayer` (`aurora-main/lib/dawn/MetalBinding.mm`,
   `aurora-main/lib/window.cpp`): SDL never touches UIKit, so the game thread
@@ -258,7 +279,12 @@ with the Mac) for signing.
    `docs/building-macos.md`, steps 1 to 5 (extract the disc, build the
    translator, translate, `generate-data-init`, `emit-build-shards`). The
    translation is platform-neutral; `generated/build_shards/shards.cmake` must
-   exist.
+   exist. For Retro Rewind, include step C: download the pack
+   (`RetroRewindInstall.txt` on `update.rwfc.net` names the current full zip;
+   only its `RetroRewind6/` folder matters), stage its `Code.pul`, translate
+   the base *with it staged* (the translator refuses to reuse a base
+   translation made without the mod's `Code.pul`), then `translate-mod` and
+   `emit-build-shards` with `--resolved-profile`/`--retro-cpp-dir`.
 2. **Build Dawn for the visionOS SDK** (once, cached under
    `.scratch/visionos-dawn/`; compiles all of Dawn and Tint, Metal only):
 
@@ -270,7 +296,7 @@ with the Mac) for signing.
 3. **Build the app**:
 
    ```bash
-   visionos/Build-VisionOS.sh --team <TEAMID> [--product base|retro_rewind] [--simulator] [--install]
+   visionos/Build-VisionOS.sh --team <TEAMID> [--retro-rewind-dir <RetroRewind6>] [--simulator] [--install]
    ```
 
    This configures `visionos/CMakeLists.txt` with the Xcode generator (the
@@ -278,6 +304,10 @@ with the Mac) for signing.
    `WiiCompiledVision.app` under `build-visionos/Release-xros/`, and with
    `--install` puts it on the paired headset with `devicectl`. `--open` opens
    the generated Xcode project instead, for signing setup or debugging.
+   Retro Rewind is embedded whenever the translation has it;
+   `--retro-rewind-dir` names the pack folder the mod was translated from, so
+   the app knows which pack version to install on the headset
+   (`--without-retro-rewind` leaves the mod out).
 
    By hand:
 
@@ -286,15 +316,19 @@ with the Mac) for signing.
        -DCMAKE_SYSTEM_NAME=visionOS -DCMAKE_OSX_SYSROOT=xros \
        -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=2.0 \
        -DAURORA_DAWN_PACKAGE_URL=file://$PWD/.scratch/visionos-dawn/dawn-visionos-arm64.tar.gz \
-       -DMKW_VISIONOS_TEAM=<TEAMID>
+       -DMKW_VISIONOS_TEAM=<TEAMID> \
+       -DMKW_VISIONOS_RETRO_REWIND_ROOT=/path/to/RetroRewind6
    cmake --build build-visionos --config Release --target WiiCompiledVision -- -allowProvisioningUpdates
    ```
 
 4. **Game files.** Launch the app once so it creates `Documents/WiiCompiled`
    with a first `Config.toml` (VR on, `dvd_root = "DATA"`), then copy the
    extracted PAL disc (the folder holding `sys/` and `files/`) into `DATA` with
-   the Files app or Finder file sharing. Retro Rewind builds read the pack from
-   `RetroRewind6` beside it.
+   the Files app or Finder file sharing. For Retro Rewind, pick it in the Play
+   tab and press **Download Retro Rewind**: the launcher fetches the pack
+   (about 2 GB) from Retro Rewind's server into `RetroRewind6` beside `DATA`,
+   at the version the app was built for, and offers updates up to that version
+   later. The pack is needed on top of the disc, as on the other platforms.
 
 Sideloading with a free Apple ID re-signs weekly and allows three apps on the
 device; the capabilities used here (Extended Virtual Addressing, Increased

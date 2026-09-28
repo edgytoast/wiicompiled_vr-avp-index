@@ -38,44 +38,56 @@ final class GameLibrary: @unchecked Sendable {
         case missing(String)
         case dlopen(String)
         case symbol(String)
+        case otherGameLoaded
 
         var errorDescription: String? {
             switch self {
             case .missing(let path): return "The game is missing from the app (\(path))."
             case .dlopen(let message): return "The game could not be loaded: \(message)"
             case .symbol(let name): return "The game is incomplete (no \(name))."
+            case .otherGameLoaded: return "The other game is already loaded. Relaunch the app to switch games."
             }
         }
     }
 
-    /// The framework this build embeds (MKW_VISIONOS_PRODUCT in visionos/CMakeLists.txt).
-    static var frameworkName: String {
-        #if MKW_VISIONOS_RETRO_REWIND
-        return "RetroRewindGame"
-        #else
-        return "WiiCompiledGame"
-        #endif
+    /// The framework this library came from (GameChoice.frameworkName).
+    let frameworkName: String
+
+    /// Whether the app embeds the game's framework (visionos/CMakeLists.txt embeds one per
+    /// translated product).
+    static func isEmbedded(_ frameworkName: String) -> Bool {
+        guard let binary = binaryURL(frameworkName) else { return false }
+        return FileManager.default.fileExists(atPath: binary.path)
     }
 
-    static func load() throws -> GameLibrary {
-        if let shared { return shared }
-        guard let frameworks = Bundle.main.privateFrameworksURL else {
+    private static func binaryURL(_ frameworkName: String) -> URL? {
+        Bundle.main.privateFrameworksURL?.appendingPathComponent("\(frameworkName).framework/\(frameworkName)")
+    }
+
+    /// Loads one game. Both frameworks define the same runtime, so a process holds one: once
+    /// loaded, the other game needs a relaunch (as a second run of the same one does).
+    static func load(_ frameworkName: String) throws -> GameLibrary {
+        if let shared {
+            guard shared.frameworkName == frameworkName else { throw LoadError.otherGameLoaded }
+            return shared
+        }
+        guard let binary = binaryURL(frameworkName) else {
             throw LoadError.missing("Frameworks")
         }
-        let binary = frameworks.appendingPathComponent("\(frameworkName).framework/\(frameworkName)")
         guard FileManager.default.fileExists(atPath: binary.path) else {
             throw LoadError.missing(binary.lastPathComponent)
         }
         guard let handle = dlopen(binary.path, RTLD_NOW | RTLD_GLOBAL) else {
             throw LoadError.dlopen(String(cString: dlerror()))
         }
-        let library = try GameLibrary(handle: handle)
+        let library = try GameLibrary(handle: handle, frameworkName: frameworkName)
         shared = library
         return library
     }
 
-    private init(handle: UnsafeMutableRawPointer) throws {
+    private init(handle: UnsafeMutableRawPointer, frameworkName: String) throws {
         self.handle = handle
+        self.frameworkName = frameworkName
         func symbol<T>(_ name: String, as type: T.Type) throws -> T {
             guard let address = dlsym(handle, name) else { throw LoadError.symbol(name) }
             return unsafeBitCast(address, to: type)
