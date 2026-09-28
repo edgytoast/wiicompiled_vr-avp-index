@@ -342,6 +342,11 @@ void aurora_clear_native_wheel_vertices(void);
 void aurora_set_native_wheel_vertices(const void* source, const void* replacement, uint32_t size,
                                       const float* modelView);
 uint32_t aurora_native_wheel_draw_count(void);
+// GX thread, ordered with draws. Hide only rigid draws binding this array at
+// this instance's model-view transform. Clear at the end of each guest frame.
+void aurora_clear_hidden_model_arrays(void);
+void aurora_hide_model_array(const void* source, const float* modelView);
+uint32_t aurora_hidden_model_draw_count(void);
 typedef void (*AuroraFrameWorkerWaitCallback)();
 // Called from the producer thread at bounded intervals while Aurora waits for
 // the asynchronous frame worker. The callback must not enter Aurora.

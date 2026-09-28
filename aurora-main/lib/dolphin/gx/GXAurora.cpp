@@ -11,6 +11,23 @@
 #include "../../gfx/common.hpp"
 #include "../../gx/fifo.hpp"
 #include "../../gx/native_wheel.hpp"
+#include "../../gx/model_visibility.hpp"
+
+extern "C" void aurora_clear_hidden_model_arrays() {
+  if (aurora::gx::hiddenModelArrays.empty()) return;
+  aurora::gx::fifo::drain();
+  aurora::gx::hiddenModelLastDraws.store(aurora::gx::hiddenModelDraws);
+  aurora::gx::hiddenModelDraws = 0;
+  aurora::gx::hiddenModelArrays.clear();
+}
+extern "C" void aurora_hide_model_array(const void* source, const float* modelView) {
+  if (!source || !modelView) return;
+  aurora::gx::fifo::drain();
+  aurora::gx::HiddenModelArray hidden{source, {}};
+  std::memcpy(hidden.modelView.data(), modelView, sizeof(float) * 12);
+  aurora::gx::hiddenModelArrays.push_back(hidden);
+}
+extern "C" uint32_t aurora_hidden_model_draw_count() { return aurora::gx::hiddenModelLastDraws.load(); }
 
 // GX-thread entry points for the VR native steering wheel (native_wheel.hpp).
 // The runtime posts these in order with the frame's draws.

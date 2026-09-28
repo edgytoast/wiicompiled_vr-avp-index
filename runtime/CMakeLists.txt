@@ -417,7 +417,7 @@ add_test(NAME mkw_vr_first_person_tests COMMAND mkw_vr_first_person_tests)
 # native wheel vertices) and hand steering (grab, turn, hand-off to the game),
 # ported from heurazy's mario-kart-wii-VR-port, and tracked hands (grasp, bare-hand
 # buttons, flick). All header-only.
-foreach(test_name mkw_steering_wheel_tests mkw_vr_cockpit_tests mkw_vr_hand_steering_tests mkw_vr_camera_toggle_tests
+foreach(test_name mkw_steering_wheel_tests mkw_vr_cockpit_tests mkw_vr_bullet_bill_tests mkw_vr_hand_steering_tests mkw_vr_camera_toggle_tests
                   mkw_vr_hand_tracking_tests)
     string(REGEX REPLACE "^mkw_" "" test_source "${test_name}")
     add_executable(${test_name} "${CMAKE_CURRENT_LIST_DIR}/tests/${test_source}.cpp")

@@ -64,6 +64,7 @@ if (AURORA_ENABLE_GX)
     eye_pass_plan_test.cpp
     foveation_test.cpp
     native_wheel_test.cpp
+    model_visibility_test.cpp
     cockpit_geometry_test.cpp
     texture_bind_group_cache_key_test.cpp
     ../lib/gfx/efb_ram_encoder.cpp

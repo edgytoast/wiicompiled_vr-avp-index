@@ -79,6 +79,11 @@ void TestSeatHelpers() {
     CheckNear(EyeBehindControls(50.0f, 60.0f, 100.0f, 0.0f), 60.0f - 45.0f, "eye pulled behind the wheel");
     CheckNear(EyeBehindControls(50.0f, 60.0f, 100.0f, 50.0f), 60.0f - 55.0f, "a wider wheel keeps more clearance");
     CheckNear(EyeBehindControls(-10.0f, 60.0f, 100.0f, 18.0f), -10.0f, "an eye already behind stays put");
+    CheckNear(EyeAboveControls(69.0f, 37.0f, 100.0f), 69.0f, "normal seated height is unchanged");
+    CheckNear(EyeAboveControls(126.0f, 58.0f, 126.0f), 108.4f, "long neck does not put the wheel at knee height");
+    CheckNear(EyeAboveControls(180.0f, 45.0f, 180.0f), 117.0f, "tall driver's reach uses character scale");
+    CheckNear(EyeAboveControls(69.0f, NAN, 100.0f), 69.0f, "invalid controls leave the eye alone");
+    CheckNear(EyeAboveControls(69.0f, -100.0f, 100.0f), 69.0f, "bad controls cannot push the eye below the seat");
 }
 
 void TestDriverEye() {
@@ -92,6 +97,7 @@ void TestDriverEye() {
     Check(!ComputeDriverEyeFromBounds(face, placement, {2, 8, 0}, {-2, 12, 4}, eye), "inverted bounds rejected");
     Check(!ComputeDriverEyeFromBounds(Translation(0, -50, 0), placement, {0, 0, 0}, {1, 1, 1}, eye),
           "an eye below the seat is rejected");
+    CheckNear(eye[1], 95.0f, "a rejected measurement cannot corrupt the fallback height");
 
     // The same eye through the animated world matrices: the body's own motion
     // must not leak into the seat.
@@ -102,6 +108,17 @@ void TestDriverEye() {
     CheckNear(eye[1], 90.0f, "seated eye up", 1e-3f);
     CheckNear(eye[2], 15.0f, "seated eye forward", 1e-3f);
 
+    // Custom models may have no _eye group and a small/rotated bind head with
+    // a large negative bike placement. Only the evaluated head includes the
+    // animation's scale and riding posture. Do not apply placement twice.
+    Mtx34 customHead{0, 0, 1, 0, 0, -1, 0, 60, 1, 0, 0, 12};
+    Check(ComputeDriverEyeFromHead(ComposeMtx(body, customHead), body, eye), "custom animated head fallback");
+    CheckNear(eye[1], 68.0f, "custom head fallback stays above the bike");
+    CheckNear(eye[2], 20.0f, "fallback offset uses vehicle axes despite rotated head");
+    Check(!ComputeDriverEyeFromHead(ComposeMtx(body, Translation(0, -20, 0)), body, eye),
+          "an invalid head is rejected");
+    CheckNear(eye[1], 68.0f, "failed head fallback leaves caller output intact");
+
     SeatedEyeReference reference;
     for (int i = 0; i < 7; ++i) {
         reference.Observe({0, 90, 15}, true, true);
@@ -111,6 +128,30 @@ void TestDriverEye() {
     Check(reference.valid, "eight stable samples calibrate the seat");
     reference.Observe({0, 200, 15}, true, true);
     CheckNear(reference.value[1], 90.0f, "a calibrated seat is frozen");
+    reference.Recalibrate();
+    reference.Observe({0, 120, 15}, false, true);
+    Check(reference.valid && reference.recalibrating, "recenter holds the seat until a neutral pose is ready");
+    CheckNear(reference.value[1], 90.0f, "unsafe recenter keeps old height");
+    for (int i = 0; i < 7; ++i) {
+        reference.Observe({0, 75, 15}, true, true);
+    }
+    CheckNear(reference.value[1], 90.0f, "partial recalibration keeps old height");
+    reference.Observe({0, 75, 15}, true, true);
+    Check(reference.valid && !reference.recalibrating, "recenter accepts fresh stable samples");
+    CheckNear(reference.value[1], 75.0f, "recenter replaces a bad initial height");
+    reference.Observe({0, 100, 15}, true, true);
+    CheckNear(reference.value[1], 75.0f, "replacement freezes again");
+    SeatedEyeReference drifting;
+    for (int i = 0; i < 30; ++i) {
+        drifting.Observe({0, 60.0f + float(i), 15}, true, true);
+    }
+    Check(!drifting.valid, "a slowly changing start animation is not a stable seat");
+    for (int i = 0; i < 7; ++i) {
+        drifting.Observe({0, 100, 15}, true, true);
+    }
+    drifting.Observe({0, NAN, 15}, true, true);
+    drifting.Observe({0, 100, 15}, true, true);
+    Check(!drifting.valid, "invalid samples break calibration continuity");
     SeatedEyeReference interrupted;
     for (int i = 0; i < 5; ++i) {
         interrupted.Observe({0, 90, 15}, true, true);

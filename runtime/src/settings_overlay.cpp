@@ -1526,7 +1526,8 @@ void DrawVrSettings() {
             "Makes where you are sitting right now the centre of the view, and brings "
             "the menu screen back upright in front of you. The race view moves in "
             "position only, so the horizon stays level and forward is unchanged; use "
-            "your headset's own recenter to change forward.");
+            "your headset's own recenter to change forward. In cockpit view it also "
+            "remeasures the seat when the driver is straight, undamaged and normal size.");
     }
     ImGui::SameLine();
     // Click to arm, then the next key press is captured in HandleEvents.

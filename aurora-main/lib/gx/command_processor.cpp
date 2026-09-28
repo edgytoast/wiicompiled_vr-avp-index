@@ -6,6 +6,7 @@
 #include "dolphin/gx/GXAurora.h"
 #include "gx.hpp"
 #include "native_wheel.hpp"
+#include "model_visibility.hpp"
 #include "gx_fmt.hpp"
 #include "pipeline.hpp"
 #include "shader_info.hpp"
@@ -2367,6 +2368,7 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
 
   // This entry point bypasses process(), so it owns the renderer lock itself.
   std::lock_guard gpuLock(aurora::renderer_gpu_mutex());
+  if (model_array_hidden()) return true;
   const gfx::Range vertRange = push_draw_vertices(vertices, vtxCount, vtxSize);
   const bool interpolationIdentityActive = frame_interpolation_identity_needed();
   const PnMtxUsage matrixUsage = interpolationIdentityActive ? pn_mtx_usage(vertices, vtxCount, vtxSize) : PnMtxUsage{};
@@ -2400,6 +2402,11 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
       handle_draw_overrun(cmd, vtxCount, vtxSize, totalVtxBytes, data, pos, size);
       return false;
     }
+
+  if (model_array_hidden()) {
+    pos += totalVtxBytes;
+    return true;
+  }
 
   // Push raw vertex data to buffer
   const uint8_t* vertices = data + pos;

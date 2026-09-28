@@ -405,14 +405,22 @@ to the local driver's head instead, at one of two seats:
 - `first_person_seat = "cockpit"`, the default, sits you at the driver's own eyes, behind the
   steering wheel, at a life-size scale, so the wheel or handlebar is within reach of your hands.
   The eye is measured once per race from the character's head bone, while the kart drives straight,
-  undamaged and at normal size, and then frozen; until then the bind pose, or the vehicle's authored
-  seat height, stands in. It is kept at least 0.45 m behind the wheel so a long face or a
-  leaned-forward riding pose cannot put it over the controls. The world scale is
+  undamaged and at normal size, and then frozen. Custom models without a separate eye mesh use
+  the animated head with a small upward/forward offset; until calibration completes the bind pose,
+  or the vehicle's authored seat height, stands in. Rejected measurements never alter that fallback.
+  Eight consecutive samples must stay within two units of the first sample, so a slowly moving
+  starting animation cannot qualify just by moving little each frame. The eye is kept at least
+  0.45 m behind the wheel and at most 0.40 m above the neutral hand targets, so long faces and necks
+  do not leave the controls below comfortable reach. The world scale is
   `cockpit_units_per_meter` (default 100) multiplied by the character's eye height over 100 units,
   so tall characters sit at a comparable height, and by the player's current size, so a lightning
   strike or a mega mushroom resizes the view, the wheel and the grab reach together. The seat
   follows the simulation's position and driving direction, never the animated chassis, so damage
   spins and tricks do not throw it around.
+  **Recenter view** (including its key binding) and headset reference-space recentering request a
+  fresh cockpit calibration as well as resetting the headset position. The previous seat stays
+  in place until a new stable, neutral measurement is ready; then height and wheel clearance are
+  recalculated together. Recenter while driving straight at normal size to replace a bad initial seat.
 - `first_person_seat = "custom"` places the head at `first_person_head_up_meters` and its two
   companions in the kart's own frame, at `first_person_units_per_meter`.
 
@@ -475,6 +483,15 @@ first-person default. Both settings touch your own kart
 only, so the other racers are untouched, and the original values are restored when first person
 stops or the race ends. This is the one place the first-person camera modifies the game rather than
 only reading it.
+
+In cockpit view, your Bullet Bill keeps its animated arms but hides the body, eyes and rear
+exhaust cone, which otherwise fills the view from inside. The runtime resolves the local racer's
+Killer model and registers its rigid body position arrays with the renderer for that frame.
+Only draws at that Bullet Bill's own model-view transform are skipped; opponents sharing the
+model, arm joints, and the separate ground shadow remain visible. The requests are cleared after
+the frame and when cockpit view stops. This changes rendering only, without modifying game assets
+or the item's behaviour. `mkw_vr_bullet_bill_tests` and Aurora's `HiddenModelTest` cover body/arm
+selection, malformed models, instance matching, and both FIFO and raw draw paths.
 
 One limitation is worth knowing: Mario Kart still culls the scene from its own chase camera, so a
 wide head turn in first person can reveal the edge of what the game decided to draw. As with the
