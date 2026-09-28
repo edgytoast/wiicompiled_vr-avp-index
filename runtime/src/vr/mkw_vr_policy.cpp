@@ -187,6 +187,12 @@ constexpr MkwVRHookPoint kHookPoints[] = {
      "Future culling-frustum expansion point for head movement beyond the base camera."},
     {0x80228180u, "EGG::Frustum::CopyToG3D", MkwVRHookCapability::Culling,
      "Observe the frustum handed to NW4R without guessing EGG::Frustum fields."},
+    {0x80086610u, "nw4r::math::FRUSTUM::IntersectAABB_Ex", MkwVRHookCapability::Culling,
+     "Replaced natively (mkw_vr_culling.cpp): every box counts as partially inside while "
+     "vr.object_culling is off."},
+    {0x8078707Cu, "ClipInfoMgr::UpdateScreenInfo", MkwVRHookCapability::Culling,
+     "Replaced natively (mkw_vr_culling.cpp): the screen's side-plane normals are zeroed "
+     "while vr.object_culling is off."},
 };
 
 } // namespace

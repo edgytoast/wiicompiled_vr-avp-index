@@ -9,6 +9,7 @@
 #include "runtime_config.h"
 #include "gx_thread.h"
 #include "runtime_log.h"
+#include "vr/mkw_vr_culling.h"
 #include "vr/mkw_vr_first_person.h"
 #include "vr/mkw_vr_policy.h"
 #include "vr/mkw_vr_instrumentation.h"
@@ -75,6 +76,7 @@ void ConfigurePolicy(bool enabled) noexcept {
     MkwVRPolicyConfigure(config);
     MkwVRInstrumentationInitialize();
     MkwVRFirstPersonApplyConfiguredSettings();
+    MkwVRObjectCullingApplyConfiguredSettings(enabled);
 }
 
 #if MKW_OPENXR_GRAPHICS_BACKEND

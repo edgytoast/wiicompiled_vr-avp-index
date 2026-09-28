@@ -60,6 +60,7 @@ first_person_hidden_model = 0
 first_person_rotation = "yaw_pitch"
 steering_wheel = true
 native_steering_wheel = true
+object_culling = true
 hand_steering = true
 performance_level = "boost"
 ```
@@ -493,10 +494,35 @@ the frame and when cockpit view stops. This changes rendering only, without modi
 or the item's behaviour. `mkw_vr_bullet_bill_tests` and Aurora's `HiddenModelTest` cover body/arm
 selection, malformed models, instance matching, and both FIFO and raw draw paths.
 
-One limitation is worth knowing: Mario Kart still culls the scene from its own chase camera, so a
-wide head turn in first person can reveal the edge of what the game decided to draw. As with the
-rest of the race instrumentation, the object offsets this reads are specific to the project's
-supported PAL `RMCP01` translation.
+As with the rest of the race instrumentation, the object offsets this reads are specific to the
+project's supported PAL `RMCP01` translation.
+
+### Object culling
+
+Mario Kart hides what its own chase camera cannot see, and that camera does not know where the
+headset is looking. Turn your head far enough in an immersive race, or look over your shoulder
+in first person, and karts, characters and course objects are simply missing until the game
+camera catches up; the race intro's pan shows it too, since the other racers are culled from the
+intro camera's narrow view. `object_culling = false` (F10 > Camera > Object culling, also on the
+headset settings panel's Camera tab) draws them anyway, and takes effect immediately. The
+default, `true`, leaves the game's culling in force.
+
+The game culls in two places, and the switch covers both. NW4R's scene gather tests each model's
+bounding box against the camera frustum (`nw4r::math::FRUSTUM::IntersectAABB_Ex`); with culling
+off that test reports every box as partially inside. Mario Kart's own `ClipInfoMgr` then tests
+each kart, item and object against per-screen side planes derived from the camera
+(`ClipInfoMgr::UpdateScreenInfo`); with culling off those planes carry zero normals, which no
+model can be beyond. Both functions are replaced by faithful native reimplementations in
+`runtime/src/vr/mkw_vr_culling.cpp`, so with culling on they compute exactly what the translated
+originals did. `mkw_vr_culling_tests` covers the frustum test. What stays as the game decides
+it: the draw distance, the course's area-based clipping groups, and every gameplay rule, since
+none of this changes physics or object updates.
+
+The setting only takes effect while VR is enabled (a session that fell back to the desktop for
+want of a headset included), and not in the Flat screen race view, which shows the game camera's
+own view. It costs GPU time: every model the camera would have dropped is drawn for
+both eyes. On the Quest, where the eye passes are geometry-bound, leave
+it on unless the missing racers bother you more than the frame time.
 
 ## Steering wheel and hand steering
 
@@ -1149,7 +1175,7 @@ ends, including mid-frame flushes, so live setting changes cannot invalidate pen
 - The Quest build (`android/`, `docs/quest-port.md`) runs on a Quest 3 through menus and races.
   Lifecycle events and performance (about 43 game FPS) are still open. Apple visionOS packaging
   is not implemented.
-- Scene-specific comfort options, culling fixes and replay/spectator classification are future work.
+- Scene-specific comfort options and replay/spectator classification are future work.
 - Hand steering works on a Quest 3 (2026-09-22): the kart's own wheel animated (228 draws a frame,
   the race camera's view matching the scene's exactly) and the wheel can be grabbed and turned. In
   that race the driver's eye was never calibrated, so the fallback placed the wheel centre about

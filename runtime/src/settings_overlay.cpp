@@ -12,6 +12,7 @@
 #include "runtime_config.h"
 #include "runtime_log.h"
 #include "vr/camera_toggle.h"
+#include "vr/mkw_vr_culling.h"
 #include "vr/mkw_vr_first_person.h"
 #include "vr/mkw_vr_policy.h"
 #include "vr/openxr_diagnostics.h"
@@ -167,6 +168,7 @@ int g_vrFirstPersonSeat = RuntimeConfigFile::VrFirstPersonSeat() == "custom" ? 1
 float g_vrCockpitUnitsPerMeter = RuntimeConfigFile::VrCockpitUnitsPerMeter();
 bool g_vrSteeringWheel = RuntimeConfigFile::VrSteeringWheel();
 bool g_vrNativeSteeringWheel = RuntimeConfigFile::VrNativeSteeringWheel();
+bool g_vrObjectCulling = RuntimeConfigFile::VrObjectCulling();
 bool g_vrHandSteering = RuntimeConfigFile::VrHandSteering();
 mkw::vr::WheelTuning g_vrWheelTuning = RuntimeConfigFile::VrWheelTuning();
 float g_vrFirstPersonHeadUp = RuntimeConfigFile::VrFirstPersonHeadUpMeters();
@@ -1410,6 +1412,7 @@ void DrawVrSettings() {
         mkw::vr::MkwVRPolicySetImmersiveRaces(!g_vrFlatScreen);
         mkw::vr::OpenXRSetImmersiveWindow(view == RuntimeConfigFile::VrRaceView::ImmersiveWindow);
         mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
+        mkw::vr::MkwVRObjectCullingApplyConfiguredSettings();
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
@@ -1723,6 +1726,19 @@ void DrawVrCameraSettings() {
         ImGui::SetTooltip("Removes the vehicle as well, leaving nothing of your own kart.");
     }
     DrawVrSteeringWheelSettings();
+    ImGui::Separator();
+    ImGui::Text("Object culling");
+    if (ImGui::Checkbox("Hide what the game camera cannot see", &g_vrObjectCulling)) {
+        RuntimeConfigFile::SetVrObjectCulling(g_vrObjectCulling);
+        mkw::vr::MkwVRObjectCullingApplyConfiguredSettings();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "The game's own culling: karts, characters and course objects outside its chase "
+            "camera's view are not drawn, so a head turn or a look over the shoulder finds them "
+            "missing. Off draws them anyway, at some GPU cost. The draw distance is unchanged, "
+            "and the Flat screen race view always keeps the game's culling.");
+    }
     ImGui::Separator();
     if (ImGui::Button("Reset first-person defaults")) {
         g_vrFirstPersonSeat = 0;

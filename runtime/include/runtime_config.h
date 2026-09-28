@@ -76,6 +76,7 @@ struct RuntimeUserConfig {
     std::optional<float> vrCockpitUnitsPerMeter;
     std::optional<bool> vrSteeringWheel;
     std::optional<bool> vrNativeSteeringWheel;
+    std::optional<bool> vrObjectCulling;
     std::optional<bool> vrHandSteering;
     std::optional<bool> vrHandTracking;
     std::optional<float> vrWheelKartDegrees;
@@ -235,6 +236,10 @@ inline constexpr float kVrCockpitUnitsPerMeterMax = 400.0f;
 inline constexpr bool kVrSteeringWheelDefault = true;
 inline constexpr bool kVrNativeSteeringWheelDefault = true;
 inline constexpr bool kVrHandSteeringDefault = true;
+// The game hides karts and objects its own camera cannot see, which a head
+// turn in VR reveals. object_culling false draws them anyway (see
+// vr/mkw_vr_culling.h); it only takes effect while VR is enabled.
+inline constexpr bool kVrObjectCullingDefault = true;
 // The cockpit hands follow the headset's hand tracking (the controllers' touch
 // sensors while they are held, the cameras once they are put down, when bare
 // hands also drive). Opt-in, and only offered on the Quest for now; the
@@ -577,6 +582,10 @@ inline void EnsureConfigFile() {
               "# own model; false draws a separate VR wheel instead.\n"
               "steering_wheel = true\n"
               "native_steering_wheel = true\n"
+              "# The game hides karts and objects its own camera cannot see.\n"
+              "# object_culling = false draws them anyway, so a head turn or a\n"
+              "# look over the shoulder shows them; it costs GPU time.\n"
+              "object_culling = true\n"
               "# Hand steering (by heurazy): squeeze a grip near the wheel or\n"
               "# handlebar to take hold of it with the tracked controllers, and\n"
               "# turn it to steer. Releasing both grips gives steering back to the\n"
@@ -859,6 +868,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
         readRangedFloat("cockpit_units_per_meter", kVrCockpitUnitsPerMeterMin, kVrCockpitUnitsPerMeterMax);
     config.vrSteeringWheel = FindConfigValue<bool>(document, "vr", "steering_wheel");
     config.vrNativeSteeringWheel = FindConfigValue<bool>(document, "vr", "native_steering_wheel");
+    config.vrObjectCulling = FindConfigValue<bool>(document, "vr", "object_culling");
     config.vrHandSteering = FindConfigValue<bool>(document, "vr", "hand_steering");
     config.vrHandTracking = FindConfigValue<bool>(document, "vr", "hand_tracking");
     config.vrWheelKartDegrees = readRangedFloat("wheel_kart_degrees", kVrWheelDegreesMin, kVrWheelDegreesMax);
@@ -1248,6 +1258,11 @@ inline bool SetVrSteeringWheel(bool value) {
 inline bool SetVrNativeSteeringWheel(bool value) {
     Mutable().vrNativeSteeringWheel = value;
     return WriteSetting("vr", "native_steering_wheel", value ? "true" : "false");
+}
+
+inline bool SetVrObjectCulling(bool value) {
+    Mutable().vrObjectCulling = value;
+    return WriteSetting("vr", "object_culling", value ? "true" : "false");
 }
 
 inline bool SetVrHandSteering(bool value) {
@@ -1725,6 +1740,10 @@ inline bool VrSteeringWheel(bool fallback = kVrSteeringWheelDefault) {
 
 inline bool VrNativeSteeringWheel(bool fallback = kVrNativeSteeringWheelDefault) {
     return Get().vrNativeSteeringWheel.value_or(fallback);
+}
+
+inline bool VrObjectCulling(bool fallback = kVrObjectCullingDefault) {
+    return Get().vrObjectCulling.value_or(fallback);
 }
 
 inline bool VrHandSteering(bool fallback = kVrHandSteeringDefault) {
