@@ -22,6 +22,8 @@ Usage: local-build-macos.command --output-dir DIR [options]
   --retro-rewind-package-dir DIR  RetroRewind6 directory (required for Retro Rewind)
   --retro-wfc-offline-dir DIR     Directory containing binary/payload.RMCPD00.bin
   --skip-retro-wfc-payload        Build Retro Rewind without the shared Retro-WFC payload
+  --translate-only                Stop after emit-build-shards (no macOS compile; --output-dir not needed).
+                                  Other platforms' builds (visionos/Build-VisionOS.sh) start from there.
   --force-clean-build             Delete local generated and native-build-macos caches
   --parallel N                    Pin translation and build parallelism
   --cmake PATH --ninja PATH       Override build tools
@@ -31,7 +33,7 @@ EOF
 }
 
 workspace="$default_workspace"; profile=base; output_dir=""; base_output_dir=""
-game=""; nodtool=""; retro_root=""; retro_wfc=""; skip_retro_wfc=0; force_clean=0
+game=""; nodtool=""; retro_root=""; retro_wfc=""; skip_retro_wfc=0; force_clean=0; translate_only=0
 parallel=0; cmake_bin=cmake; ninja_bin=ninja; dotnet_bin=dotnet; translator_bin=""
 while (($#)); do
     case "$1" in
@@ -44,6 +46,7 @@ while (($#)); do
         --retro-rewind-package-dir) retro_root=${2:-}; shift 2 ;;
         --retro-wfc-offline-dir) retro_wfc=${2:-}; shift 2 ;;
         --skip-retro-wfc-payload) skip_retro_wfc=1; shift ;;
+        --translate-only) translate_only=1; shift ;;
         --force-clean-build) force_clean=1; shift ;;
         --parallel) parallel=${2:-}; shift 2 ;;
         --cmake) cmake_bin=${2:-}; shift 2 ;;
@@ -58,10 +61,10 @@ done
 [[ $(uname -s) == Darwin ]] || fail 'this build script is for macOS only'
 [[ $(uname -m) == arm64 ]] || fail 'the current macOS product target is Apple Silicon only'
 workspace=$(cd "$workspace" && pwd)
-[[ -n "$output_dir" ]] || fail '--output-dir is required'
+[[ -n "$output_dir" || $translate_only -eq 1 ]] || fail '--output-dir is required'
 case "$profile" in base|retro-rewind|both) ;; *) fail '--profile must be base, retro-rewind, or both' ;; esac
 builds_retro=0; [[ "$profile" != base ]] && builds_retro=1
-if [[ "$profile" == both && -z "$base_output_dir" ]]; then fail '--base-output-dir is required with --profile both'; fi
+if [[ "$profile" == both && -z "$base_output_dir" && $translate_only -eq 0 ]]; then fail '--base-output-dir is required with --profile both'; fi
 if [[ "$profile" != both && -n "$base_output_dir" ]]; then fail '--base-output-dir is valid only with --profile both'; fi
 if [[ -n "$game" || -n "$nodtool" ]]; then [[ -n "$game" && -n "$nodtool" ]] || fail '--game and --nodtool must be supplied together'; fi
 if (( builds_retro )); then
@@ -129,6 +132,7 @@ step generate-data-init 'Generating local game data initialization'; translator 
 args=(emit-build-shards --project "$project" --base-metadata "$metadata" --base-functions-dir "$functions" --native-source-dir "$workspace/runtime/src" --out "$shards")
 if (( builds_retro )); then args+=(--resolved-profile "$mod_out/resolved_dispatch_profile.json" --retro-cpp-dir "$mod_out/cpp"); fi
 step emit-build-shards 'Preparing native build shards'; translator "${args[@]}"
+if (( translate_only )); then printf 'MKWCBUILD:SHARDS=%s\n' "$shards"; exit 0; fi
 
 step configure-native 'Configuring the native toolchain'
 "$cmake_bin" -S "$workspace/runtime" -B "$native_build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_MAKE_PROGRAM="$ninja_bin" -DMKW_TRANSLATED_COMPILE_JOBS="$translated_jobs"

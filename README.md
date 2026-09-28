@@ -218,9 +218,11 @@ translation, generating the manifest and build graph, and compiling, see [`trans
 
 For a step-by-step guide on compiling both WiiCompiled and Retro Rewind from source on macOS (Apple Silicon), see the [macOS Build Guide](docs/building-macos.md).
 
-The Meta Quest build is described in [`docs/quest-port.md`](docs/quest-port.md) and the Apple Vision Pro
-build (experimental, hands and a Bluetooth controller for input) in
-[`docs/visionos-port.md`](docs/visionos-port.md).
+The Meta Quest build is described in [`docs/quest-port.md`](docs/quest-port.md). For the Apple Vision Pro
+(experimental, hands and a Bluetooth controller for input) follow
+[`docs/visionos-getting-started.md`](docs/visionos-getting-started.md): one script takes your own disc to the
+headset from a Mac with Xcode (there is no build to download; visionOS only runs apps you signed yourself).
+The port's design is in [`docs/visionos-port.md`](docs/visionos-port.md).
 
 ## FAQ
 

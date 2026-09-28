@@ -270,6 +270,18 @@ singletons) a second start would trip over.
 
 ## Building
 
+Players: follow [`visionos-getting-started.md`](visionos-getting-started.md);
+`visionos/Make-VisionOS-App.command` runs every step below from the disc image
+to the app on the headset, skipping what is already done. There is no
+distributable build and there cannot be one: visionOS runs only code signed
+by Apple or by the device's own developer, an app may not load code it did not
+ship with (so the Quest's on-device compilation has no equivalent), and a
+TestFlight build would have to carry the translated game. Each player
+therefore makes the app from their own disc, as the Quest and PC launchers
+build from the user's disc.
+
+The steps by hand, for development:
+
 Prerequisites: an Apple Silicon Mac, Xcode 16 or later with the visionOS
 platform installed, CMake 3.28+, Ninja, Python 3, git, and the .NET 8 SDK for the
 translator. An Apple ID (a free personal team suffices for a headset paired

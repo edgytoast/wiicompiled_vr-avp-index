@@ -3,7 +3,7 @@
 #
 #   visionos/Build-VisionOS.sh [--team TEAMID] [--retro-rewind-dir DIR | --without-retro-rewind]
 #                              [--simulator] [--build-dir DIR] [--dawn-package FILE]
-#                              [--jobs N] [--install] [--open]
+#                              [--jobs N] [--install [--device UDID]] [--open]
 #
 # Steps: Dawn for the visionOS SDK (Build-VisionOSDawn.sh, cached), the Xcode
 # project (visionos/CMakeLists.txt, which pulls the runtime in), the build, and
@@ -36,6 +36,7 @@ build_dir="${repo_root}/build-visionos"
 dawn_package=""
 jobs="$(sysctl -n hw.ncpu)"
 install=0
+device="${MKW_VISIONOS_DEVICE:-}"
 open_project=0
 
 while [[ $# -gt 0 ]]; do
@@ -48,6 +49,7 @@ while [[ $# -gt 0 ]]; do
         --dawn-package) dawn_package="${2:?}"; shift 2 ;;
         --jobs) jobs="${2:?}"; shift 2 ;;
         --install) install=1; shift ;;
+        --device) device="${2:?}"; shift 2 ;;
         --open) open_project=1; shift ;;
         -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
@@ -78,9 +80,10 @@ if [[ ! -f "${shards}" ]]; then
 fi
 
 if [[ -z "${dawn_package}" ]]; then
-    dawn_args=()
-    if [[ ${simulator} -eq 1 ]]; then dawn_args+=(--simulator); fi
-    dawn_package="$("${repo_root}/visionos/Build-VisionOSDawn.sh" "${dawn_args[@]}" --jobs "${jobs}" | tail -n 1)"
+    # (bash 3.2 counts an empty array as unbound under set -u, hence the string.)
+    dawn_flag=""
+    if [[ ${simulator} -eq 1 ]]; then dawn_flag="--simulator"; fi
+    dawn_package="$("${repo_root}/visionos/Build-VisionOSDawn.sh" ${dawn_flag} --jobs "${jobs}" | tail -n 1)"
 fi
 if [[ ! -f "${dawn_package}" ]]; then
     echo "ERROR: Dawn package not found: ${dawn_package}" >&2
@@ -121,13 +124,26 @@ if [[ ${install} -eq 1 ]]; then
         xcrun simctl install booted "${app}"
         echo "Installed on the booted visionOS simulator"
     else
-        # The first paired Apple Vision Pro; pair in Xcode > Devices and Simulators.
-        device="$(xcrun devicectl list devices --hide-headers 2>/dev/null | awk 'tolower($0) ~ /vision/ {print $3; exit}')"
+        # The first paired physical Apple Vision Pro (the list holds simulators too);
+        # pair in Xcode > Devices and Simulators.
         if [[ -z "${device}" ]]; then
-            echo "ERROR: no paired Apple Vision Pro; pair it in Xcode first" >&2
+            device="$(xcrun devicectl list devices --hide-headers 2>/dev/null \
+                | awk 'tolower($0) ~ /vision/ && $0 ~ /physical/ { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9A-Fa-f-]{25,}$/) { print $i; exit } }')"
+        fi
+        if [[ -z "${device}" ]]; then
+            echo "ERROR: no paired Apple Vision Pro; pair it in Xcode first (or pass --device UDID)" >&2
             exit 1
         fi
-        xcrun devicectl device install app --device "${device}" "${app}"
+        # The connection to a headset that is dozing off drops now and then; try a few times.
+        attempt=1
+        until xcrun devicectl device install app --device "${device}" "${app}"; do
+            if [[ ${attempt} -ge 3 ]]; then
+                echo "ERROR: could not install on ${device}; unlock the headset, keep it awake and try again" >&2
+                exit 1
+            fi
+            echo "Install attempt ${attempt} failed; retrying in 5 s" >&2
+            attempt=$((attempt + 1)); sleep 5
+        done
         echo "Installed on ${device}"
     fi
 fi
