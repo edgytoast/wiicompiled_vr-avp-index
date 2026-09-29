@@ -216,7 +216,11 @@ bool mkw_visionos_prepare_game_directory(void) {
                 "\n"
                 "[vr]\n"
                 "enabled = true\n"
-                "render_scale = " MKW_VR_RENDER_SCALE_DEFAULT_TEXT "\n";
+                "render_scale = " MKW_VR_RENDER_SCALE_DEFAULT_TEXT "\n"
+                "# New players start in the cockpit: first person, following turns and climbs.\n"
+                "first_person = true\n"
+                "first_person_rotation = \"yaw_pitch\"\n"
+                "first_person_seat = \"cockpit\"\n";
         if (!file) {
             SetError("could not write " + RuntimeConfigFile::PathToUtf8(config));
             return false;

@@ -80,6 +80,10 @@ enum GameStorage {
                 "[vr]",
                 "enabled = true",
                 "render_scale = 1.0",
+                "# New players start in the cockpit: first person, following turns and climbs.",
+                "first_person = true",
+                "first_person_rotation = \"yaw_pitch\"",
+                "first_person_seat = \"cockpit\"",
             ]
             do {
                 try (lines.joined(separator: "\n") + "\n").write(to: configFile, atomically: true, encoding: .utf8)

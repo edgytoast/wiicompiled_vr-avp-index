@@ -105,6 +105,8 @@ drops the connection (the script retries).
   adjust the pointer while pinching, let go to press.
 - For **Retro Rewind**: pick it in the Play tab, press **Download Retro
   Rewind** (about 2 GB from Retro Rewind's server to the headset), then Play.
+- Races start in first person, seated in the cockpit; the launcher's
+  **Settings > Camera** switches to the chase camera.
 - Race with a Bluetooth game controller, or with bare hands (**Settings >
   Drive with your hands**). Press the Digital Crown to leave the game.
 
