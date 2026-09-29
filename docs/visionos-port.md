@@ -250,7 +250,8 @@ apply as on the desktop. Haptics are no-ops.
 
 `visionos/App/` is a SwiftUI app: a launcher `WindowGroup` with a Play tab
 (the game picker, disc status, the folder paths, Retro Rewind's pack, Play), a
-Miis tab and a Settings tab, and an `ImmersiveSpace` whose content
+Profiles tab when the app carries Retro Rewind, a Miis tab and a Settings tab,
+and an `ImmersiveSpace` whose content
 is a `CompositorLayer` (dedicated layout, `bgra8Unorm_srgb`, `depth32Float`,
 foveation off). The layer's `LayerRenderer` is passed to the provider and the
 game thread starts; the launcher window then closes itself, and the game's
@@ -315,6 +316,34 @@ Support folder, out of the Files app and of backups: they are Nintendo's and
 never in the app. Until then Miis show as silhouettes and the editor's choices
 as numbers. `MiiImages` draws on two threads and caches by look; the editor's
 face is drawn one request at a time, so a burst of changes costs one render.
+
+The Profiles tab is the Quest launcher's My profiles (`docs/quest-port.md`), the
+PC's UserProfilePage. It shows only when the app carries Retro Rewind, whose save
+it reads: online play is Retro Rewind's, on Retro WFC, and the unmodded game has
+no server to reach. `ProfilesView` shows the four licences of the save the pack's
+Riivolution XML redirects to, `riivolution/save/RetroWFC/RMCP/rksys.dat` in the
+virtual SD card around the pack (`RiivoFindXmls`, `GameStorage.retroRewindSave`),
+one at a time. Each has its Mii turned three-quarters, its name, its friend code
+(derived from the profile ID as `FriendCodeGenerator` does) with Copy, Make
+Primary (the licence the tab opens on) and WheelWizard's badges, beside a VR
+History page and a Stats page (VR, BR, games won and played). The VR and BR come
+from Pulsar's `RRRating.pul` in the NAND when it knows the profile
+(`RksysProfiles.swift`, the PC's `RRratingReader`). Retro WFC's public API gives
+the rest (`RetroWfc.swift`, `ProfileStore`):
+- A licence is Online, with a glow, while its friend code is in one of
+  `/api/roomstatus`'s rooms, asked every 40 s while the tab is on screen.
+- `VrHistoryView` draws `/api/leaderboard/player/<fc>/history?days=N` with Swift
+  Charts, by time or by match, over the PC's periods, and reloads whenever the
+  tab reads the save again.
+- `/api/leaderboard/player/<fc>` gives the Mii the licence last played with and
+  Retro WFC's 64-pixel picture of it, kept in the app's caches.
+
+The Mii shown is the one of the Mii database with the licence's ID, as the PC
+looks it up, so a Mii made in the Miis tab shows once a licence takes it; else
+Retro WFC's, while its ID is still the licence's; and Retro WFC's picture until
+the Mii parts are downloaded. The tab only reads: renaming a licence and
+changing its Mii are the game's License Settings. The Quest's and the PC's
+sidebar card has no counterpart, since the launcher has no sidebar.
 
 ## Building
 
@@ -460,6 +489,11 @@ OpenXR input to the game, to HIDAPI, which it turns off on visionOS, so
   On an Apple M1 Max a list picture takes 4.5 ms to draw and the editor's
   600-pixel face 14 ms. On the device, Miis made in the tab were offered in the
   game.
+- The Profiles tab: the Quest's `RksysProfilesTest` and `RetroWfcTest` pass on
+  the Swift port. On a Quest's Retro Rewind save it read the licence, its
+  friend code, `RRRating.pul`'s VR and its Mii from the Mii database. In the
+  simulator it showed them with Retro WFC's live VR history, and with faked
+  data the online glow and every badge. Not yet run on a headset.
 
 Not done: comfort tuning of the projection quad depth, the gesture thresholds,
 `render_scale`. Things to expect to tune first on hardware: the constant depth the

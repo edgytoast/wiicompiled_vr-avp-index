@@ -52,8 +52,8 @@ final class MiiImages: @unchecked Sendable {
         return queue
     }
 
-    static func headKey(_ mii: Mii, size: Int, withBody: Bool) -> String {
-        "\(withBody ? "mii" : "head"):\(size):\(mii.lookKey)"
+    static func headKey(_ mii: Mii, size: Int, withBody: Bool, pose: MiiRenderer.Pose = .front) -> String {
+        "\(withBody ? "mii" : "head"):\(size):\(pose.key):\(mii.lookKey)"
     }
 
     static func partKey(_ mii: Mii, part: MiiRenderer.Part, index: Int, size: Int) -> String {
@@ -76,11 +76,11 @@ final class MiiImages: @unchecked Sendable {
         cache.object(forKey: key as NSString)?.image
     }
 
-    /// `mii`, `size` pixels square, with its upper body unless not `withBody`.
-    func head(_ mii: Mii, size: Int, withBody: Bool = true, preview: Bool = false) async -> CGImage? {
-        let key = Self.headKey(mii, size: size, withBody: withBody)
+    /// `mii`, `size` pixels square and turned as `pose`, with its upper body unless not `withBody`.
+    func head(_ mii: Mii, size: Int, withBody: Bool = true, pose: MiiRenderer.Pose = .front, preview: Bool = false) async -> CGImage? {
+        let key = Self.headKey(mii, size: size, withBody: withBody, pose: pose)
         return await draw(key, on: preview ? previewer : renderers) { resource in
-            try MiiRenderer.render(resource, mii, size: size, bodies: withBody ? MiiRenderResource.bodies() : nil)
+            try MiiRenderer.render(resource, mii, size: size, pose: pose, bodies: withBody ? MiiRenderResource.bodies() : nil)
         }
     }
 
@@ -162,6 +162,8 @@ struct MiiPicture<Placeholder: View>: View {
     var preview = false
     /// Drawn this much larger than the square and cropped to it, so a head alone fills its cell.
     var zoom: CGFloat = 1
+    /// How the Mii is turned: straight ahead in the lists, three-quarters on a profile.
+    var pose: MiiRenderer.Pose = .front
     /// Whether the parts are installed, which the view is redrawn for when it changes.
     let installed: Bool
     @ViewBuilder let placeholder: () -> Placeholder
@@ -175,7 +177,7 @@ struct MiiPicture<Placeholder: View>: View {
         min(max(Int(side * zoom * displayScale) & ~1, 16), 4096)
     }
 
-    private var key: String { MiiImages.headKey(mii, size: pixels, withBody: withBody) + (installed ? "" : ":none") }
+    private var key: String { MiiImages.headKey(mii, size: pixels, withBody: withBody, pose: pose) + (installed ? "" : ":none") }
 
     var body: some View {
         ZStack {
@@ -197,13 +199,13 @@ struct MiiPicture<Placeholder: View>: View {
                 return
             }
             // A picture already drawn shows at once; the editor keeps its last face until the next.
-            if let hit = MiiImages.shared.cached(MiiImages.headKey(mii, size: pixels, withBody: withBody)) {
+            if let hit = MiiImages.shared.cached(MiiImages.headKey(mii, size: pixels, withBody: withBody, pose: pose)) {
                 image = hit
                 shownKey = key
                 return
             }
             if !preview { image = nil }
-            let drawn = await MiiImages.shared.head(mii, size: pixels, withBody: withBody, preview: preview)
+            let drawn = await MiiImages.shared.head(mii, size: pixels, withBody: withBody, pose: pose, preview: preview)
             guard !Task.isCancelled else { return }
             if drawn != nil || !preview { image = drawn }
             shownKey = key

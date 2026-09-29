@@ -34,6 +34,16 @@ enum GameStorage {
         return path.standardizedFileURL
     }
 
+    /// Retro Rewind's save: the pack's Riivolution XML sends the game's saves to
+    /// riivolution/save/RetroWFC/<game ID><region> in the virtual SD card, the folder around the
+    /// pack (RiivoFindXmls in runtime/src/hle/storage/riivolution.cpp), and this build runs PAL only.
+    static var retroRewindSave: URL {
+        RetroRewindPack.directory.deletingLastPathComponent().appendingPathComponent("riivolution/save/RetroWFC/RMCP/rksys.dat")
+    }
+
+    /// Pulsar's record of the VR and BR Retro Rewind plays with, per profile.
+    static var retroRewindRatings: URL { nandDirectory.appendingPathComponent("shared2/Pulsar/RetroRewind6/RRRating.pul") }
+
     enum DiscStatus { case missing, incomplete, ready }
 
     /// Whether DATA holds what the runtime's DVD layer accepts: the whole extracted partition,

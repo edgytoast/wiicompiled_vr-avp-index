@@ -124,6 +124,7 @@ drops the connection (the script retries).
 | Follow a Retro Rewind update that changed `Code.pul` | The app tells you it does not match the pack. Run `--retro-rewind download --retranslate` |
 | Change graphics or controls | The launcher's **Settings** tab, or `Config.toml` in the Files app (On My Apple Vision Pro > WiiCompiled Vision > WiiCompiled) |
 | Make, change or share a Mii | The launcher's **Miis** tab (it imports and exports `.mii` files); then in the game, **License Settings > Change Mii** |
+| See your friend code, VR and VR history | The launcher's **Profiles** tab, once you have played Retro Rewind |
 | Use another headset or team | `--device UDID`, `--team TEAMID` |
 
 ## When it stops

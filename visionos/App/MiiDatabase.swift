@@ -87,6 +87,16 @@ enum MiiDatabase {
         try slots(file).compactMap { block in block.flatMap { try? MiiData.parse(Data($0)) } }
     }
 
+    /// The database's Miis by ID, as the PC's GetByAvatarId finds them: the first slot holding an ID
+    /// is that ID's Mii, and one the PC could not read either is left out.
+    static func byId(_ file: URL) throws -> [UInt32: Mii] {
+        var found: [UInt32: Mii?] = [:]
+        for case let block? in try slots(file) where found[readId(block, 0)] == nil {
+            found[readId(block, 0)] = .some(try? MiiData.parse(Data(block)))
+        }
+        return found.compactMapValues { $0 }
+    }
+
     /// Adds a Mii in the first free slot.
     static func add(_ file: URL, _ mii: Mii) throws {
         let block = try MiiData.serialize(mii)

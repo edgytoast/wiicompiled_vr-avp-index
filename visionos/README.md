@@ -8,10 +8,11 @@ own disc, follow [`../docs/visionos-getting-started.md`](../docs/visionos-gettin
 - `CMakeLists.txt`: the Xcode project (the runtime tree as a subdirectory, the
   SwiftUI app embedding the games as frameworks, WiiCompiled and, when
   translated, Retro Rewind, and loading the chosen one at Play).
-- `App/`: the SwiftUI sources (launcher with Play, Miis and Settings tabs, the
-  game picker, the Retro Rewind pack downloader, the game loader, the Mii
-  database editor and its picture renderer, the Config.toml editor),
-  `Info.plist` and entitlements.
+- `App/`: the SwiftUI sources (launcher with Play, Profiles, Miis and Settings
+  tabs, the game picker, the Retro Rewind pack downloader, the game loader,
+  Retro Rewind's licences with their Retro WFC data, the Mii database editor
+  and its picture renderer, the Config.toml editor), `Info.plist` and
+  entitlements.
 - `Build-VisionOSDawn.sh`: Dawn (Metal, static) for the `xros` or
   `xrsimulator` SDK, as the package Aurora's provider consumes.
 - `Build-VisionOS.sh`: Dawn, configure, build, optionally install on the

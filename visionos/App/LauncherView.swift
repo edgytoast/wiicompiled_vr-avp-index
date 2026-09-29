@@ -3,13 +3,23 @@
 import SwiftUI
 
 /// The window the app opens with: a Play tab (where the game files go, whether they
-/// are there, and the button that opens the immersive space), a Miis tab (the game's
-/// Mii database and its editor) and a Settings tab.
+/// are there, and the button that opens the immersive space), a Profiles tab (Retro
+/// Rewind's licences as it plays them online), a Miis tab (the game's Mii database and
+/// its editor) and a Settings tab.
 struct LauncherView: View {
+    @EnvironmentObject private var model: GameModel
+
     var body: some View {
         TabView {
             PlayView()
                 .tabItem { Label("Play", systemImage: "play.fill") }
+            // Profiles are Retro Rewind's save, which a build without the mod never has.
+            if model.offersRetroRewind {
+                NavigationStack {
+                    ProfilesView()
+                }
+                .tabItem { Label("Profiles", systemImage: "person.text.rectangle") }
+            }
             NavigationStack {
                 MiisView()
             }
