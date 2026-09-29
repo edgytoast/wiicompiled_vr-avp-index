@@ -95,7 +95,7 @@ pass waits on it. Aurora's side is `aurora-main/lib/webgpu/metal_interop.cpp`
 ### Passthrough and immersion
 
 The room is shown two ways at once. The SwiftUI `ImmersiveSpace` opens in
-*mixed* or *full* immersion (the launcher's "Show my room" switch); in mixed
+*mixed* or *full* immersion (the launcher's Settings > Virtual screen > "Show my room", remembered across launches); in mixed
 immersion the compositor blends the drawable over the surroundings by alpha.
 The game's live `[vr] passthrough` setting (the same one as on the Quest, on by
 default) reaches the provider as `xr_visionos_set_frame_environment`: when set,

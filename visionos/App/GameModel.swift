@@ -78,6 +78,7 @@ final class GameModel: ObservableObject {
         offersRetroRewind = RetroRewindBuild.available && GameLibrary.isEmbedded(GameChoice.retroRewind.frameworkName)
         let remembered = GameChoice(rawValue: UserDefaults.standard.string(forKey: GameModel.selectedGameKey) ?? "")
         selectedGame = offersRetroRewind ? (remembered ?? .base) : .base
+        immersionStyle = (UserDefaults.standard.object(forKey: GameModel.wantsRoomKey) as? Bool ?? true) ? .mixed : .full
         refreshDisc()
         if selectedGame == .retroRewind { refreshPack() }
     }
@@ -252,10 +253,16 @@ final class GameModel: ObservableObject {
         GameLibrary.shared?.requestQuit()
     }
 
+    /// Whether the immersive space opens in the room (mixed) or fully immersive; the Settings
+    /// tab's "Show my room around the menu screen", remembered across launches.
     var wantsRoom: Bool {
         get { immersionStyle is MixedImmersionStyle }
-        set { immersionStyle = newValue ? .mixed : .full }
+        set {
+            immersionStyle = newValue ? .mixed : .full
+            UserDefaults.standard.set(newValue, forKey: GameModel.wantsRoomKey)
+        }
     }
+    private static let wantsRoomKey = "showRoom"
 }
 
 /// The games the app can carry, one embedded framework each (runtime/cmake/PublicProducts.cmake).

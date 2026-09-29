@@ -69,13 +69,9 @@ private struct PlayView: View {
                 RetroRewindPackView()
             }
 
-            GroupBox("Headset") {
+            GroupBox("How to play") {
                 VStack(alignment: .leading, spacing: 8) {
-                    Toggle("Show my room around the menu screen", isOn: Binding(
-                        get: { model.wantsRoom },
-                        set: { model.wantsRoom = $0 }))
-                        .disabled(model.phase == .running)
-                    Text("Races are fully immersive either way. In the menus, look at a button and pinch; move your hand to adjust the pointer while pinching, and let go to press. A Bluetooth game controller is the way to actually race. Dismiss the immersive space (press the Digital Crown) to end the game.")
+                    Text("In the menus, look at a button and pinch; move your hand to adjust the pointer while pinching, and let go to press. Race with a Bluetooth game controller or with your hands (Settings > Camera). Press the Digital Crown to end the game. Whether your room shows around the menus is in Settings > Virtual screen.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
