@@ -166,7 +166,9 @@ set_target_properties(WiiCompiledVision PROPERTIES
     XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${MKW_VISIONOS_APP_DIR}/WiiCompiledVision.entitlements"
     XCODE_ATTRIBUTE_DEAD_CODE_STRIPPING YES
     XCODE_ATTRIBUTE_SWIFT_OPTIMIZATION_LEVEL "-O"
-    XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS NO)
+    XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS NO
+    # The layered Home View icon in App/Assets.xcassets (a Back/Middle/Front image stack).
+    XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME "AppIcon")
 # The games are not linked: each is a framework (runtime/cmake/PublicProducts.cmake) embedded in
 # the app, and the chosen one is loaded with dlopen when the player presses Play
 # (visionos/App/GameLibrary.swift), so the runtime's static initialisers read the Config.toml the
@@ -193,7 +195,8 @@ file(COPY "${MKW_VISIONOS_RUNTIME_ASSETS}/wii/" DESTINATION "${MKW_VISIONOS_STAG
 set(MKW_VISIONOS_BUNDLED_RESOURCES
     "${MKW_VISIONOS_RUNTIME_ASSETS}/dsp/dsp_coef.bin"
     "${MKW_VISIONOS_RUNTIME_ASSETS}/pipeline/initial_pipeline_cache.db"
-    "${MKW_VISIONOS_STAGED_RESOURCES}/wii_bootstrap")
+    "${MKW_VISIONOS_STAGED_RESOURCES}/wii_bootstrap"
+    "${MKW_VISIONOS_APP_DIR}/Assets.xcassets")
 target_sources(WiiCompiledVision PRIVATE ${MKW_VISIONOS_BUNDLED_RESOURCES})
 set_source_files_properties(${MKW_VISIONOS_BUNDLED_RESOURCES} PROPERTIES
     MACOSX_PACKAGE_LOCATION Resources
