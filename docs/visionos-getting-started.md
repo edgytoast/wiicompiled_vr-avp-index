@@ -55,7 +55,7 @@ brew install --cask dotnet-sdk
 3. When asked, turn on **Developer Mode** on the headset (**Settings >
    Privacy & Security > Developer Mode**) and restart it.
 
-A cable is not required, but the disc copy (2.5 GB) is far faster over one.
+The dev strap is not required, but the disc copy (2.5 GB) is far faster over one.
 
 ### 4. Get the project
 
