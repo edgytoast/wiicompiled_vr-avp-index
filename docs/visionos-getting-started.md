@@ -73,8 +73,9 @@ the disc image and whether you want Retro Rewind), or in Terminal:
 visionos/Make-VisionOS-App.command --game ~/Downloads/RMCP01.rvz --retro-rewind download
 ```
 
-Leave out `--retro-rewind download` for the plain game. The script prints
-seven steps:
+Leave out `--retro-rewind download` for the plain game. Without `--game`, the
+script asks for the disc at step 2: drag the image file from Finder onto the
+Terminal window and press Return. The script prints seven steps:
 
 1. **Checking this Mac**: Xcode, the visionOS SDK, the tools, your team, the
    headset. Anything missing stops here with the fix to apply.

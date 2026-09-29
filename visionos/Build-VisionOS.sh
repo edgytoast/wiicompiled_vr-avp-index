@@ -134,16 +134,32 @@ if [[ ${install} -eq 1 ]]; then
             echo "ERROR: no paired Apple Vision Pro; pair it in Xcode first (or pass --device UDID)" >&2
             exit 1
         fi
-        # The connection to a headset that is dozing off drops now and then; try a few times.
+        # A headset that is off the head is locked, and devicectl cannot reach it (error 4000,
+        # "connection reset by peer"); one dozing off drops the connection too. Keep retrying
+        # for about two minutes, long enough to put it on, and keep devicectl's wall of errors
+        # out of the way unless the last attempt fails too.
+        install_log="$(mktemp -t wiicompiled-install)"
+        attempts=24
         attempt=1
-        until xcrun devicectl device install app --device "${device}" "${app}"; do
-            if [[ ${attempt} -ge 3 ]]; then
-                echo "ERROR: could not install on ${device}; unlock the headset, keep it awake and try again" >&2
+        until xcrun devicectl device install app --device "${device}" "${app}" > "${install_log}" 2>&1; do
+            if [[ ${attempt} -ge ${attempts} ]]; then
+                cat "${install_log}" >&2
+                rm -f "${install_log}"
+                echo "ERROR: could not install on the Apple Vision Pro (${device})." >&2
+                echo "       Put the headset on, unlock it, check it is still paired (Xcode > Window > Devices and Simulators), and run again." >&2
                 exit 1
             fi
-            echo "Install attempt ${attempt} failed; retrying in 5 s" >&2
+            if [[ ${attempt} -eq 1 ]]; then
+                echo "" >&2
+                echo ">>> The Apple Vision Pro cannot be reached. Please put your headset on and unlock it;" >&2
+                echo ">>> the installer retries every 5 seconds (for about 2 minutes)." >&2
+            else
+                echo "    Still waiting for the headset (attempt ${attempt} of ${attempts})..." >&2
+            fi
             attempt=$((attempt + 1)); sleep 5
         done
+        cat "${install_log}"
+        rm -f "${install_log}"
         echo "Installed on ${device}"
     fi
 fi

@@ -80,6 +80,107 @@ with_timeout() {
     if kill -0 "${pid}" 2>/dev/null; then kill "${pid}" 2>/dev/null; wait "${pid}" 2>/dev/null; return 124; fi
     wait "${pid}"
 }
+ask_disc() {
+    # Asks for the disc image in the Terminal: dragging a file onto the window types its path,
+    # with spaces and other specials backslash-escaped (or the whole path quoted) and a
+    # trailing space. Prints the plain path; returns 1 when the user just presses Return.
+    local raw path
+    while true; do
+        printf '\n    %sDrag your Mario Kart Wii disc image (.iso, .rvz, .wbfs, .ciso) onto this window,%s\n' "${bold}" "${reset}" >&2
+        printf '    then press Return (or just Return to stop): ' >&2
+        IFS= read -r raw || return 1
+        # Trim surrounding blanks, then one pair of surrounding quotes, then the backslash escapes.
+        raw="${raw#"${raw%%[![:space:]]*}"}"; raw="${raw%"${raw##*[![:space:]]}"}"
+        [[ -n "${raw}" ]] || return 1
+        if [[ "${raw}" == \'*\' || "${raw}" == \"*\" ]]; then path="${raw:1:${#raw}-2}"
+        else path="$(printf '%s' "${raw}" | sed -E 's/\\(.)/\1/g')"; fi
+        [[ "${path}" == "~/"* ]] && path="${HOME}/${path#"~/"}"
+        if [[ -f "${path}" ]]; then printf '%s' "${path}"; return 0; fi
+        printf '    %sNot a file: %s%s\n' "${red}" "${path}" "${reset}" >&2
+    done
+}
+# Copies a folder into the app's container on the headset with a progress bar. devicectl
+# reports nothing while it copies, so the folder goes over in batches (one folder's files,
+# at most 128 MB or 400 files each, a single larger file alone) and the bar moves by each
+# batch's bytes. devicectl skips files already there unchanged, so a rerun resumes.
+copy_disc_with_progress() {
+    local source="$1" destination="$2"
+    local plan total done_bytes=0 started batch_bytes=0 batch_dir="" batch_id="" id size path dir attempt
+    local sources=() tab=$'\t'
+    plan="$(mktemp -t wiicompiled-copy)"
+    # "<batch>\t<bytes>\t<relative path>", grouped by folder in path order.
+    ( cd "${source}" && find -L . -type f -print0 | xargs -0 stat -L -f '%z%t%N' ) \
+        | sed "s#${tab}\./#${tab}#" | sort -t "${tab}" -k2 \
+        | awk -F '\t' -v OFS='\t' '
+            { dir = $2; sub(/\/[^\/]*$/, "", dir); if (dir == $2) dir = "" }
+            NR == 1 || dir != last || bytes + $1 > 134217728 || count >= 400 { batch++; bytes = 0; count = 0; last = dir }
+            { bytes += $1; count++; print batch, $1, $2 }' > "${plan}"
+    total="$(awk -F '\t' '{ t += $2 } END { printf "%d", t }' "${plan}")"
+    started="$(date +%s)"
+    draw_bar() {
+        local width=36 filled percent elapsed rate eta
+        # (bash evaluates both arms of ?: , so a zero divisor needs an if.)
+        percent=100; if (( total > 0 )); then percent=$(( done_bytes * 100 / total )); fi
+        filled=$(( width * percent / 100 ))
+        elapsed=$(( $(date +%s) - started ))
+        rate=0; if (( elapsed > 0 )); then rate=$(( done_bytes / elapsed )); fi
+        # The first batches are the disc's many tiny files: no estimate until it means something.
+        eta="estimating..."
+        if (( done_bytes >= total )); then
+            eta="$(printf 'done in %d:%02d' $(( elapsed / 60 )) $(( elapsed % 60 )))"
+        elif (( rate > 0 && (percent >= 5 || elapsed >= 10) )); then
+            eta="$(printf '%d:%02d left' $(( (total - done_bytes) / rate / 60 )) $(( (total - done_bytes) / rate % 60 )))"
+        fi
+        local bar; bar="$(printf '%*s' "${filled}" '' | tr ' ' '#')$(printf '%*s' $(( width - filled )) '' | tr ' ' '.')"
+        printf '\r    [%s] %3d%%  %s of %s  %s/s  %-16s' "${bar}" "${percent}" \
+            "$(human_bytes "${done_bytes}")" "$(human_bytes "${total}")" "$(human_bytes "${rate}")" "${eta}"
+        [[ -t 1 ]] || printf '\n'
+    }
+    flush_batch() {
+        [[ ${#sources[@]} -gt 0 ]] || return 0
+        # Several sources go into the destination folder; a single one is written AS the
+        # destination (a lone cert.bin sent to "DATA" became a file named DATA, wiping the
+        # folder), so a one-file batch names the file's full path.
+        local target="${destination}${batch_dir:+/${batch_dir}}"
+        if [[ ${#sources[@]} -eq 2 ]]; then target="${target}/${sources[1]##*/}"; fi
+        attempt=1
+        until xcrun devicectl device copy to --device "${device}" "${sources[@]}" \
+                --destination "${target}" --domain-type appDataContainer \
+                --domain-identifier "${bundle}" < /dev/null > /dev/null 2>&1; do
+            [[ ${attempt} -lt 24 ]] || { printf '\n'; rm -f "${plan}"; fail "The disc could not be copied to the headset." \
+                "Put the headset on, unlock it and run the script again (it resumes where it stopped)," \
+                "or copy Assets/DATA yourself: Finder > the headset > Files > WiiCompiled Vision > WiiCompiled > DATA."; }
+            printf '\n'
+            if [[ ${attempt} -eq 1 ]]; then
+                note "The Apple Vision Pro cannot be reached. Please put your headset on and unlock it;"
+                note "the copy retries every 5 seconds (for about 2 minutes)."
+            else
+                note "Still waiting for the headset (attempt ${attempt} of 24)..."
+            fi
+            attempt=$((attempt + 1)); sleep 5
+        done
+        done_bytes=$(( done_bytes + batch_bytes ))
+        draw_bar
+        sources=(); batch_bytes=0
+    }
+    draw_bar
+    while IFS="${tab}" read -r id size path; do
+        if [[ "${id}" != "${batch_id}" ]]; then
+            flush_batch
+            batch_id="${id}"
+            dir="${path%/*}"; [[ "${dir}" == "${path}" ]] && dir=""
+            batch_dir="${dir}"
+        fi
+        sources+=(--source "${source}/${path}")
+        batch_bytes=$(( batch_bytes + size ))
+    done < "${plan}"
+    flush_batch
+    printf '\n'
+    rm -f "${plan}"
+}
+human_bytes() {
+    awk -v b="$1" 'BEGIN { if (b >= 1e9) printf "%.2f GB", b / 1e9; else if (b >= 1e6) printf "%.0f MB", b / 1e6; else printf "%.0f KB", b / 1e3 }'
+}
 ask_yes() {
     # "$1" question; yes when not on a terminal would be presumptuous, so only asks when it can.
     [[ -t 0 ]] || return 1
@@ -225,8 +326,13 @@ if [[ ${reinstall} -eq 0 ]]; then
         done_msg "Disc extracted to Assets/DATA"
     elif [[ -f Assets/main.dol && -f Assets/DATA/sys/fst.bin ]]; then
         done_msg "Already extracted (Assets/DATA); pass --game IMAGE to extract again"
+    elif [[ -t 0 ]] && game="$(ask_disc)"; then
+        "${repo_root}/Launcher/macos/extract-disc.command" --game "${game}" --assets-dir "${repo_root}/Assets" --nodtool "${nodtool}" \
+            || fail "The disc could not be extracted." "A clean PAL (RMCP01) Mario Kart Wii image is required (.iso, .rvz, .wbfs, .ciso, .gcm)."
+        done_msg "Disc extracted to Assets/DATA"
     else
-        fail "No disc yet." "Run with --game /path/to/RMCP01.iso (or double-click the script to pick the file)."
+        fail "No disc yet." "Run again and drag the disc image onto the Terminal window when asked," \
+            "or pass --game /path/to/RMCP01.iso (or double-click the script to pick the file)."
     fi
 fi
 
@@ -336,19 +442,31 @@ if [[ ${copy_disc} -eq 1 && ${reinstall} -eq 0 ]]; then
         xcrun devicectl device info files --device "${device}" --domain-type appDataContainer --domain-identifier "${bundle}" \
             --subdirectory "$1" 2>/dev/null
     }
-    if listing Documents/WiiCompiled/DATA/sys | grep -q 'fst.bin'; then
+    # Reaching the headset at all first: a locked one answers nothing, which would read as
+    # "no disc there" and start a pointless copy.
+    attempt=1
+    until xcrun devicectl device info files --device "${device}" --domain-type appDataContainer \
+            --domain-identifier "${bundle}" --subdirectory Documents >/dev/null 2>&1; do
+        [[ ${attempt} -lt 24 ]] || fail "The Apple Vision Pro cannot be reached." \
+            "Put the headset on, unlock it and run the script again (finished steps are skipped)."
+        if [[ ${attempt} -eq 1 ]]; then
+            note "The Apple Vision Pro cannot be reached. Please put your headset on and unlock it;"
+            note "the installer retries every 5 seconds (for about 2 minutes)."
+        else
+            note "Still waiting for the headset (attempt ${attempt} of 24)..."
+        fi
+        attempt=$((attempt + 1)); sleep 5
+    done
+    local_files="$(find -L "${repo_root}/Assets/DATA" -type f | wc -l | tr -d ' ')"
+    remote_files() { listing Documents/WiiCompiled/DATA | grep 'Readable' | grep -vc 'Directory' || true; }
+    if [[ "$(remote_files)" -ge "${local_files}" ]] && listing Documents/WiiCompiled/DATA/sys | grep -q 'fst.bin'; then
         done_msg "The headset already has the disc (Documents/WiiCompiled/DATA)"
     else
-        note "About $(du -sh Assets/DATA | cut -f1) over the cable (a few minutes; much longer over Wi-Fi)"
-        attempt=1
-        until xcrun devicectl device copy to --device "${device}" --source "${repo_root}/Assets/DATA" \
-                --destination Documents/WiiCompiled/DATA --domain-type appDataContainer --domain-identifier "${bundle}" >/dev/null 2>&1; do
-            [[ ${attempt} -lt 3 ]] || fail "Copying the disc to the headset failed three times." \
-                "Copy Assets/DATA yourself: Finder > the headset > Files > WiiCompiled Vision > WiiCompiled > DATA (or the Files app), then launch the app."
-            note "Connection dropped; retrying (${attempt}/3)"
-            attempt=$((attempt + 1)); sleep 5
-        done
-        listing Documents/WiiCompiled/DATA/sys | grep -q 'fst.bin' || fail "The disc did not arrive complete on the headset; run again."
+        note "About $(du -shL Assets/DATA | cut -f1) over the cable (a few minutes; much longer over Wi-Fi)"
+        copy_disc_with_progress "${repo_root}/Assets/DATA" Documents/WiiCompiled/DATA
+        arrived="$(remote_files)"
+        [[ "${arrived}" -ge "${local_files}" ]] && listing Documents/WiiCompiled/DATA/sys | grep -q 'fst.bin' \
+            || fail "The disc did not arrive complete on the headset (${arrived} of ${local_files} files); run the script again."
         done_msg "Disc copied"
     fi
 else
