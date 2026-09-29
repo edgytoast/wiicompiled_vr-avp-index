@@ -184,6 +184,7 @@ int g_vrFrameInterpolationMode = [] {
 }();
 int g_vrFirstPersonHiddenModel = RuntimeConfigFile::VrFirstPersonHiddenModel();
 bool g_openxrDiagnosticsLogging = RuntimeConfigFile::DiagnosticsOpenXRLogging(false);
+bool g_firstPersonDiagnosticsLogging = RuntimeConfigFile::DiagnosticsFirstPersonLogging(false);
 // Config spellings and menu labels for the desktop mirror, index-matched to
 // AuroraStereoMirrorView so the combo selection converts to either directly.
 constexpr std::array<const char*, 5> kVrMirrorViewNames{"normal", "both", "left", "right", "none"};
@@ -1465,7 +1466,7 @@ void DrawVrSettings() {
             "fully virtual; the immersive window and the Flat Screen race have the room "
             "around them too. Applies immediately.");
     }
-    // Shows the live level, which debug.wiicompiled.foveation can override.
+    // Shows the live level Aurora holds.
     g_vrFoveation = static_cast<int>(aurora_get_stereo_foveation());
     if (ImGui::Combo("Foveated rendering", &g_vrFoveation, kVrFoveationLabels.data(),
                      static_cast<int>(kVrFoveationLabels.size()))) {
@@ -1736,8 +1737,8 @@ void DrawVrCameraSettings() {
         ImGui::SetTooltip(
             "The game's own culling: karts, characters and course objects outside its chase "
             "camera's view are not drawn, so a head turn or a look over the shoulder finds them "
-            "missing. Off draws them anyway, at some GPU cost. The draw distance is unchanged, "
-            "and the Flat screen race view always keeps the game's culling.");
+            "missing. Off draws them anyway, at some GPU cost, and is the PC's default. The draw "
+            "distance is unchanged, and the Flat screen race view always keeps the game's culling.");
     }
     ImGui::Separator();
     if (ImGui::Button("Reset first-person defaults")) {
@@ -1949,6 +1950,17 @@ void DrawDiagnosticsSettings() {
         ImGui::TextDisabled("OpenXR is not running, so nothing is logged until a VR session starts.");
     }
     ImGui::PopTextWrapPos();
+    if (ImGui::Checkbox("First-person camera logging", &g_firstPersonDiagnosticsLogging)) {
+        RuntimeConfigFile::SetDiagnosticsFirstPersonLogging(g_firstPersonDiagnosticsLogging);
+        mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Writes the first-person camera's anchor, view and kart pose, and the cockpit's\n"
+            "wheel and view checks, to console.log once per second during a race.\n"
+            "For reporting a misplaced first-person view. Off by default; it costs a little\n"
+            "game-thread time while on. Applies immediately and is remembered.");
+    }
 
     ImGui::Separator();
     const bool exporting = g_logExportInProgress.load(std::memory_order_acquire);

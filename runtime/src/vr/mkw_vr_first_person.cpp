@@ -336,6 +336,8 @@ struct FirstPersonState {
     float cockpit_units_per_meter = RuntimeConfigFile::kVrCockpitUnitsPerMeterDefault;
     bool steering_wheel = RuntimeConfigFile::kVrSteeringWheelDefault;
     bool native_steering_wheel = RuntimeConfigFile::kVrNativeSteeringWheelDefault;
+    // [diagnostics] first_person_logging: the once-a-second camera lines below.
+    bool diagnostic_logging = false;
     // Read at the race draw boundary, consumed at the seal.
     struct CockpitLatch {
         bool valid = false;
@@ -1206,6 +1208,9 @@ void FinishNativeWheelFrameLocked() noexcept {
 }
 
 void LogCockpitLocked(uint64_t frame, const Mtx34& view_from_world) noexcept {
+    if (!g_state.diagnostic_logging) {
+        return;
+    }
     if (g_state.logged_frame != 0 && frame - g_state.logged_frame < 60) {
         return;
     }
@@ -1237,8 +1242,12 @@ void LogCockpitLocked(uint64_t frame, const Mtx34& view_from_world) noexcept {
 
 void LogAnchorLocked(uint64_t frame, const Mtx34& anchor, const Mtx34& view_from_world,
                      const KartPoseRead& kart, const Mtx34& kart_from_local) noexcept {
-    // One line per second at 60 Hz: enough to confirm the offsets on-device
-    // without drowning the log during a race.
+    // One set of lines per second at 60 Hz when [diagnostics] first_person_logging
+    // asks for them: enough to confirm the offsets on-device. They are written
+    // under the first-person lock, so they stay off otherwise.
+    if (!g_state.diagnostic_logging) {
+        return;
+    }
     if (g_state.logged_frame != 0 && frame - g_state.logged_frame < 60) {
         return;
     }
@@ -1356,6 +1365,7 @@ void MkwVRFirstPersonApplyConfiguredSettings() noexcept {
         g_state.cockpit_units_per_meter = cockpit_units;
         g_state.steering_wheel = RuntimeConfigFile::VrSteeringWheel();
         g_state.native_steering_wheel = RuntimeConfigFile::VrNativeSteeringWheel();
+        g_state.diagnostic_logging = RuntimeConfigFile::DiagnosticsFirstPersonLogging();
         g_state.native_wheel_fallback = false;
         g_state.native_wheel_unmatched = 0;
     }

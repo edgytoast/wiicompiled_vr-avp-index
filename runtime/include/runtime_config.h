@@ -93,6 +93,7 @@ struct RuntimeUserConfig {
     // F10 > Diagnostics: OpenXR pacing and presentation logging in console.log.
     // Off unless set; it is a bug-report aid, not something to leave running.
     std::optional<bool> diagnosticsOpenXRLogging;
+    std::optional<bool> diagnosticsFirstPersonLogging;
     std::optional<float> audioVolume;
     std::optional<float> audioMusicVolume;
     std::optional<float> audioSoundEffectsVolume;
@@ -238,8 +239,17 @@ inline constexpr bool kVrNativeSteeringWheelDefault = true;
 inline constexpr bool kVrHandSteeringDefault = true;
 // The game hides karts and objects its own camera cannot see, which a head
 // turn in VR reveals. object_culling false draws them anyway (see
-// vr/mkw_vr_culling.h); it only takes effect while VR is enabled.
+// vr/mkw_vr_culling.h); it only takes effect while VR is enabled. The PC
+// draws them by default; the Quest keeps the game's culling, since every
+// extra model costs its GPU twice. The macro is the same default for the
+// config file written on first launch.
+#if defined(__ANDROID__)
 inline constexpr bool kVrObjectCullingDefault = true;
+#define MKW_VR_OBJECT_CULLING_DEFAULT_TOML "true"
+#else
+inline constexpr bool kVrObjectCullingDefault = false;
+#define MKW_VR_OBJECT_CULLING_DEFAULT_TOML "false"
+#endif
 // The cockpit hands follow the headset's hand tracking (the controllers' touch
 // sensors while they are held, the cameras once they are put down, when bare
 // hands also drive). Opt-in, and only offered on the Quest for now; the
@@ -585,7 +595,7 @@ inline void EnsureConfigFile() {
               "# The game hides karts and objects its own camera cannot see.\n"
               "# object_culling = false draws them anyway, so a head turn or a\n"
               "# look over the shoulder shows them; it costs GPU time.\n"
-              "object_culling = true\n"
+              "object_culling = " MKW_VR_OBJECT_CULLING_DEFAULT_TOML "\n"
               "# Hand steering (by heurazy): squeeze a grip near the wheel or\n"
               "# handlebar to take hold of it with the tracked controllers, and\n"
               "# turn it to steer. Releasing both grips gives steering back to the\n"
@@ -881,6 +891,8 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
         readRangedFloat("wheel_tracking_grace", kVrWheelTrackingGraceMin, kVrWheelTrackingGraceMax);
     config.vrWheelHaptics = FindConfigValue<bool>(document, "vr", "wheel_haptics");
     config.diagnosticsOpenXRLogging = FindConfigValue<bool>(document, "diagnostics", "openxr_logging");
+    config.diagnosticsFirstPersonLogging =
+        FindConfigValue<bool>(document, "diagnostics", "first_person_logging");
 
     auto readVolume = [&](std::string_view key) -> std::optional<float> {
         auto value = FindConfigFloat(document, "audio", key);
@@ -1703,6 +1715,17 @@ inline bool DiagnosticsOpenXRLogging(bool fallback = false) {
 inline bool SetDiagnosticsOpenXRLogging(bool value) {
     Mutable().diagnosticsOpenXRLogging = value;
     return WriteSetting("diagnostics", "openxr_logging", value ? "true" : "false");
+}
+
+// The first-person camera's once-a-second anchor, view, pose and cockpit lines
+// (vr/mkw_vr_first_person.cpp): off unless someone is debugging the camera.
+inline bool DiagnosticsFirstPersonLogging(bool fallback = false) {
+    return Get().diagnosticsFirstPersonLogging.value_or(fallback);
+}
+
+inline bool SetDiagnosticsFirstPersonLogging(bool value) {
+    Mutable().diagnosticsFirstPersonLogging = value;
+    return WriteSetting("diagnostics", "first_person_logging", value ? "true" : "false");
 }
 
 inline std::string VrFirstPersonRotation(std::string fallback = kVrFirstPersonRotationDefault) {

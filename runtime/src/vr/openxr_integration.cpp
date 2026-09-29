@@ -41,7 +41,6 @@
 #elif defined(__ANDROID__)
 #include "vr/openxr_android.h"
 #include "vr/openxr_vulkan.h"
-#include <sys/system_properties.h>
 #include <time.h>
 #include <unistd.h>
 #define XR_USE_TIMESPEC
@@ -503,7 +502,7 @@ public:
         // How every eye is replayed, fixed: it ends at the frame's final GXCopyDisp, so it holds the
         // image the game presented; it keeps the EFB reset after a display copy, which can only be
         // an earlier one's and erases what that last copy did not show; and it is drawn in one
-        // render pass (the Quest's debug.wiicompiled.eye_passes splits it again, for A/B timing).
+        // render pass.
         aurora_set_stereo_stop_at_display_copy(true);
         aurora_set_stereo_skip_copy_clears(false);
         aurora_set_stereo_single_pass_eyes(true);
@@ -938,11 +937,8 @@ private:
             // The settings panel gets a compositor layer of its own while it is
             // open, and Aurora leaves it out of the eyes. A backend that could
             // not make that layer has the panel drawn into the eyes instead.
-            const bool panel_layer = backend_->PanelLayerAvailable() && !PanelLayerForcedOff();
+            const bool panel_layer = backend_->PanelLayerAvailable();
             aurora_set_stereo_panel_layer(panel_layer);
-            PollEyePassesOverride();
-            PollFoveationOverride();
-            PollWindowEyesOverride();
             presentation.panel.requested = panel_layer && OpenXRSettingsPanelOpen();
 
             // Pipeline caches are stored where their stall is least visible: once when a race
@@ -1508,11 +1504,7 @@ private:
     }
 
     bool WindowShapedEyes() const noexcept {
-#if defined(__ANDROID__)
-        return kWindowShapedEyesSupported && !window_eyes_forced_off_;
-#else
         return kWindowShapedEyesSupported;
-#endif
     }
 
     // The seated frame the controllers are located in for hand steering: the
@@ -1622,115 +1614,6 @@ private:
         screen.half_height_meters = extents[1];
         screen.valid = true;
         return screen;
-    }
-
-    // Android: `adb shell setprop debug.wiicompiled.panel_layer 0` draws the settings panel into
-    // the eyes again, to compare the two ways or to rule out a runtime's quad layers. Read about
-    // once a second.
-    bool PanelLayerForcedOff() noexcept {
-#if defined(__ANDROID__)
-        if (panel_layer_poll_ == 0) {
-            panel_layer_poll_ = 72;
-            char value[PROP_VALUE_MAX] = {};
-            const bool off =
-                __system_property_get("debug.wiicompiled.panel_layer", value) > 0 && value[0] == '0';
-            if (off != panel_layer_forced_off_) {
-                panel_layer_forced_off_ = off;
-                RT_LOG(RT_TAG_RUNTIME) << "OpenXR: settings panel "
-                                       << (off ? "drawn into the eyes" : "on its own layer")
-                                       << " (debug.wiicompiled.panel_layer)" << std::endl;
-            }
-        }
-        --panel_layer_poll_;
-        return panel_layer_forced_off_;
-#else
-        return false;
-#endif
-    }
-
-    // Android: `adb shell setprop debug.wiicompiled.eye_passes 0` replays each eye in one render
-    // pass per recorded pass again, and 1 forces the single pass, to compare the two within one
-    // session. An empty value restores the single pass every eye has otherwise. Read about once a
-    // second.
-    void PollEyePassesOverride() noexcept {
-#if defined(__ANDROID__)
-        if (eye_passes_poll_ != 0) {
-            --eye_passes_poll_;
-            return;
-        }
-        eye_passes_poll_ = 72;
-        char value[PROP_VALUE_MAX] = {};
-        int override_value = -1;
-        if (__system_property_get("debug.wiicompiled.eye_passes", value) > 0 &&
-            (value[0] == '0' || value[0] == '1')) {
-            override_value = value[0] - '0';
-        }
-        if (override_value == eye_passes_override_) {
-            return;
-        }
-        eye_passes_override_ = override_value;
-        const bool single = override_value != 0;
-        aurora_set_stereo_single_pass_eyes(single);
-        RT_LOG(RT_TAG_RUNTIME) << "OpenXR: eyes replayed in "
-                               << (single ? "one render pass" : "one render pass per recorded pass")
-                               << (override_value >= 0 ? " (debug.wiicompiled.eye_passes)"
-                                                       : " (debug.wiicompiled.eye_passes cleared)")
-                               << std::endl;
-#endif
-    }
-
-    // Android: `adb shell setprop debug.wiicompiled.foveation <0-3>` overrides the foveation level
-    // (off, low, medium, high) within one session, for A/B timing; an empty value hands it back to
-    // the settings. Levels need a session launched with foveation on (see VrFoveation). Read about
-    // once a second.
-    void PollFoveationOverride() noexcept {
-#if defined(__ANDROID__)
-        if (foveation_poll_ != 0) {
-            --foveation_poll_;
-            return;
-        }
-        foveation_poll_ = 72;
-        char value[PROP_VALUE_MAX] = {};
-        int override_value = -1;
-        if (__system_property_get("debug.wiicompiled.foveation", value) > 0 && value[0] >= '0' &&
-            value[0] <= '3' && value[1] == '\0') {
-            override_value = value[0] - '0';
-        }
-        if (override_value == foveation_override_) {
-            return;
-        }
-        foveation_override_ = override_value;
-        const uint32_t level = override_value >= 0
-                                   ? static_cast<uint32_t>(override_value)
-                                   : RuntimeConfigFile::VrFoveationLevelIndex(RuntimeConfigFile::VrFoveation());
-        aurora_set_stereo_foveation(level);
-        RT_LOG(RT_TAG_RUNTIME) << "OpenXR: foveation " << RuntimeConfigFile::kVrFoveationLevels[level]
-                               << (override_value >= 0 ? " (debug.wiicompiled.foveation)"
-                                                       : " (debug.wiicompiled.foveation cleared)")
-                               << (aurora_stereo_foveation_available() ? "" : "; unavailable in this session")
-                               << std::endl;
-#endif
-    }
-
-    // Android: `adb shell setprop debug.wiicompiled.window_eyes 0` renders the immersive window's eyes
-    // whole and only masks them, as the PC does, to compare the cost within one session; an empty
-    // value aims them through the window again. Read about once a second.
-    void PollWindowEyesOverride() noexcept {
-#if defined(__ANDROID__)
-        if (window_eyes_poll_ != 0) {
-            --window_eyes_poll_;
-            return;
-        }
-        window_eyes_poll_ = 72;
-        char value[PROP_VALUE_MAX] = {};
-        const bool off = __system_property_get("debug.wiicompiled.window_eyes", value) > 0 && value[0] == '0';
-        if (off != window_eyes_forced_off_) {
-            window_eyes_forced_off_ = off;
-            RT_LOG(RT_TAG_RUNTIME) << "OpenXR: immersive window eyes "
-                                   << (off ? "rendered whole and masked" : "aimed through the window")
-                                   << " (debug.wiicompiled.window_eyes)" << std::endl;
-        }
-#endif
     }
 
     // The settings panel's layer hangs exactly where its pointer hits are
@@ -1957,14 +1840,6 @@ private:
     std::unique_ptr<OpenXRRuntime> runtime_;
     std::unique_ptr<GraphicsBackend> backend_;
 #if defined(__ANDROID__)
-    uint32_t panel_layer_poll_ = 0;
-    bool panel_layer_forced_off_ = false;
-    uint32_t eye_passes_poll_ = 0;
-    int eye_passes_override_ = -1;
-    uint32_t foveation_poll_ = 0;
-    int foveation_override_ = -1;
-    uint32_t window_eyes_poll_ = 0;
-    bool window_eyes_forced_off_ = false;
 #endif
     std::unique_ptr<OpenXRInput> input_;
     std::thread pacing_thread_;

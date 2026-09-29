@@ -60,7 +60,7 @@ first_person_hidden_model = 0
 first_person_rotation = "yaw_pitch"
 steering_wheel = true
 native_steering_wheel = true
-object_culling = true
+object_culling = false
 hand_steering = true
 performance_level = "boost"
 ```
@@ -202,8 +202,7 @@ a render pass at every GX copy, because the copy reads what was drawn before it;
 copies the desktop image made and never performs them, so it keeps drawing in the pass it has open,
 and it leaves out whatever a later clear of the whole color and depth erases. The picture is the
 same with less GPU memory traffic, which a tiled mobile GPU pays for at every split (the "Eye replay
-plan" log line reports each new pass structure). On the Quest, `debug.wiicompiled.eye_passes 0`
-replays one render pass per recorded pass again, for A/B timing (`docs/quest-port.md`).
+plan" log line reports each new pass structure).
 `first_person` and the `first_person_*` values are the first-person camera described below. All
 four are live and are also exposed in the F10 settings bar.
 `performance_level` is the level asked of the runtime through `XR_EXT_performance_settings` for
@@ -381,8 +380,7 @@ never shows an unwritten panel. The quad hangs exactly where the pointer's hits 
 If a backend cannot make the panel's swapchains, it logs that once and the panel is drawn into the
 eye images instead: through the eye's frustum and `viewFromCenter` onto the screen rectangle for an
 immersive eye (including headset-rate interpolated eyes, which reuse the texture), and as a centred
-rectangle on a virtual-screen eye image. On the Quest, `adb shell setprop
-debug.wiicompiled.panel_layer 0` switches to that path at run time, to compare the two.
+rectangle on a virtual-screen eye image.
 
 Measured on a Quest 3 (base game, a Grand Prix start with the player idle, `render_scale = 0.8`,
 60 FPS, eight interleaved rounds per state), the layer costs nothing while the panel is closed. While
@@ -504,8 +502,21 @@ headset is looking. Turn your head far enough in an immersive race, or look over
 in first person, and karts, characters and course objects are simply missing until the game
 camera catches up; the race intro's pan shows it too, since the other racers are culled from the
 intro camera's narrow view. `object_culling = false` (F10 > Camera > Object culling, also on the
-headset settings panel's Camera tab) draws them anyway, and takes effect immediately. The
-default, `true`, leaves the game's culling in force.
+headset settings panel's Camera tab) draws them anyway, and takes effect immediately. That is
+the PC's default. The Quest defaults to `true`, the game's own culling, because every model
+drawn costs its GPU twice, once per eye.
+
+Measured on a Quest 3 (base game, the first Grand Prix race at Luigi Circuit after the intro, player
+idle, first-person cockpit, `render_scale = 0.8`, foveation medium, six interleaved rounds per
+state, GPU clock fixed at 492 MHz), turning culling off kept 60 FPS in the game and the headset:
+
+| Culling | Draw calls a frame | Both eyes | App GPU per frame | GPU load | CPU load |
+| --- | --- | --- | --- | --- | --- |
+| On | 352 | 7.4 ms | 9.7 ms | 67% | 54% |
+| Off | 482 | 8.9 ms | 11.0 ms | 74% | 64% |
+
+A track that already keeps the Quest's GPU near its limit, such as Retro Rewind's SNES Ghost Valley
+2, would lose headset frames to the extra eye time, hence the Quest default.
 
 The game culls in two places, and the switch covers both. NW4R's scene gather tests each model's
 bounding box against the camera frustum (`nw4r::math::FRUSTUM::IntersectAABB_Ex`); with culling
@@ -861,8 +872,8 @@ that keeps the colour inside the window with alpha 1 and leaves transparent blac
 one-pixel ramp at the edge. The triangle carries, at each corner, where that pixel's ray meets the
 window's plane in homogeneous window coordinates (`stereo_replay::window_mask`), which interpolate
 exactly across the image. It is drawn in the eye's own last render pass, so it adds no pass and no
-tile load; an eye replayed one render pass per recorded pass (`debug.wiicompiled.eye_passes 0`)
-gives it a pass of its own, as the cockpit overlay has. On
+tile load; an eye that is still split into several render passes gives it a pass of its own, as
+the cockpit overlay has. On
 the Quest the backend submits the passthrough layer, then the projection layer with
 `XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT` (premultiplied alpha), then the settings panel.
 The flag travels with the packet, so the eyes Aurora masked and the layer that blends them always
@@ -883,8 +894,6 @@ reprojects it like any other. Aurora copies the smaller eye into the corner of t
 (`vulkan_interop.cpp`), and does not foveate these eyes: their field of view follows the head, which
 would rebuild the density map every frame, and they are small already. The PC backends copy whole eyes
 into the swapchain, so there the window's eyes stay full size and masked.
-`adb shell setprop debug.wiicompiled.window_eyes 0` renders them whole and masked on the Quest too, to
-compare the two within one session.
 
 Measured on a Quest 3 with a Retro Rewind race paused (the same 439 draw calls every frame,
 `render_scale` 1.0, 60 FPS throughout), switching the race view from the headset panel:
@@ -897,7 +906,7 @@ Measured on a Quest 3 with a Retro Rewind race paused (the same 439 draw calls e
 The headset raised the GPU's level for the fully immersive race and it still took longer: in clock
 cycles the window's frame is about 42% cheaper (5.0 against 8.6 million), which lets the Quest keep the
 GPU at its lowest level. The compositor's extra time is the passthrough. During a race at `render_scale`
-0.8, switching `debug.wiicompiled.window_eyes`, both eyes took 6.3 to 7.5 ms through the window against
+0.8, switching the two with a temporary debug property, both eyes took 6.3 to 7.5 ms through the window against
 9.1 to 9.5 ms whole and masked at similar draw counts (the compositor's `SF` field read 0.31 against
 0.80), with the clock wandering between 350 and 600 MHz. The saving is smaller than the eye's pixels
 (about 13% of a whole eye's) would suggest because much of an eye's cost is the geometry of every draw,
@@ -943,8 +952,8 @@ that reason (its bloom chain splits the frame about 20 times). An eye is therefo
 when it is drawn in a single render pass, as every eye is by default; an eye that a partial clear still
 splits is drawn at full rate. The session log reports what happened: "Fragment density maps:
 enabled" at startup, one "eye foveation" line per eye and level with the map's size, and the "Eye
-replay plan" lines. `debug.wiicompiled.foveation <0-3>` overrides the level for A/B timing, and
-`debug.wiicompiled.fdm 0` launches without density maps at all (`docs/quest-port.md`).
+replay plan" lines. `debug.wiicompiled.fdm 0` launches without density maps at all
+(`docs/quest-port.md`).
 
 What it saves depends on how much of an eye's cost is shading pixels. The numbers below are from a
 Quest 3 at Luigi Circuit's Grand Prix start: GPU time of both eyes per frame, all settings
@@ -970,7 +979,7 @@ did (39 to 41.5 FPS).
 
 ## Diagnostics
 
-**F10 > Diagnostics** holds two bug-report aids.
+**F10 > Diagnostics** holds three bug-report aids.
 
 **OpenXR diagnostic logging** is off by default. When it is off, each hook on the pacing thread is
 one atomic test. It applies immediately and is remembered as:
@@ -1046,6 +1055,18 @@ problems. This instrumentation does not change frame pacing or inspect image pix
   Reference-space change events are never rate-limited.
 - **Presentation changes.** While logging is on, every `[mkw-vr] presentation=` transition is
   logged, not just the first 16.
+
+**First-person camera logging** is off by default as well. When it is on, a race in first person
+writes a set of `[mkw-vr] first-person` and `[mkw-vr] cockpit` lines to `console.log` once per
+second: the anchor's head offset from the race camera, the scene's view matrix and the kart's
+physics pose (with the raw bits of its translation), where each candidate camera sits relative to
+the kart, and the cockpit's wheel placement and race-camera check. They are the first thing to
+read when the first-person view is misplaced. It applies immediately and is remembered as:
+
+```toml
+[diagnostics]
+first_person_logging = false
+```
 
 **Export Logs** opens the system folder picker. It then creates a
 `WiiCompiled-logs-YYYYMMDD-HHMMSS` folder at the chosen location, containing:

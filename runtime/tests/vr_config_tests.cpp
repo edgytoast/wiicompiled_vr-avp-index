@@ -41,6 +41,20 @@ int main() {
     Require(!Parse("[vr]\nhand_tracking = 1\n").vrHandTracking.has_value());
     Require(!RuntimeConfigFile::kVrHandTrackingDefault);
 
+    // [vr] object_culling: false draws what the game camera culls. The PC
+    // defaults to that; the Quest keeps the game's culling.
+    Require(Parse("[vr]\nobject_culling = true\n").vrObjectCulling == true);
+    Require(Parse("[vr]\nobject_culling = false\n").vrObjectCulling == false);
+    Require(!Parse("[vr]\n").vrObjectCulling.has_value());
+    Require(!Parse("[vr]\nobject_culling = 0\n").vrObjectCulling.has_value());
+#if defined(__ANDROID__)
+    Require(RuntimeConfigFile::kVrObjectCullingDefault);
+    Require(std::string_view(MKW_VR_OBJECT_CULLING_DEFAULT_TOML) == "true");
+#else
+    Require(!RuntimeConfigFile::kVrObjectCullingDefault);
+    Require(std::string_view(MKW_VR_OBJECT_CULLING_DEFAULT_TOML) == "false");
+#endif
+
     // [vr] immersive_window and flat_screen: one race view in two keys, Flat
     // Screen mode winning, so a file that predates the window reads as before.
     using RuntimeConfigFile::VrRaceView;
