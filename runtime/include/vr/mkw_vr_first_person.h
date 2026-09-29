@@ -3,6 +3,7 @@
 #pragma once
 
 #include "vr/steering_wheel.h"
+#include "vr/mkw_vr_item.h"
 
 #include <algorithm>
 #include <array>
@@ -571,5 +572,9 @@ void MkwVRFirstPersonRecenter() noexcept;
 // whenever the mode is off, the race has not produced a usable anchor, or the
 // anchor has been missing long enough to give up holding the last one.
 FirstPersonAnchor MkwVRFirstPersonGetAnchor() noexcept;
+
+// Guest-frame inventory snapshot, sampled at the race draw boundary. A
+// generation change invalidates any item retained by a prior race.
+HeldItem MkwVRFirstPersonGetHeldItem() noexcept;
 
 } // namespace mkw::vr

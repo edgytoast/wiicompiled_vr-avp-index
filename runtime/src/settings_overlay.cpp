@@ -170,6 +170,9 @@ bool g_vrSteeringWheel = RuntimeConfigFile::VrSteeringWheel();
 bool g_vrNativeSteeringWheel = RuntimeConfigFile::VrNativeSteeringWheel();
 bool g_vrObjectCulling = RuntimeConfigFile::VrObjectCulling();
 bool g_vrHandSteering = RuntimeConfigFile::VrHandSteering();
+constexpr std::array<const char*, 3> kVrCockpitItemHands{"Left", "Right", "Off"};
+int g_vrCockpitItemHand = RuntimeConfigFile::VrCockpitItemHand() == "right" ? 1 :
+                          RuntimeConfigFile::VrCockpitItemHand() == "off" ? 2 : 0;
 mkw::vr::WheelTuning g_vrWheelTuning = RuntimeConfigFile::VrWheelTuning();
 float g_vrFirstPersonHeadUp = RuntimeConfigFile::VrFirstPersonHeadUpMeters();
 float g_vrFirstPersonHeadForward = RuntimeConfigFile::VrFirstPersonHeadForwardMeters();
@@ -1221,11 +1224,19 @@ void DrawVrSteeringWheelSettings() {
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Squeeze a grip near the wheel or handlebar to take hold of it, and turn "
                           "it to steer, with one hand or both. Releasing both grips gives steering "
-                          "back to the stick, which still aims items. The runtime's hand mesh is "
-                          "used when hand steering was on at launch.");
+                          "back to the stick, which still aims items.");
+    }
+    if (ImGui::Combo("Item in cockpit hand", &g_vrCockpitItemHand,
+                     kVrCockpitItemHands.data(), static_cast<int>(kVrCockpitItemHands.size()))) {
+        RuntimeConfigFile::SetVrCockpitItemHand(
+            g_vrCockpitItemHand == 1 ? "right" : g_vrCockpitItemHand == 2 ? "off" : "left");
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Show Player 1's settled inventory item above this palm. "
+                          "Triple items show their remaining count. Using or losing the item hides it.");
     }
 #if defined(__ANDROID__)
-    ImGui::BeginDisabled(!g_vrHandSteering);
+    ImGui::BeginDisabled(!g_vrHandSteering && g_vrCockpitItemHand == 2);
     if (ImGui::Checkbox("Tracked hands", &g_vrHandTracking)) {
         RuntimeConfigFile::SetVrHandTracking(g_vrHandTracking);
     }
@@ -1747,11 +1758,13 @@ void DrawVrCameraSettings() {
         g_vrSteeringWheel = RuntimeConfigFile::kVrSteeringWheelDefault;
         g_vrNativeSteeringWheel = RuntimeConfigFile::kVrNativeSteeringWheelDefault;
         g_vrHandSteering = RuntimeConfigFile::kVrHandSteeringDefault;
+        g_vrCockpitItemHand = 0;
         RuntimeConfigFile::SetVrFirstPersonSeat(RuntimeConfigFile::kVrFirstPersonSeatDefault);
         RuntimeConfigFile::SetVrCockpitUnitsPerMeter(g_vrCockpitUnitsPerMeter);
         RuntimeConfigFile::SetVrSteeringWheel(g_vrSteeringWheel);
         RuntimeConfigFile::SetVrNativeSteeringWheel(g_vrNativeSteeringWheel);
         RuntimeConfigFile::SetVrHandSteering(g_vrHandSteering);
+        RuntimeConfigFile::SetVrCockpitItemHand(RuntimeConfigFile::kVrCockpitItemHandDefault);
 #if defined(__ANDROID__)
         g_vrHandTracking = RuntimeConfigFile::kVrHandTrackingDefault;
         RuntimeConfigFile::SetVrHandTracking(g_vrHandTracking);

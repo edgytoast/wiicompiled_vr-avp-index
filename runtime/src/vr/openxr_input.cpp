@@ -656,12 +656,13 @@ void OpenXRInput::UpdateSimultaneousHandsAndControllers(bool wanted) {
                               "side to the cameras");
 }
 
-// Trackers only exist while tracked hands and hand steering are both on: the
-// hands are only drawn while they can steer. They live as long as the session
+// Tracked hands can carry a cockpit item even while stick steering is used.
+// They live as long as the session
 // otherwise (Idle and the cockpit's reset keep them); a runtime that refuses
 // them is not asked again until the option is turned off and on.
 void OpenXRInput::UpdateHandTrackers() {
-    const bool wanted = RuntimeConfigFile::VrHandTracking() && RuntimeConfigFile::VrHandSteering();
+    const bool wanted = RuntimeConfigFile::VrHandTracking() &&
+                        (RuntimeConfigFile::VrHandSteering() || RuntimeConfigFile::VrCockpitItemHand() != "off");
     UpdateSimultaneousHandsAndControllers(wanted);
     if (!wanted) {
         DestroyHandTrackers();
@@ -1417,8 +1418,10 @@ void OpenXRInput::UpdateDriving(XrTime display_time, const driving::SeatFrame& s
             tracked = false;
         }
         DrivingHand& out = snapshot.hands[hand];
-        // Hands are shown only while they can steer.
-        out.tracked = hand_steering && (tracked || joints);
+        // The selected item hand is visible with stick steering too.
+        const auto item_hand = RuntimeConfigFile::VrCockpitItemHand();
+        const bool displays_item = item_hand == (hand == 0 ? "left" : "right");
+        out.tracked = (hand_steering || displays_item) && (tracked || joints);
         out.held = false;
         out.squeeze = squeeze;
         out.seat_from_grip = seat_from_grip;

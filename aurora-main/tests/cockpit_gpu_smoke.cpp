@@ -5,10 +5,16 @@
 #include "../lib/gfx/cockpit.hpp"
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <atomic>
 namespace aurora::webgpu { wgpu::Device g_device; wgpu::Queue g_queue; GraphicsConfig g_graphicsConfig{}; }
+namespace aurora {
+AuroraConfig g_config{};
+void log_internal(AuroraLogLevel,const char*,const char*,unsigned int) noexcept {}
+void Module::show_fatal_dialog(const char*,std::string_view) noexcept {}
+}
 std::atomic<int> errors=0;
-int main() {
+int main(int argc,char** argv) {
   using namespace aurora;
   using namespace webgpu;
   wgpu::InstanceDescriptor id{};
@@ -40,6 +46,50 @@ int main() {
   if(!gfx::cockpit::geometry(native).empty()) return 1;
   native.nativeWheel=false;
   if(gfx::cockpit::geometry(native).empty()) return 1;
+  // The held item stays upright and faces the player whatever the hand's roll
+  // and pitch; only the hand's heading turns it.
+  const auto itemFrame=[](const AuroraCockpitHand& hand,float frontX,float frontZ) {
+    std::array<float,12> item{};
+    if(!gfx::cockpit_item::seat_from_item(hand,item)) return false;
+    const bool upright=std::abs(item[1])<1e-5f && std::abs(item[5]-1)<1e-5f && std::abs(item[9])<1e-5f;
+    return upright && std::abs(item[2]-frontX)<1e-4f && std::abs(item[10]-frontZ)<1e-4f;
+  };
+  for(float roll : {0.0f,1.0f,-2.0f}) for(float pitch : {0.0f,0.5f,-0.7f}) {
+    // Fingers ahead (grip -Y is seat -Z), little finger to thumb up (grip -Z is
+    // seat +Y), then rolled about the fingers and pitched about seat +X.
+    const float cr=std::cos(roll),sr=std::sin(roll),cp=std::cos(pitch),sp=std::sin(pitch);
+    const gfx::cockpit::M neutral{1,0,0,-0.18f, 0,0,-1,-0.30f, 0,1,0,-0.42f};
+    const gfx::cockpit::M rollZ{cr,-sr,0,0, sr,cr,0,0, 0,0,1,0}, pitchX{1,0,0,0, 0,cp,-sp,0, 0,sp,cp,0};
+    AuroraCockpitHand hand{};
+    const auto pose=gfx::cockpit::compose(pitchX,gfx::cockpit::compose(rollZ,neutral));
+    std::memcpy(hand.seatFromGrip,pose.data(),sizeof(hand.seatFromGrip));
+    if(!itemFrame(hand,0,1)) { std::cerr<<"Held item not upright or not facing the player\n"; return 1; }
+  }
+  {
+    AuroraCockpitHand hand{};
+    // A tracked palm joint with the fingers (-Z) ahead, then a grip turned to the right.
+    const auto palm=gfx::cockpit::identity();
+    std::memcpy(hand.seatFromJoint[0],palm.data(),sizeof(hand.seatFromJoint[0]));
+    hand.jointsValid=true;
+    if(!itemFrame(hand,0,1)) { std::cerr<<"Held item ignores the palm joint\n"; return 1; }
+    hand.jointsValid=false;
+    const gfx::cockpit::M right{0,-1,0,0, 0,0,-1,0, 1,0,0,0};
+    std::memcpy(hand.seatFromGrip,right.data(),sizeof(hand.seatFromGrip));
+    if(!itemFrame(hand,-1,0)) { std::cerr<<"Held item does not turn with the hand\n"; return 1; }
+  }
+  const bool itemEnabled=argc>1;
+  if(itemEnabled) {
+    std::ifstream file(argv[1],std::ios::binary);
+    if(!file) return 1;
+    const std::vector<uint8_t> bytes{std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>()};
+    gfx::cockpit_item::set_archive(bytes.data(),static_cast<uint32_t>(bytes.size()));
+    for(uint8_t id=0;id<19;++id) if(!gfx::cockpit_item::has_model(id)) return 1;
+    for(const auto& model:gfx::cockpit_item::archive->models)
+      for(const auto& texture:model.textures)
+        if(texture.rgba.size()!=gfx::cockpit_item::mip_bytes(texture,texture.mips)) {
+          std::cerr << "Cockpit item texture conversion failed: " << texture.name << '\n';return 1;
+        }
+  }
   for(bool bike : {false,true}) for(bool original : {false,true}) for(uint32_t samples : {1u,4u})
   for(bool hud : {false,true}) for(int coverage : {0,1,2}) for(bool reversed : {false,true}) for(uint32_t eyeIndex : {0u,1u}) {
     const bool occluded=coverage==1;
@@ -48,6 +98,16 @@ int main() {
     frame.cockpit.active=true;frame.cockpit.wheelAngle=0.35f;
     frame.cockpit.nativeWheel=original;
     frame.cockpit.bike=bike;frame.cockpit.handlebarRadius=0.25f;
+    if(itemEnabled) {
+      const uint32_t itemCase=((((uint32_t(bike)*2+uint32_t(original))*2+
+                                uint32_t(samples==4))*3+uint32_t(coverage))*2+
+                                uint32_t(reversed))*2+eyeIndex;
+      const bool preview=samples==4 && !bike && !original && coverage==0 &&
+                         !reversed && eyeIndex==0;
+      const uint8_t id=preview?0:static_cast<uint8_t>(itemCase%19);
+      frame.cockpitItem={1,id,static_cast<uint8_t>(itemCase%3+1),
+                         static_cast<uint8_t>(itemCase%2),true};
+    }
     const float handlePose[12]{1,0,0,0, 0,0,1,-0.3f, 0,-1,0,-0.42f};
     std::memcpy(frame.cockpit.seatFromHandlebar,handlePose,sizeof(handlePose));
     for(int hand=0;hand<2;++hand) {
@@ -156,7 +216,7 @@ int main() {
       }
       if(left<500||right>8) { std::cerr<<"Partial wall occlusion failed for eye "<<eyeIndex<<'\n';++errors; }
     }
-    if(samples==4 && !original && !occluded) {
+    if(samples==4 && !bike && !original && !hud && coverage==0 && !reversed && eyeIndex==0) {
       std::ofstream image("cockpit-preview.ppm",std::ios::binary);image<<"P6\n512 512\n255\n";
       for(size_t i=0;i<512*512;++i) image.write(reinterpret_cast<const char*>(bytes+i*4),3);
     }

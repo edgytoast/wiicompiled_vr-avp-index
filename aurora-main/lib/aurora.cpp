@@ -118,6 +118,7 @@ struct StereoSceneAnchor {
   // World units per metre the anchor was built with, or zero when the packet's
   // own scale applies (aurora_set_stereo_scene_anchor_scaled).
   float unitsPerMeter = 0.f;
+  AuroraCockpitItem cockpitItem{};
 };
 // Producer thread only, between aurora_set_stereo_scene_anchor() and the seal
 // that consumes it. Cleared at every seal so a producer that stops publishing
@@ -829,6 +830,7 @@ gfx::StereoReplayFrame make_stereo_replay_frame(const AuroraStereoFrame& input, 
   std::memcpy(&anchorFromScene, sceneAnchor.anchorFromScene.data(), sizeof(anchorFromScene));
   gfx::StereoReplayFrame replay{};
   replay.cockpit = input.cockpit;
+  replay.cockpitItem = sceneAnchor.cockpitItem;
   replay.window = input.mode == AURORA_STEREO_FRAME_IMMERSIVE_REPLAY && input.window;
   // The sealed guest frame owns its scale. The packet may have been sampled
   // just before a change of scale (a character swap, a lightning strike), so
@@ -2703,6 +2705,10 @@ void set_stereo_scene_anchor(const float anchorFromScene[12]) noexcept {
   g_pendingSceneAnchor = anchor;
 }
 
+void set_stereo_cockpit_item(const AuroraCockpitItem* item) noexcept {
+  g_pendingSceneAnchor.cockpitItem = item != nullptr ? *item : AuroraCockpitItem{};
+}
+
 #ifdef AURORA_ENABLE_GX
 namespace stereo {
 void set_sink(SinkCallback callback, SubmitCallback submitted, void* userdata) noexcept {
@@ -2762,6 +2768,10 @@ void aurora_set_stereo_scene_anchor_scaled(const float anchorFromScene[12], floa
   if (aurora::g_pendingSceneAnchor.active && (bits & 0x7f800000u) != 0x7f800000u && unitsPerMeter > 0.f) {
     aurora::g_pendingSceneAnchor.unitsPerMeter = unitsPerMeter;
   }
+}
+
+void aurora_set_stereo_cockpit_item(const AuroraCockpitItem* item) {
+  aurora::set_stereo_cockpit_item(item);
 }
 void aurora_set_stereo_local_player_count(uint32_t count) {
   aurora::g_pendingStereoLocalPlayerCount = count >= 1 && count <= 4 ? count : 1;

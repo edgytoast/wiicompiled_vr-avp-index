@@ -189,13 +189,20 @@ class SettingsPage(
                 write = { c, value -> c.setBool("vr", "hand_steering", value) },
                 enabledIf = cockpit,
             )
-            // The hands follow the headset's hand tracking; kVrHandTrackingDefault is off. The
-            // hands are only drawn while they can steer, so it goes with hand steering.
+            choice(
+                R.string.vr_cockpit_item_hand, R.string.vr_cockpit_item_hand_helper,
+                listOf(R.string.vr_item_left, R.string.vr_item_right, R.string.vr_item_off),
+                read = { stringIndex(it, "vr", "cockpit_item_hand", ITEM_HANDS) },
+                write = { c, index -> c.setString("vr", "cockpit_item_hand", ITEM_HANDS[index]) },
+                enabledIf = cockpit,
+            )
+            // Tracked hands can show the item with stick steering as well.
             toggle(
                 R.string.vr_hand_tracking, R.string.vr_hand_tracking_helper,
                 read = { it.bool("vr", "hand_tracking") ?: false },
                 write = { c, value -> c.setBool("vr", "hand_tracking", value) },
-                enabledIf = { c -> cockpit(c) && (c.bool("vr", "hand_steering") ?: true) },
+                enabledIf = { c -> cockpit(c) && ((c.bool("vr", "hand_steering") ?: true) ||
+                    stringIndex(c, "vr", "cockpit_item_hand", ITEM_HANDS) != 2) },
             )
             slider(
                 R.string.vr_lean_back, R.string.vr_lean_back_helper, -45.0, 45.0, 1.0,
@@ -755,6 +762,7 @@ class SettingsPage(
         val ROTATION_DEFAULT = ROTATIONS.indexOf("yaw_pitch")
         // The runtime's default ("cockpit") first.
         val SEATS = listOf("cockpit", "custom")
+        val ITEM_HANDS = listOf("left", "right", "off")
         // The runtime's default ("boost") first: an absent key reads as index 0.
         val PERFORMANCE_LEVELS = listOf("boost", "sustained_high", "sustained_low", "power_savings", "default")
         // runtime_config.h's kVrFoveationLevels, and its Quest default.

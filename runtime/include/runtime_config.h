@@ -78,6 +78,7 @@ struct RuntimeUserConfig {
     std::optional<bool> vrNativeSteeringWheel;
     std::optional<bool> vrObjectCulling;
     std::optional<bool> vrHandSteering;
+    std::optional<std::string> vrCockpitItemHand;
     std::optional<bool> vrHandTracking;
     std::optional<float> vrWheelKartDegrees;
     std::optional<float> vrWheelBikeDegrees;
@@ -237,6 +238,7 @@ inline constexpr float kVrCockpitUnitsPerMeterMax = 400.0f;
 inline constexpr bool kVrSteeringWheelDefault = true;
 inline constexpr bool kVrNativeSteeringWheelDefault = true;
 inline constexpr bool kVrHandSteeringDefault = true;
+inline constexpr const char* kVrCockpitItemHandDefault = "left";
 // The game hides karts and objects its own camera cannot see, which a head
 // turn in VR reveals. object_culling false draws them anyway (see
 // vr/mkw_vr_culling.h); it only takes effect while VR is enabled. The PC
@@ -605,6 +607,8 @@ inline void EnsureConfigFile() {
               "# (seconds) a hand that loses tracking keeps hold, and a short\n"
               "# pulse on grab and release. All changeable live from the F10 menu.\n"
               "hand_steering = true\n"
+              "# Show the settled inventory item in one cockpit hand: left, right, or off.\n"
+              "cockpit_item_hand = \"left\"\n"
               "wheel_kart_degrees = 90.0\n"
               "wheel_bike_degrees = 45.0\n"
               "wheel_grab_distance = 0.35\n"
@@ -880,6 +884,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     config.vrNativeSteeringWheel = FindConfigValue<bool>(document, "vr", "native_steering_wheel");
     config.vrObjectCulling = FindConfigValue<bool>(document, "vr", "object_culling");
     config.vrHandSteering = FindConfigValue<bool>(document, "vr", "hand_steering");
+    config.vrCockpitItemHand = FindConfigValue<std::string>(document, "vr", "cockpit_item_hand");
     config.vrHandTracking = FindConfigValue<bool>(document, "vr", "hand_tracking");
     config.vrWheelKartDegrees = readRangedFloat("wheel_kart_degrees", kVrWheelDegreesMin, kVrWheelDegreesMax);
     config.vrWheelBikeDegrees = readRangedFloat("wheel_bike_degrees", kVrWheelDegreesMin, kVrWheelDegreesMax);
@@ -1280,6 +1285,12 @@ inline bool SetVrObjectCulling(bool value) {
 inline bool SetVrHandSteering(bool value) {
     Mutable().vrHandSteering = value;
     return WriteSetting("vr", "hand_steering", value ? "true" : "false");
+}
+
+inline bool SetVrCockpitItemHand(const std::string& value) {
+    if (value != "left" && value != "right" && value != "off") return false;
+    Mutable().vrCockpitItemHand = value;
+    return WriteSetting("vr", "cockpit_item_hand", "\"" + value + "\"");
 }
 
 inline bool SetVrHandTracking(bool value) {
@@ -1771,6 +1782,11 @@ inline bool VrObjectCulling(bool fallback = kVrObjectCullingDefault) {
 
 inline bool VrHandSteering(bool fallback = kVrHandSteeringDefault) {
     return Get().vrHandSteering.value_or(fallback);
+}
+
+inline std::string VrCockpitItemHand() {
+    const std::string value = Get().vrCockpitItemHand.value_or(kVrCockpitItemHandDefault);
+    return value == "left" || value == "right" || value == "off" ? value : kVrCockpitItemHandDefault;
 }
 
 inline bool VrHandTracking(bool fallback = kVrHandTrackingDefault) {

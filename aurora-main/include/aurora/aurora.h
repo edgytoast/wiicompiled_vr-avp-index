@@ -153,6 +153,16 @@ typedef struct {
   AuroraCockpitHand hands[2];
 } AuroraCockpit;
 
+// Inventory from the same guest frame as the scene. hand: 0 left, 1 right,
+// 2 off. A zero-initialised value has no item.
+typedef struct {
+  uint64_t raceGeneration;
+  uint8_t id;
+  uint8_t count;
+  uint8_t hand;
+  bool valid;
+} AuroraCockpitItem;
+
 typedef struct {
   float position[3];
   int16_t joints[4];
@@ -324,6 +334,11 @@ void aurora_set_stereo_scene_anchor(const float anchorFromScene[12]);
 // The sealed frame then owns that scale: each eye's head/IPD translation is
 // rescaled from the packet's AuroraCockpit::unitsPerMeter to it.
 void aurora_set_stereo_scene_anchor_scaled(const float anchorFromScene[12], float unitsPerMeter);
+// GX producer thread, after the scene anchor and before sealing that frame.
+void aurora_set_stereo_cockpit_item(const AuroraCockpitItem* item);
+// Copies a user-supplied Race/Common.szs archive. May be called on the guest
+// thread; the renderer owns decoded assets and never refers back to guest RAM.
+void aurora_set_cockpit_item_archive(const void* bytes, uint32_t size);
 // Select Player 1's subview for immersive replay of 2-4 local screens.
 // Producer-thread, per-frame metadata, consumed by the next end_frame call.
 // One (the default) keeps full-frame replay. Desktop rendering is unaffected.

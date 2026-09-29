@@ -2,7 +2,10 @@
 
 #include "vr/mkw_vr_first_person.h"
 
+#include "aurora/aurora.h"
+
 #include "gx_native_wheel.h"
+#include "hle/dvd_vr_asset.h"
 #include "gx_model_visibility.h"
 #include "memory.h"
 #include "runtime_config.h"
@@ -317,6 +320,8 @@ struct FirstPersonState {
 
     uint32_t camera_address = 0;
     detail::LocalPlayerKartRead player_kart{};
+    HeldItem held_item{};
+    uint64_t race_generation = 0;
     // Armed by the draw boundary, consumed by the frame seal.
     bool armed = false;
     uint64_t armed_frame = 0;
@@ -1386,6 +1391,9 @@ void MkwVRFirstPersonReset() noexcept {
     g_state.armed_view_valid = false;
     g_state.camera_address = 0;
     g_state.player_kart = {};
+    g_state.held_item = {};
+    ++g_state.race_generation;
+    g_state.held_item.race_generation = g_state.race_generation;
     g_state.anchor = {};
     g_state.hold_frames = 0;
     g_state.ever_valid_this_race = false;
@@ -1412,6 +1420,8 @@ void MkwVRFirstPersonRecenter() noexcept {
 
 void MkwVRFirstPersonUpdate(uint64_t guest_frame_index, uint32_t race_camera_address) noexcept {
     std::lock_guard lock(g_mutex);
+    g_state.held_item = {};
+    g_state.held_item.race_generation = g_state.race_generation;
     DropHiddenModelsLocked();
     if (g_recenter_requested.exchange(false, std::memory_order_acq_rel)) {
         g_state.seated_eye.Recalibrate();
@@ -1435,6 +1445,15 @@ void MkwVRFirstPersonUpdate(uint64_t guest_frame_index, uint32_t race_camera_add
         g_state.hold_frames = 0;
     }
     g_state.player_kart = player;
+    if (player.failed_step == nullptr && g_state.seat == FirstPersonSeat::Cockpit) {
+        static bool item_archive_attempted = false;
+        if (!item_archive_attempted && RuntimeConfigFile::VrCockpitItemHand() != "off") {
+            item_archive_attempted = true;
+            const auto archive = DVDReadVrAsset("/Race/Common.szs");
+            if (!archive.empty()) aurora_set_cockpit_item_archive(archive.data(), static_cast<uint32_t>(archive.size()));
+        }
+        g_state.held_item = detail::ReadHeldItem<Memory>(player.player_index, g_state.race_generation);
+    }
     g_state.armed = true;
     g_state.armed_frame = guest_frame_index;
     g_state.armed_view_valid = ReadSceneViewMatrix(g_state.armed_view);
@@ -1536,6 +1555,11 @@ void MkwVRFirstPersonCommit() noexcept {
 FirstPersonAnchor MkwVRFirstPersonGetAnchor() noexcept {
     std::lock_guard lock(g_mutex);
     return g_state.anchor;
+}
+
+HeldItem MkwVRFirstPersonGetHeldItem() noexcept {
+    std::lock_guard lock(g_mutex);
+    return g_state.held_item;
 }
 
 } // namespace mkw::vr

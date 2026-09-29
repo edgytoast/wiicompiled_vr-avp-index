@@ -1386,7 +1386,8 @@ private:
                       float lean_back_radians, AuroraCockpit& cockpit) noexcept {
         cockpit.unitsPerMeter = units_per_meter;
         const DrivingSnapshot driving = input_ != nullptr ? input_->Driving() : DrivingSnapshot{};
-        if (driving.hand_steering && !hand_meshes_loaded_ && runtime_ != nullptr) {
+        if ((driving.hand_steering || RuntimeConfigFile::VrCockpitItemHand() != "off") &&
+            !hand_meshes_loaded_ && runtime_ != nullptr) {
             hand_meshes_loaded_ = true;
             // Tracked hands' trackers, when they exist, serve the mesh too.
             const XrHandTrackerEXT trackers[2]{input_ != nullptr ? input_->HandTracker(0) : XR_NULL_HANDLE,
@@ -1397,7 +1398,8 @@ private:
                                    << std::endl;
         }
         cockpit.active = driving.cockpit_active && position_valid && base_position_valid_ &&
-                         (driving.synthetic_control || driving.hand_steering);
+                         (driving.synthetic_control || driving.hand_steering ||
+                          RuntimeConfigFile::VrCockpitItemHand() != "off");
         if (!cockpit.active) {
             return;
         }

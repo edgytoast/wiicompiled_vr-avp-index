@@ -62,6 +62,7 @@ steering_wheel = true
 native_steering_wheel = true
 object_culling = false
 hand_steering = true
+cockpit_item_hand = "left"
 performance_level = "boost"
 ```
 
@@ -299,6 +300,19 @@ steering wheel takes hold of it, and while held the wheel steers through the Nun
 see [Steering wheel and hand
 steering](#steering-wheel-and-hand-steering). Turning the wheel moves the controllers, and the game's
 own motion detection still reads them, so a sharp enough turn can read as a shake.
+
+**Held item.** `cockpit_item_hand` accepts `"left"` (default), `"right"`, or `"off"` and is also
+available in F10 > VR. In cockpit view, the selected tracked hand holds one item model from the
+game's `Race/Common.szs` after the roulette settles. The item stands upright just above the palm
+with its front toward the player. It turns only with the hand's heading, so rolling or tilting the
+hand never tips it over. Triple items show their remaining inventory count beside the model, facing
+the player. The display follows player 1's inventory: using, losing, or deploying the
+item removes it from the hand even if a deployed object remains near the kart. Stick steering and
+the existing item buttons still work. The imported models use their static bind pose; item effects
+and animations are not reproduced in the hand. Each material is drawn from its own data: texture
+layers with their wrap modes, SRT and environment mapping, vertex colours, culling, blending and up
+to four TEV stages. Only the lighting is approximated, by a fixed cockpit light in place of the
+course's light set.
 
 **Bare hands.** On the Quest, with `hand_tracking` on and the controllers put down, the hands drive
 `khr/simple_controller`: a right pinch is A with the pointer on the hand's aim ray, the left

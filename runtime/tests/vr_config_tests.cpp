@@ -15,6 +15,13 @@ static RuntimeUserConfig Parse(const std::string& text) {
 }
 
 int main() {
+    for (std::string_view hand : {"left", "right", "off"}) {
+        Require(Parse("[vr]\ncockpit_item_hand = \"" + std::string(hand) + "\"\n")
+                    .vrCockpitItemHand == std::string(hand));
+    }
+    Require(std::string_view(RuntimeConfigFile::kVrCockpitItemHandDefault) == "left");
+    Require(!Parse("[vr]\n").vrCockpitItemHand.has_value());
+    Require(!Parse("[vr]\ncockpit_item_hand = 1\n").vrCockpitItemHand.has_value());
     // [vr] foveation: the Quest's foveated rendering level, index-matched to
     // aurora_set_stereo_foveation.
     for (std::string_view level : RuntimeConfigFile::kVrFoveationLevels) {

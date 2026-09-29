@@ -456,6 +456,11 @@ target_include_directories(mkw_vr_player_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR
 target_compile_features(mkw_vr_player_tests PRIVATE cxx_std_17)
 add_test(NAME mkw_vr_player_tests COMMAND mkw_vr_player_tests)
 
+add_executable(mkw_vr_item_tests "${CMAKE_CURRENT_LIST_DIR}/tests/vr_item_tests.cpp")
+target_include_directories(mkw_vr_item_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")
+target_compile_features(mkw_vr_item_tests PRIVATE cxx_std_17)
+add_test(NAME mkw_vr_item_tests COMMAND mkw_vr_item_tests)
+
 add_executable(mkw_vr_policy_tests tests/vr_policy_tests.cpp src/vr/mkw_vr_policy.cpp)
 target_include_directories(mkw_vr_policy_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")
 target_compile_features(mkw_vr_policy_tests PRIVATE cxx_std_17)
