@@ -458,9 +458,10 @@ OpenXR input to the game, to HIDAPI, which it turns off on visionOS, so
   the tab created the database, drew the list and the editor's pages, and made,
   renamed and saved Miis; the new Mii carried the system ID the runtime derives.
   On an Apple M1 Max a list picture takes 4.5 ms to draw and the editor's
-  600-pixel face 14 ms.
+  600-pixel face 14 ms. On the device, Miis made in the tab were offered in the
+  game.
 
-Not done: the Miis tab on a headset, and comfort tuning of the projection quad depth, the gesture thresholds,
+Not done: comfort tuning of the projection quad depth, the gesture thresholds,
 `render_scale`. Things to expect to tune first on hardware: the constant depth the
 projection quads are drawn at (3 m in `xr_visionos_compositor.mm`, which sets
 how the compositor reprojects late frames), the gesture thresholds in
