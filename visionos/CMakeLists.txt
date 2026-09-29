@@ -143,6 +143,8 @@ set(MKW_VISIONOS_APP_SOURCES
     "${MKW_VISIONOS_APP_DIR}/ProfileStore.swift"
     "${MKW_VISIONOS_APP_DIR}/VrHistoryView.swift"
     "${MKW_VISIONOS_APP_DIR}/ProfilesView.swift"
+    "${MKW_VISIONOS_APP_DIR}/ZipWriter.swift"
+    "${MKW_VISIONOS_APP_DIR}/ProfileTransfer.swift"
     "${MKW_VISIONOS_GENERATED_DIR}/RetroRewindBuild.swift")
 
 add_executable(WiiCompiledVision MACOSX_BUNDLE ${MKW_VISIONOS_APP_SOURCES})

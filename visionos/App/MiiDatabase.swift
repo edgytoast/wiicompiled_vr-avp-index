@@ -97,6 +97,38 @@ enum MiiDatabase {
         return found.compactMapValues { $0 }
     }
 
+    /// Whether `db` is a Mii database the game reads: the magic, the size and the CRC.
+    static func isValid(_ db: [UInt8]) -> Bool {
+        db.count >= crcOffset + 2 && Array(db[0..<4]) == Array("RNOD".utf8)
+            && UInt16(db[crcOffset]) << 8 | UInt16(db[crcOffset + 1]) == crc16(db, 0, crcOffset)
+    }
+
+    /// Adds another database's Miis to this one block for block, as the Wii stored them (nothing is
+    /// parsed and written again, so no bit is lost): a Mii whose ID is here already takes its slot,
+    /// the others the free ones. Returns how many were added, replaced, and left out for want of a slot.
+    @discardableResult
+    static func merge(_ file: URL, from other: [UInt8]) throws -> (added: Int, replaced: Int, skipped: Int) {
+        var added = 0
+        var replaced = 0
+        var skipped = 0
+        let blocks = slots(other).compactMap { $0 }
+        try edit(file) { db in
+            for block in blocks {
+                let id = readId(block, 0)
+                if id != 0, let slot = (0..<slots).first(where: { !isEmpty(db, $0) && readId(db, offset($0)) == id }) {
+                    db.replaceSubrange(offset(slot)..<(offset(slot) + MiiData.size), with: block)
+                    replaced += 1
+                } else if let free = (0..<slots).first(where: { isEmpty(db, $0) }) {
+                    db.replaceSubrange(offset(free)..<(offset(free) + MiiData.size), with: block)
+                    added += 1
+                } else {
+                    skipped += 1
+                }
+            }
+        }
+        return (added, replaced, skipped)
+    }
+
     /// Adds a Mii in the first free slot.
     static func add(_ file: URL, _ mii: Mii) throws {
         let block = try MiiData.serialize(mii)
@@ -233,7 +265,16 @@ enum MiiIds {
 
     /// SERNO from the Wii's setting.txt, a 256-byte buffer under a rotating XOR key.
     static func consoleSerial(_ file: URL) -> String? {
-        guard let data = try? Data(contentsOf: file), data.count >= 256 else { return nil }
+        guard let data = try? Data(contentsOf: file), let serial = settings(data)?["SERNO"],
+              (1...9).contains(serial.count), serial.allSatisfy({ ("0"..."9").contains($0) }),
+              serial.contains(where: { $0 != "0" }) else { return nil }
+        return serial
+    }
+
+    /// The fields of a setting.txt (RuntimeNandSettings::Read): the 256 bytes decrypted up to the
+    /// first NUL, carriage returns dropped, one KEY=value per line, the first of a key kept.
+    static func settings(_ data: Data) -> [String: String]? {
+        guard data.count >= 256 else { return nil }
         var key: UInt32 = 0x73B5_DBFA
         var text = ""
         for byte in data.prefix(256) {
@@ -242,15 +283,24 @@ enum MiiIds {
             if value == 0 { break }
             if value != 0x0D { text.unicodeScalars.append(Unicode.Scalar(value)) }
         }
-        let serial = text.split(separator: "\n", omittingEmptySubsequences: false)
-            .compactMap { line -> Substring? in
-                let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-                return parts.count == 2 && parts[0] == "SERNO" ? parts[1] : nil
+        var fields: [String: String] = [:]
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            if parts.count == 2, !parts[0].isEmpty, fields[String(parts[0])] == nil {
+                fields[String(parts[0])] = String(parts[1])
             }
-            .first
-        guard let serial, (1...9).contains(serial.count), serial.allSatisfy({ ("0"..."9").contains($0) }),
-              serial.contains(where: { $0 != "0" }) else { return nil }
-        return String(serial)
+        }
+        return fields
+    }
+
+    /// RuntimeNandSettings::HasIdentity: the fields the runtime refuses to start without.
+    static func hasIdentity(_ settings: [String: String]) -> Bool {
+        guard let serial = settings["SERNO"], (1...9).contains(serial.count),
+              serial.allSatisfy({ ("0"..."9").contains($0) }), serial.contains(where: { $0 != "0" }) else { return false }
+        return [("CODE", 5), ("AREA", 3), ("GAME", 2)].allSatisfy { field, limit in
+            guard let value = settings[field] else { return false }
+            return !value.isEmpty && value.utf8.count <= limit
+        }
     }
 
     /// The console's MAC address, creating the console first when the NAND has none yet: the

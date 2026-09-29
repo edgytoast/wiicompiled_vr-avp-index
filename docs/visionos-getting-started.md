@@ -125,6 +125,7 @@ drops the connection (the script retries).
 | Change graphics or controls | The launcher's **Settings** tab, or `Config.toml` in the Files app (On My Apple Vision Pro > WiiCompiled Vision > WiiCompiled) |
 | Make, change or share a Mii | The launcher's **Miis** tab (it imports and exports `.mii` files); then in the game, **License Settings > Change Mii** |
 | See your friend code, VR and VR history | The launcher's **Profiles** tab, once you have played Retro Rewind |
+| Move your profile to or from another device | **Profiles > Export…** and **Import…**: one zip with the saves, the Miis and the console identity. Play online with it on one device at a time |
 | Use another headset or team | `--device UDID`, `--team TEAMID` |
 
 ## When it stops

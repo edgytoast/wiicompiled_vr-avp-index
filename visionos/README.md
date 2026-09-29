@@ -10,7 +10,8 @@ own disc, follow [`../docs/visionos-getting-started.md`](../docs/visionos-gettin
   translated, Retro Rewind, and loading the chosen one at Play).
 - `App/`: the SwiftUI sources (launcher with Play, Profiles, Miis and Settings
   tabs, the game picker, the Retro Rewind pack downloader, the game loader,
-  Retro Rewind's licences with their Retro WFC data, the Mii database editor
+  Retro Rewind's licences with their Retro WFC data and profile import and
+  export, the Mii database editor
   and its picture renderer, the Config.toml editor), `Info.plist` and
   entitlements.
 - `Build-VisionOSDawn.sh`: Dawn (Metal, static) for the `xros` or

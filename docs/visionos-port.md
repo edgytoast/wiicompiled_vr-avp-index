@@ -341,9 +341,41 @@ the rest (`RetroWfc.swift`, `ProfileStore`):
 The Mii shown is the one of the Mii database with the licence's ID, as the PC
 looks it up, so a Mii made in the Miis tab shows once a licence takes it; else
 Retro WFC's, while its ID is still the licence's; and Retro WFC's picture until
-the Mii parts are downloaded. The tab only reads: renaming a licence and
-changing its Mii are the game's License Settings. The Quest's and the PC's
-sidebar card has no counterpart, since the launcher has no sidebar.
+the Mii parts are downloaded. Renaming a licence and changing its Mii are the
+game's License Settings. The Quest's and the PC's sidebar card has no
+counterpart, since the launcher has no sidebar.
+
+The tab's **Import** and **Export** move a whole profile between devices, which
+neither the PC nor the Quest does (`ProfileTransfer`). Retro WFC ties a profile
+to its console. Each licence keeps its own login IDs in `rksys.dat`, but the
+login also sends the console's serial (`csnum`, `setting.txt`'s CODE and SERNO;
+Retro WFC answers error 22005 to a serial the profile does not know), and this
+runtime derives the console's MAC address from that serial too. An export is
+therefore one zip of:
+- Retro Rewind's save folder, and the unmodded game's;
+- the Mii database;
+- `setting.txt`, `DWC_AUTHDATA` (the console's Nintendo WFC user ID) and
+  `keys.bin` when the NAND has one (the device certificate; without it the
+  runtime uses Dolphin's default);
+- Pulsar's `RetroRewind6` folder: `RRRating.pul`'s VR and BR by profile ID, the
+  settings and the ghosts.
+
+The zip mirrors the app's folders (`riivolution/…`, `NAND/…`, which the Quest's
+match) and carries a README; `ZipWriter` writes it with the Compression
+framework's DEFLATE. Import finds each part by its NAND or SD card path wherever
+it sits in an archive, so a zipped Dolphin `Wii` folder and Riivolution folder
+read too, and checks each part as the game would: a save's size and CRC-32, the
+Mii database's CRC-16, the fields `RuntimeNandSettings::HasIdentity` requires of
+`setting.txt`, and `DWC_AUTHDATA`'s 32 bytes. A sheet shows the licences, what
+each part does, and the console the headset becomes. It warns that a profile
+goes online from one device at a time, or, without a `setting.txt`, that Retro
+WFC may refuse it. The current profile is first exported into
+`Documents/WiiCompiled/Backups`, and importing that file goes back. Import writes
+files over the headset's and never deletes any, so files the archive lacks stay.
+The Miis are merged block for block, a Mii with the same ID taking its slot, so
+no bit a Wii wrote is lost. Both are refused while the game runs. A profile from
+Dolphin keeps its serial but not its MAC address, which Dolphin takes from
+Dolphin.ini.
 
 ## Building
 
@@ -493,7 +525,17 @@ OpenXR input to the game, to HIDAPI, which it turns off on visionOS, so
   the Swift port. On a Quest's Retro Rewind save it read the licence, its
   friend code, `RRRating.pul`'s VR and its Mii from the Mii database. In the
   simulator it showed them with Retro WFC's live VR history, and with faked
-  data the online glow and every badge. Not yet run on a headset.
+  data the online glow and every badge.
+- Profile Import and Export, on copies of a Quest's data and of the headset's:
+  - The Quest's export (14 files, 262 KB) imported onto the headset moved its
+    save, identity, Wi-Fi login and ratings. The headset's own ghost and Mii
+    stayed, and the Quest's Mii replaced the one with its ID block for block.
+  - The backup restored the headset's identity and save.
+  - A zipped Dolphin layout read; a path leaving the archive was ignored, and
+    damaged parts were refused.
+  - In the simulator the confirmation sheet, the import and Export's
+    destination picker ran.
+  - Neither the Profiles tab nor its Import and Export has run on a headset yet.
 
 Not done: comfort tuning of the projection quad depth, the gesture thresholds,
 `render_scale`. Things to expect to tune first on hardware: the constant depth the

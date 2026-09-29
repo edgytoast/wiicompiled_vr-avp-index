@@ -2,6 +2,7 @@
 
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 /// My profiles: WheelWizard's UserProfilePage (Views/Pages/UserProfilePage.axaml.cs) for the
 /// headset, as the Quest launcher has it (ProfilesPage.kt). The four licences of Retro Rewind's
@@ -9,10 +10,14 @@ import UIKit
 /// its numbers. As on the PC, a licence is Online, with a glow, while its friend code is in a Retro
 /// WFC room, and one licence is primary: the one the tab opens on.
 ///
-/// It only reads: nothing renames a licence or changes its Mii, which the game does in License
-/// Settings. The PC's region picker is left out too, since this build runs PAL only.
+/// Nothing here renames a licence or changes its Mii, which the game does in License Settings; the
+/// PC's region picker is left out too, since this build runs PAL only. What the PC and the Quest do
+/// not have: Import and Export move the whole profile between devices, its identity included
+/// (ProfileTransfer), with what an import replaces backed up first.
 struct ProfilesView: View {
+    @EnvironmentObject private var model: GameModel
     @StateObject private var store = ProfileStore()
+    @State private var importing = false
     /// The carousel's page: the VR history, then the numbers.
     @State private var page = 0
     @State private var notice = ""
@@ -26,6 +31,7 @@ struct ProfilesView: View {
                 Text("Your Retro Rewind licences, as its save holds them and Retro WFC sees them online. Rename a licence or change its Mii in the game's License Settings.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                transfer
                 if let snapshot = store.snapshot, snapshot.any, let license = store.current {
                     slots(snapshot)
                     HStack(alignment: .top, spacing: 28) {
@@ -49,7 +55,7 @@ struct ProfilesView: View {
                     }
                 } else if store.loaded {
                     GroupBox("No profiles") {
-                        Text("You have to play Retro Rewind at least once in order to see your profiles listed here.")
+                        Text("You have to play Retro Rewind at least once in order to see your profiles listed here, or import a profile from another device.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -65,6 +71,62 @@ struct ProfilesView: View {
             store.watchRooms()
         }
         .onDisappear { store.stopWatchingRooms() }
+        .fileImporter(isPresented: $importing, allowedContentTypes: [.zip]) { result in
+            switch result {
+            case .success(let url): store.inspect(url)
+            case .failure(let error): store.message = ProfileStore.Message(title: "This profile cannot be imported", text: error.localizedDescription)
+            }
+        }
+        .fileMover(isPresented: $store.exporting, files: store.exportFiles) { store.exported($0) }
+        .sheet(item: $store.pendingImport) { pending in
+            ImportSheet(pending: pending) {
+                whenGameClosed { store.confirmImport(pending) }
+            } cancel: {
+                store.pendingImport = nil
+            }
+        }
+        .alert(store.message?.title ?? "", isPresented: Binding(get: { store.message != nil }, set: { if !$0 { store.message = nil } }),
+               presenting: store.message) { _ in
+            Button("OK", role: .cancel) {}
+        } message: { message in
+            Text(message.text)
+        }
+    }
+
+    /// Import and Export: the whole profile, from or to a zip the player picks.
+    private var transfer: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Button {
+                    whenGameClosed { importing = true }
+                } label: {
+                    Label("Import…", systemImage: "square.and.arrow.down")
+                }
+                Button {
+                    whenGameClosed { store.export(store.current) }
+                } label: {
+                    Label("Export…", systemImage: "square.and.arrow.up")
+                }
+                if let doing = store.transferring {
+                    ProgressView()
+                    Text(doing).font(.callout).foregroundStyle(.secondary)
+                }
+            }
+            .buttonStyle(.bordered)
+            .disabled(store.transferring != nil)
+            if !store.notice.isEmpty {
+                Label(store.notice, systemImage: "checkmark.circle.fill").font(.callout).foregroundStyle(.green)
+            }
+        }
+    }
+
+    /// The saves and the NAND are the game's while it runs.
+    private func whenGameClosed(_ action: () -> Void) {
+        if model.phase == .running || model.phase == .opening {
+            store.message = ProfileStore.Message(title: "Close the game first", text: "The game uses its saves and its NAND while it runs.")
+        } else {
+            action()
+        }
     }
 
     // MARK: The licences
@@ -215,6 +277,99 @@ struct ProfilesView: View {
             try? await Task.sleep(for: .seconds(3))
             if !Task.isCancelled { notice = "" }
         }
+    }
+}
+
+/// What an import replaces, for the player to confirm: the archive's licences, each part and what it
+/// does here, and what to know before going online with it.
+private struct ImportSheet: View {
+    let pending: ProfileStore.PendingImport
+    let confirm: () -> Void
+    let cancel: () -> Void
+
+    private var contents: ProfileTransfer.Contents { pending.contents }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text(pending.fileName).font(.callout).foregroundStyle(.secondary)
+                    if !contents.licenses.isEmpty {
+                        GroupBox("Licences") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                ForEach(contents.licenses, id: \.slot) { license in
+                                    HStack {
+                                        Text(ProfileStore.displayName(license)).bold()
+                                        Spacer()
+                                        Text(license.friendCode.isEmpty ? "Never online" : license.friendCode)
+                                            .monospacedDigit()
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                    GroupBox("What it puts on this headset") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            ForEach(contents.parts, id: \.self) { part in
+                                Label(describe(part), systemImage: "checkmark.circle")
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    ForEach(warnings, id: \.self) { warning in
+                        Label(warning, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    }
+                    Text("Before anything changes, what this headset has now is saved to Backups in the WiiCompiled folder; importing that file brings it back.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .navigationTitle("Import this profile?")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel", action: cancel) }
+                ToolbarItem(placement: .confirmationAction) { Button("Import", action: confirm) }
+            }
+        }
+        .frame(minWidth: 600, minHeight: 680)
+    }
+
+    private func describe(_ part: ProfileTransfer.Part) -> String {
+        switch part {
+        case .retroRewindSave:
+            return "Retro Rewind save: its licences, friends and progress take the place of this headset's."
+        case .gameSave:
+            return "Mario Kart Wii save, for the unmodded game."
+        case .miis:
+            return (contents.miiCount == 1 ? "Miis: its Mii joins yours" : "Miis: its \(contents.miiCount) Miis join yours")
+                + "; one with the same ID is replaced."
+        case .consoleIdentity:
+            let console = contents.console ?? "?"
+            if console == pending.currentConsole { return "Console identity: the same console as this headset's (\(console))." }
+            return "Console identity: this headset becomes console \(console), the one the profile played online from"
+                + (pending.currentConsole.map { ", in place of \($0)." } ?? ".")
+        case .wifiLogin:
+            return "Wi-Fi login (DWC_AUTHDATA): the console's Nintendo WFC user ID."
+        case .deviceKeys:
+            return "Device keys (keys.bin): the console's certificate."
+        case .retroRewindData:
+            return "Retro Rewind's ratings, settings and ghosts; ghosts only this headset has are kept."
+        }
+    }
+
+    private var warnings: [String] {
+        var warnings: [String] = []
+        let online = contents.licenses.contains { !$0.friendCode.isEmpty }
+        if online, !contents.parts.contains(.consoleIdentity) {
+            warnings.append("It carries no console identity (setting.txt). Retro WFC checks the console at login and may refuse these licences from this headset (error 22005).")
+        }
+        if contents.parts.contains(.consoleIdentity), contents.console != pending.currentConsole {
+            warnings.append("Play online with this profile on one device at a time: the device it came from goes online as the same console.")
+        }
+        return warnings
     }
 }
 

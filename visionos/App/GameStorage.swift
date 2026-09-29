@@ -21,6 +21,8 @@ enum GameStorage {
     static var configFile: URL { gameDirectory.appendingPathComponent("Config.toml") }
     static var discDirectory: URL { gameDirectory.appendingPathComponent("DATA", isDirectory: true) }
     static var logsDirectory: URL { gameDirectory.appendingPathComponent("Logs", isDirectory: true) }
+    /// Where the Profiles tab's Import keeps the profile it replaced, in view of the Files app.
+    static var backupsDirectory: URL { gameDirectory.appendingPathComponent("Backups", isDirectory: true) }
 
     /// The game's NAND as the runtime resolves it (RuntimeNandPath in runtime/include/nand_path.h):
     /// Config.toml's `[paths] nand_root`, relative to the file's folder, or else the managed NAND

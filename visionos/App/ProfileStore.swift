@@ -66,6 +66,32 @@ final class ProfileStore: ObservableObject {
     /// Changes each time the save is read again, which reloads the VR history: races since count.
     @Published private(set) var generation = 0
 
+    /// An archive read for Import, waiting for the player to confirm it.
+    struct PendingImport: Identifiable {
+        let id = UUID()
+        let fileName: String
+        let contents: ProfileTransfer.Contents
+        /// This headset's console as Retro WFC knows it (CODE and SERNO), when it has one.
+        let currentConsole: String?
+    }
+
+    struct Message: Identifiable {
+        let id = UUID()
+        let title: String
+        let text: String
+    }
+
+    @Published var pendingImport: PendingImport?
+    @Published var message: Message?
+    /// What Import or Export is doing, while it does.
+    @Published private(set) var transferring: String?
+    /// The archive Export wrote, waiting for the player to choose where it goes.
+    @Published private(set) var exportFiles: [URL] = []
+    @Published var exporting = false
+    /// A passing word on what Import or Export did.
+    @Published private(set) var notice = ""
+    private var noticeTask: Task<Void, Never>?
+
     private var remotesAsked: Set<String> = []
     private var badgesLoaded = false
     private var roomsTask: Task<Void, Never>?
@@ -76,7 +102,7 @@ final class ProfileStore: ObservableObject {
     /// Retro WFC's rooms are asked for again this often while the tab is on screen, as the Quest's LiveRooms does.
     private static let roomsInterval: Duration = .seconds(40)
     /// SettingValues.NoName: the name the game's guest Miis carry.
-    private static let guestName = "no name"
+    nonisolated private static let guestName = "no name"
 
     init() {
         primarySlot = min(max(UserDefaults.standard.integer(forKey: ProfileStore.primaryKey), 0), RksysProfiles.slots - 1)
@@ -131,8 +157,115 @@ final class ProfileStore: ObservableObject {
     }
 
     /// A licence's name as the PC shows it: a guest Mii's "no name" reads No name.
-    static func displayName(_ license: RksysProfiles.License) -> String {
+    nonisolated static func displayName(_ license: RksysProfiles.License) -> String {
         license.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || license.name == guestName ? "No name" : license.name
+    }
+
+    // MARK: Import and export
+
+    /// Writes this headset's profile into a zip named after `license`, then asks where it goes.
+    func export(_ license: RksysProfiles.License?) {
+        guard transferring == nil else { return }
+        transferring = "Exporting…"
+        let name = ProfileTransfer.fileName(for: license)
+        Task {
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<URL?, Error> in
+                Result {
+                    guard let archive = try ProfileTransfer.archive() else { return nil }
+                    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("ProfileExport-\(UUID().uuidString)", isDirectory: true)
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    let file = folder.appendingPathComponent(name)
+                    try archive.write(to: file)
+                    return file
+                }
+            }.value
+            transferring = nil
+            switch result {
+            case .success(let file?):
+                exportFiles = [file]
+                exporting = true
+            case .success(nil):
+                message = Message(title: "Nothing to export yet", text: "This headset has no save, Miis or console identity yet. Play once, then export.")
+            case .failure(let error):
+                message = Message(title: "The profile could not be exported", text: error.localizedDescription)
+            }
+        }
+    }
+
+    /// Where Export's archive went, or why it did not.
+    func exported(_ result: Result<[URL], Error>) {
+        if let folder = exportFiles.first?.deletingLastPathComponent() { try? FileManager.default.removeItem(at: folder) }
+        exportFiles = []
+        switch result {
+        case .success(let moved):
+            if let file = moved.first { say("Saved \(file.lastPathComponent)") }
+        case .failure(let error):
+            if (error as? CocoaError)?.code == .userCancelled { return }
+            message = Message(title: "The profile could not be exported", text: error.localizedDescription)
+        }
+    }
+
+    /// Reads the archive the player picked and asks them to confirm what it replaces.
+    func inspect(_ url: URL) {
+        guard transferring == nil else { return }
+        transferring = "Reading \(url.lastPathComponent)…"
+        Task {
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<PendingImport, Error> in
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                return Result {
+                    let contents = try ProfileTransfer.read(url)
+                    let here = (try? Data(contentsOf: ProfileTransfer.Locations.current.url(.consoleIdentity))).flatMap(MiiIds.settings)
+                    let console = here.flatMap { MiiIds.hasIdentity($0) ? ($0["CODE"] ?? "") + ($0["SERNO"] ?? "") : nil }
+                    return PendingImport(fileName: url.lastPathComponent, contents: contents, currentConsole: console)
+                }
+            }.value
+            transferring = nil
+            switch result {
+            case .success(let pending): pendingImport = pending
+            case .failure(let error): message = Message(title: "This profile cannot be imported", text: error.localizedDescription)
+            }
+        }
+    }
+
+    /// Imports the confirmed archive, the current profile being backed up first.
+    func confirmImport(_ pending: PendingImport) {
+        pendingImport = nil
+        guard transferring == nil else { return }
+        transferring = "Importing…"
+        let backups = GameStorage.backupsDirectory
+        Task {
+            let result = await Task.detached(priority: .userInitiated) {
+                Result { try ProfileTransfer.apply(pending.contents, backups: backups) }
+            }.value
+            transferring = nil
+            switch result {
+            case .success(let report):
+                // Show the imported licences, from the one the tab opens on.
+                slot = -1
+                refresh()
+                var text = "Imported \(ProfileTransfer.list(report.parts))."
+                if let miis = report.miis, miis.skipped > 0 {
+                    text += " \(miis.skipped) Mii(s) did not fit in the 100 slots."
+                }
+                if let backup = report.backup {
+                    text += " What this headset had before is in Backups, as \(backup.lastPathComponent); import that file to go back."
+                }
+                message = Message(title: "Profile imported", text: text)
+            case .failure(let error):
+                refresh()
+                message = Message(title: "The profile could not be imported", text: error.localizedDescription)
+            }
+        }
+    }
+
+    private func say(_ text: String) {
+        notice = text
+        noticeTask?.cancel()
+        noticeTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            if !Task.isCancelled { self?.notice = "" }
+        }
     }
 
     // MARK: Online
