@@ -233,7 +233,8 @@ apply as on the desktop. Haptics are no-ops.
   `MKW_CHECKED_GUEST_MEMORY=1` restores the checked path.
 - **Directories.** The app's `Documents/WiiCompiled` folder holds `Config.toml`,
   `DATA` (the extracted disc), `NAND` and `Logs`; it is visible in the Files
-  app and through Finder file sharing (`UIFileSharingEnabled`). Bundled
+  app and through Finder file sharing (`UIFileSharingEnabled`). The Mii parts
+  the Miis tab downloads live apart from it, in `Application Support/MiiRendering`. Bundled
   resources (`wii_bootstrap/`, `dsp_coef.bin`, `initial_pipeline_cache.db`)
   live at the bundle root, where `RuntimePlatform::ExecutableDirectory()` finds
   them (`host_platform.cpp`). The runtime's transcript is mirrored to the
@@ -248,8 +249,8 @@ apply as on the desktop. Haptics are no-ops.
 ### The app
 
 `visionos/App/` is a SwiftUI app: a launcher `WindowGroup` with a Play tab
-(disc status, the folder paths, the immersion switch, Play) and a Settings tab,
-and an `ImmersiveSpace` whose content
+(the game picker, disc status, the folder paths, Retro Rewind's pack, Play), a
+Miis tab and a Settings tab, and an `ImmersiveSpace` whose content
 is a `CompositorLayer` (dedicated layout, `bgra8Unorm_srgb`, `depth32Float`,
 foveation off). The layer's `LayerRenderer` is passed to the provider and the
 game thread starts; the launcher window then closes itself, and the game's
@@ -267,6 +268,53 @@ invalidated) the app asks the runtime to quit, since it would otherwise carry on
 rendering to an invisible mirror. **A second run needs a relaunch of the app**:
 the runtime keeps process-wide state (the fixed guest reservation, HLE
 singletons) a second start would trip over.
+
+The Miis tab is the Quest launcher's My Miis (`docs/quest-port.md`, "My Miis"),
+ported to Swift, so a player can go online under their own Mii instead of a
+guest. `MiisView` lists the Miis of the Wii's Mii database in the game's NAND,
+`shared2/menu/FaceLib/RFL_DB.dat`, favourites first, and makes, edits,
+duplicates, imports, exports and deletes them; `MiiEditorView` is the editor,
+with the same ten pages, ranges and value displays as the Quest's and the PC's.
+The game's own Mii library reads that file, so a Mii made here is offered in
+the game when a licence is created and in License Settings > Change Mii, in
+both games: Retro Rewind's Riivolution save redirect covers only the title's
+data folder. The NAND is found as the runtime finds it: `[paths] nand_root`
+resolved against `Config.toml`'s folder, else `Documents/WiiCompiled/NAND`
+(`GameStorage.nandDirectory`, `RuntimeNandPath` in `nand_path.h`).
+`MiiDatabase.swift` is `MiiDatabase.kt`: a new NAND has no database, so the tab
+creates the Wii's empty one the first time it opens (the hidden database's
+10,000 entries linked to nothing, `0x7FFF`); every change checks the file's
+CRC-16/XMODEM first and refuses a corrupt file, and writes through a temporary
+file. A Mii is the 74-byte block of the PC's `MiiSerializer` (`Mii.swift`),
+which, like the PC's and the Quest's, writes zeros in the bits the format leaves
+unused, where a Wii may have stored something.
+
+A Mii made or duplicated here gets a new ID and this console's system ID, from
+the MAC address the runtime derives from `setting.txt`'s serial
+(`RuntimeConsoleIdentity::FromSerial`). The Quest asks the player to start the
+game once so that the runtime writes that file; here, where each game run needs
+the app relaunched, the launcher writes it the first time a Mii is made, as
+`RuntimeNandSettings::Ensure` would (the serial from the clock, Dolphin's PAL
+fields, the same encryption, `MiiIds.ensureConsoleMac`), and never replaces an
+existing file, even a damaged one. The runtime then finds a valid file and
+keeps it. An imported `.mii` gets the PC's import address and, like any Mii from
+another console, a globe. A tap selects one Mii; after **Select** in the title bar,
+taps add and remove Miis, where the Quest uses a long press. Each Mii also has
+a context menu with its actions. Export writes the `.mii` files to a temporary
+folder and moves them where the player chooses (SwiftUI's `fileMover`); Import
+takes any number of files. Changes are refused while the game runs.
+
+The pictures come from the Quest's Kotlin renderer ported to Swift
+(`MiiRenderer`, `FflResource`, `MiiBodies`), framed as the PC's `face`
+pictures, with the Quest's one deliberate fix (a beard in the facial hair
+colour). `MiiRenderResource` downloads FFL's Mii parts once from the Internet
+Archive's copy of Miitomo's `AFLResHigh_2_3.dat` (a 4.4 MB zip, unpacked with
+`ZipArchive`) and the 3DS body models (29 KB) from WheelWizard's repository,
+checks each against its SHA-256, and keeps them in the app's Application
+Support folder, out of the Files app and of backups: they are Nintendo's and
+never in the app. Until then Miis show as silhouettes and the editor's choices
+as numbers. `MiiImages` draws on two threads and caches by look; the editor's
+face is drawn one request at a time, so a burst of changes costs one render.
 
 ## Building
 
@@ -398,7 +446,21 @@ OpenXR input to the game, to HIDAPI, which it turns off on visionOS, so
   4.4 ms) to a locked 60, and a Ghost Valley 2 race holds 60 FPS in stereo with
   a 5 to 6.5 ms GPU span per frame.
 
-Not done: comfort tuning of the projection quad depth, the gesture thresholds,
+- The Miis tab: the Swift renderer draws what the Quest's Kotlin one draws,
+  pixel for pixel. On the real Mii parts, 555 of 555 pictures were identical to
+  the Kotlin sources' own output: 164 Miis covering every part and colour, with
+  and without bodies, turned three-quarters and whole, and every flat part's
+  choice icons. The Quest's `MiiDataTest`, `MiiDatabaseTest`, `MiiIdsTest`,
+  `MiiRendererTest` and `MiiBodiesTest` pass on the Swift port.
+  `MiiIds.encodeSettings` writes the same bytes as `RuntimeNandSettings::EncodeNew`
+  on 3,005 serials, and the runtime's `Read`, `HasIdentity` and `Ensure` accept
+  the launcher's `setting.txt` and leave it as it is. In the visionOS simulator
+  the tab created the database, drew the list and the editor's pages, and made,
+  renamed and saved Miis; the new Mii carried the system ID the runtime derives.
+  On an Apple M1 Max a list picture takes 4.5 ms to draw and the editor's
+  600-pixel face 14 ms.
+
+Not done: the Miis tab on a headset, and comfort tuning of the projection quad depth, the gesture thresholds,
 `render_scale`. Things to expect to tune first on hardware: the constant depth the
 projection quads are drawn at (3 m in `xr_visionos_compositor.mm`, which sets
 how the compositor reprojects late frames), the gesture thresholds in

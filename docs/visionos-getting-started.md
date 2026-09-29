@@ -105,6 +105,10 @@ drops the connection (the script retries).
   adjust the pointer while pinching, let go to press.
 - For **Retro Rewind**: pick it in the Play tab, press **Download Retro
   Rewind** (about 2 GB from Retro Rewind's server to the headset), then Play.
+- Online, other players see your Mii: its face and its name. Make yours in the
+  **Miis** tab before you press Play (**Download** there once to see the Miis'
+  faces), then pick it in the game when you create your licence, or later in
+  **License Settings > Change Mii**. Both games share these Miis.
 - Races start in first person, seated in the cockpit; the launcher's
   **Settings > Camera** switches to the chase camera.
 - Race with a Bluetooth game controller, or with bare hands (**Settings >
@@ -119,6 +123,7 @@ drops the connection (the script retries).
 | Add or remove Retro Rewind | Run the script with or without `--retro-rewind download` (the game is retranslated) |
 | Follow a Retro Rewind update that changed `Code.pul` | The app tells you it does not match the pack. Run `--retro-rewind download --retranslate` |
 | Change graphics or controls | The launcher's **Settings** tab, or `Config.toml` in the Files app (On My Apple Vision Pro > WiiCompiled Vision > WiiCompiled) |
+| Make, change or share a Mii | The launcher's **Miis** tab (it imports and exports `.mii` files); then in the game, **License Settings > Change Mii** |
 | Use another headset or team | `--device UDID`, `--team TEAMID` |
 
 ## When it stops

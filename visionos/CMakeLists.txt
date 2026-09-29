@@ -129,6 +129,15 @@ set(MKW_VISIONOS_APP_SOURCES
     "${MKW_VISIONOS_APP_DIR}/SettingsView.swift"
     "${MKW_VISIONOS_APP_DIR}/RetroRewindPack.swift"
     "${MKW_VISIONOS_APP_DIR}/ZipArchive.swift"
+    "${MKW_VISIONOS_APP_DIR}/Mii.swift"
+    "${MKW_VISIONOS_APP_DIR}/MiiDatabase.swift"
+    "${MKW_VISIONOS_APP_DIR}/FflResource.swift"
+    "${MKW_VISIONOS_APP_DIR}/MiiBodies.swift"
+    "${MKW_VISIONOS_APP_DIR}/MiiRenderer.swift"
+    "${MKW_VISIONOS_APP_DIR}/MiiRenderResource.swift"
+    "${MKW_VISIONOS_APP_DIR}/MiiImages.swift"
+    "${MKW_VISIONOS_APP_DIR}/MiisView.swift"
+    "${MKW_VISIONOS_APP_DIR}/MiiEditorView.swift"
     "${MKW_VISIONOS_GENERATED_DIR}/RetroRewindBuild.swift")
 
 add_executable(WiiCompiledVision MACOSX_BUNDLE ${MKW_VISIONOS_APP_SOURCES})

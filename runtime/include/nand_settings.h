@@ -92,6 +92,9 @@ inline std::string GenerateSerial(std::time_t now) {
 
 // This recompilation targets the European disc. These are Dolphin's PAL boot
 // defaults; an existing setting.txt always takes precedence, in every region.
+// The visionOS launcher writes the same file before the game's first start, so a
+// Mii made there carries this console's identity (MiiIds in
+// visionos/App/MiiDatabase.swift); keep the two encodings in step.
 inline std::optional<std::array<uint8_t, 256>> EncodeNew(const std::string& serial) {
     const Settings identity{{"SERNO", serial}, {"CODE", "LEH"}, {"AREA", "EUR"}, {"GAME", "EU"}};
     if (!HasIdentity(identity)) {

@@ -22,6 +22,18 @@ enum GameStorage {
     static var discDirectory: URL { gameDirectory.appendingPathComponent("DATA", isDirectory: true) }
     static var logsDirectory: URL { gameDirectory.appendingPathComponent("Logs", isDirectory: true) }
 
+    /// The game's NAND as the runtime resolves it (RuntimeNandPath in runtime/include/nand_path.h):
+    /// Config.toml's `[paths] nand_root`, relative to the file's folder, or else the managed NAND
+    /// folder beside it. The Miis tab finds the game's Mii database there.
+    static var nandDirectory: URL {
+        guard let configured = loadConfig()?.string("paths", "nand_root"), !configured.isEmpty else {
+            return gameDirectory.appendingPathComponent("NAND", isDirectory: true)
+        }
+        let path = configured.hasPrefix("/") ? URL(fileURLWithPath: configured, isDirectory: true)
+            : gameDirectory.appendingPathComponent(configured, isDirectory: true)
+        return path.standardizedFileURL
+    }
+
     enum DiscStatus { case missing, incomplete, ready }
 
     /// Whether DATA holds what the runtime's DVD layer accepts: the whole extracted partition,
