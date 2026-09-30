@@ -91,6 +91,15 @@ inline float MaxWheelAngle(bool bike, const WheelTuning& tuning) noexcept {
     return clamped * 0.01745329252f;
 }
 
+// Whether the overlay draws a separate VR wheel or handlebar: only when
+// placeholder_steering_wheel asks for one and the vehicle's own is not the one
+// turning. Without it the hands reach for the vehicle's own wherever its
+// geometry is known, turning or not.
+inline bool DrawsPlaceholderControl(bool steering_wheel, bool native_steering_wheel, bool native_mesh_prepared,
+                                    bool placeholder) noexcept {
+    return placeholder && steering_wheel && !(native_steering_wheel && native_mesh_prepared);
+}
+
 // Grips only grab. As a Wii Remote they press nothing at all (C, the game's
 // look-behind, is right B); as a gamepad they are the shoulders, so a holding
 // hand's squeeze is released for the game. The wheel replaces the left stick's

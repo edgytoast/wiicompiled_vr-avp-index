@@ -168,6 +168,7 @@ int g_vrFirstPersonSeat = RuntimeConfigFile::VrFirstPersonSeat() == "custom" ? 1
 float g_vrCockpitUnitsPerMeter = RuntimeConfigFile::VrCockpitUnitsPerMeter();
 bool g_vrSteeringWheel = RuntimeConfigFile::VrSteeringWheel();
 bool g_vrNativeSteeringWheel = RuntimeConfigFile::VrNativeSteeringWheel();
+bool g_vrPlaceholderSteeringWheel = RuntimeConfigFile::VrPlaceholderSteeringWheel();
 bool g_vrObjectCulling = RuntimeConfigFile::VrObjectCulling();
 bool g_vrHandSteering = RuntimeConfigFile::VrHandSteering();
 constexpr std::array<const char*, 3> kVrCockpitItemHands{"Left", "Right", "Off"};
@@ -1214,9 +1215,15 @@ void DrawVrSteeringWheelSettings() {
         mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
     }
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Turns the wheel or handlebar of the vehicle's own model. Off draws a "
-                          "separate VR wheel instead, which is also what appears when a vehicle's "
-                          "own wheel cannot be animated.");
+        ImGui::SetTooltip("Turns the wheel or handlebar of the vehicle's own model.");
+    }
+    if (ImGui::Checkbox("Placeholder wheel or handlebar", &g_vrPlaceholderSteeringWheel)) {
+        RuntimeConfigFile::SetVrPlaceholderSteeringWheel(g_vrPlaceholderSteeringWheel);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Draws a separate VR wheel (karts) or handlebar (bikes) whenever the "
+                          "vehicle's own is not the one turning: with the option above off, or while "
+                          "the game's draws do not take its animation, as in the race's opening pan.");
     }
     ImGui::EndDisabled();
     if (ImGui::Checkbox("Hand steering (by heurazy)", &g_vrHandSteering)) {
@@ -1317,7 +1324,8 @@ void DrawVrSteeringWheelSettings() {
                             anchor.bike ? "handlebar" : "wheel",
                             !anchor.native_wheel.valid ? "grips not found"
                             : anchor.native_mesh_prepared ? "vehicle's own"
-                                                          : "VR wheel",
+                            : g_vrSteeringWheel && g_vrPlaceholderSteeringWheel ? "placeholder"
+                                                                                : "vehicle's own, not animated",
                             anchor.units_per_meter, GxNativeWheel::LastDrawCount());
     }
 }
@@ -1769,6 +1777,7 @@ void DrawVrCameraSettings() {
         g_vrCockpitUnitsPerMeter = RuntimeConfigFile::kVrCockpitUnitsPerMeterDefault;
         g_vrSteeringWheel = RuntimeConfigFile::kVrSteeringWheelDefault;
         g_vrNativeSteeringWheel = RuntimeConfigFile::kVrNativeSteeringWheelDefault;
+        g_vrPlaceholderSteeringWheel = RuntimeConfigFile::kVrPlaceholderSteeringWheelDefault;
         g_vrHandSteering = RuntimeConfigFile::kVrHandSteeringDefault;
         g_vrCockpitItemHand = 0;
         g_vrCockpitItemThrow = RuntimeConfigFile::kVrCockpitItemThrowDefault;
@@ -1776,6 +1785,7 @@ void DrawVrCameraSettings() {
         RuntimeConfigFile::SetVrCockpitUnitsPerMeter(g_vrCockpitUnitsPerMeter);
         RuntimeConfigFile::SetVrSteeringWheel(g_vrSteeringWheel);
         RuntimeConfigFile::SetVrNativeSteeringWheel(g_vrNativeSteeringWheel);
+        RuntimeConfigFile::SetVrPlaceholderSteeringWheel(g_vrPlaceholderSteeringWheel);
         RuntimeConfigFile::SetVrHandSteering(g_vrHandSteering);
         RuntimeConfigFile::SetVrCockpitItemHand(RuntimeConfigFile::kVrCockpitItemHandDefault);
         RuntimeConfigFile::SetVrCockpitItemThrow(g_vrCockpitItemThrow);

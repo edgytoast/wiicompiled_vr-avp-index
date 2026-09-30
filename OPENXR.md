@@ -60,6 +60,7 @@ first_person_hidden_model = 0
 first_person_rotation = "yaw_pitch"
 steering_wheel = true
 native_steering_wheel = true
+placeholder_steering_wheel = false
 object_culling = false
 hand_steering = true
 cockpit_item_hand = "left"
@@ -599,9 +600,16 @@ guest's own vertices are never written, and the copies are dropped after the fra
 turn their handle part in the game already; its copy is only re-seated on the cockpit frame so the
 bars stay with your hands while the bike banks. The wheel rides in the same frame as the view: the
 level seat for `"yaw"`, the kart's own orientation for `"yaw_pitch"` and `"full"`. While no draw takes
-the copy (for 30 frames running; the race's opening pan does this) a separate VR wheel stands in,
-which is also what `native_steering_wheel = false` draws. The copy keeps being published, so the
-vehicle's own wheel returns as soon as draws take it again, and the log notes both switches.
+the copy (for 30 frames running; the race's opening pan does this) the vehicle's own is drawn as
+the game poses it. The copy keeps being published, so the vehicle's own wheel turns again as soon as
+draws take it again, and the log notes both switches.
+
+**The placeholder wheel.** `placeholder_steering_wheel = true` (off by default; F10 and the Quest
+launcher's Settings > VR) draws a separate VR wheel for karts, or handlebar for bikes, whenever the
+vehicle's own is not the one turning: with `native_steering_wheel = false`, and during the stretches
+above where no draw takes the copy. Off, only the vehicle's own is seen, and the hands reach for it wherever its geometry is known,
+turning or not; where it is not (a kart whose grips were not found), they reach for where the
+placeholder would stand, in front of the seat.
 
 Validated on the extracted PAL disc's 216 single-player kart/character and Mii combinations
 (all 18 kart types): each resolves its node-0 bone as the runtime does and selects the complete

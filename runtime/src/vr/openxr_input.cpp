@@ -1408,6 +1408,7 @@ void OpenXRInput::UpdateDriving(XrTime display_time, const driving::SeatFrame& s
     const bool hand_steering = RuntimeConfigFile::VrHandSteering();
     const bool steering_wheel = RuntimeConfigFile::VrSteeringWheel();
     const bool native_steering_wheel = RuntimeConfigFile::VrNativeSteeringWheel();
+    const bool placeholder_steering_wheel = RuntimeConfigFile::VrPlaceholderSteeringWheel();
     const float dt = m_wheel_time != 0 && display_time > m_wheel_time
                          ? static_cast<float>(display_time - m_wheel_time) * 1.0e-9f
                          : 1.0f / 90.0f;
@@ -1417,10 +1418,10 @@ void OpenXRInput::UpdateDriving(XrTime display_time, const driving::SeatFrame& s
     snapshot.cockpit_active = true;
     snapshot.hand_steering = hand_steering;
     snapshot.bike = anchor.bike;
-    // The vehicle's own control is the one turning (or none is shown at all),
-    // so the overlay adds no separate wheel.
-    snapshot.synthetic_control =
-        steering_wheel && !(native_steering_wheel && anchor.native_mesh_prepared);
+    // A separate wheel only when asked for and the vehicle's own is not the one
+    // turning.
+    snapshot.synthetic_control = driving::DrawsPlaceholderControl(
+        steering_wheel, native_steering_wheel, anchor.native_mesh_prepared, placeholder_steering_wheel);
 
     // Which control the hands reach for: the vehicle's own wherever its
     // geometry is known and no separate wheel is drawn, a handlebar always

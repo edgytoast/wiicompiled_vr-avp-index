@@ -26,6 +26,11 @@ int main() {
     Require(Parse("[vr]\ncockpit_item_throw = false\n").vrCockpitItemThrow == false);
     Require(Parse("[vr]\ncockpit_item_throw = true\n").vrCockpitItemThrow == true);
     Require(!Parse("[vr]\n").vrCockpitItemThrow.has_value());
+    // [vr] placeholder_steering_wheel: the separate VR wheel or handlebar is opt-in.
+    Require(!RuntimeConfigFile::kVrPlaceholderSteeringWheelDefault);
+    Require(Parse("[vr]\nplaceholder_steering_wheel = true\n").vrPlaceholderSteeringWheel == true);
+    Require(Parse("[vr]\nplaceholder_steering_wheel = false\n").vrPlaceholderSteeringWheel == false);
+    Require(!Parse("[vr]\n").vrPlaceholderSteeringWheel.has_value());
     // [vr] foveation: the Quest's foveated rendering level, index-matched to
     // aurora_set_stereo_foveation.
     for (std::string_view level : RuntimeConfigFile::kVrFoveationLevels) {

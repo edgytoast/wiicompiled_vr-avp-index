@@ -108,6 +108,21 @@ void TestSeatFrame() {
     CheckNear(m[11], -1.0f, "lean turns up into forward", 1e-5f);
 }
 
+void TestPlaceholderControl() {
+    // Arguments: steering_wheel, native_steering_wheel, native_mesh_prepared, placeholder.
+    Check(!driving::DrawsPlaceholderControl(true, true, false, false),
+          "no placeholder while the vehicle's own is not animated, unless asked for");
+    Check(!driving::DrawsPlaceholderControl(true, false, false, false),
+          "no placeholder with the vehicle's own wheel off, unless asked for");
+    Check(driving::DrawsPlaceholderControl(true, true, false, true),
+          "the placeholder stands in while the vehicle's own is not animated");
+    Check(driving::DrawsPlaceholderControl(true, false, true, true),
+          "the placeholder replaces the vehicle's own wheel when that is off");
+    Check(!driving::DrawsPlaceholderControl(true, true, true, true),
+          "no placeholder while the vehicle's own is the one turning");
+    Check(!driving::DrawsPlaceholderControl(false, false, false, true), "no wheel turns at all");
+}
+
 } // namespace
 
 int main() {
@@ -115,6 +130,7 @@ int main() {
     TestMaxAngle();
     TestVisual();
     TestSeatFrame();
+    TestPlaceholderControl();
     if (g_failures != 0) {
         std::cerr << g_failures << " check(s) failed\n";
         return 1;

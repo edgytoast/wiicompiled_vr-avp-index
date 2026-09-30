@@ -182,6 +182,13 @@ class SettingsPage(
                 write = { c, index -> c.setString("vr", "first_person_seat", SEATS[index]) },
                 enabledIf = firstPerson,
             )
+            // runtime_config.h's kVrPlaceholderSteeringWheelDefault is off.
+            toggle(
+                R.string.vr_placeholder_wheel, R.string.vr_placeholder_wheel_helper,
+                read = { it.bool("vr", "placeholder_steering_wheel") ?: false },
+                write = { c, value -> c.setBool("vr", "placeholder_steering_wheel", value) },
+                enabledIf = cockpit,
+            )
             // heurazy's grab-and-turn wheel: runtime_config.h's kVrHandSteeringDefault is on.
             toggle(
                 R.string.vr_hand_steering, R.string.vr_hand_steering_helper,

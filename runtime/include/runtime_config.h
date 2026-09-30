@@ -76,6 +76,7 @@ struct RuntimeUserConfig {
     std::optional<float> vrCockpitUnitsPerMeter;
     std::optional<bool> vrSteeringWheel;
     std::optional<bool> vrNativeSteeringWheel;
+    std::optional<bool> vrPlaceholderSteeringWheel;
     std::optional<bool> vrObjectCulling;
     std::optional<bool> vrHandSteering;
     std::optional<std::string> vrCockpitItemHand;
@@ -231,13 +232,17 @@ inline constexpr float kVrCockpitUnitsPerMeterDefault = 100.0f;
 inline constexpr float kVrCockpitUnitsPerMeterMin = 20.0f;
 inline constexpr float kVrCockpitUnitsPerMeterMax = 400.0f;
 // The vehicle's steering wheel or handlebar turns with the steering; the
-// vehicle's own model is animated unless native_steering_wheel is off, which
-// draws a separate VR wheel instead. Hand steering (grabbing that wheel with
-// the tracked controllers, by heurazy) comes with it: the stick still steers
-// until a grip actually takes hold of the wheel. Both launchers register
-// hand_steering with this same default.
+// vehicle's own model is animated unless native_steering_wheel is off.
+// placeholder_steering_wheel draws a separate VR wheel or handlebar whenever
+// the vehicle's own is not the one turning (native_steering_wheel off, or a
+// draw that does not take the animated copy); off, the vehicle's own is all
+// there is. Hand steering (grabbing that wheel with the tracked controllers,
+// by heurazy) comes with it: the stick still steers until a grip actually
+// takes hold of the wheel. Both launchers register hand_steering with this
+// same default.
 inline constexpr bool kVrSteeringWheelDefault = true;
 inline constexpr bool kVrNativeSteeringWheelDefault = true;
+inline constexpr bool kVrPlaceholderSteeringWheelDefault = false;
 inline constexpr bool kVrHandSteeringDefault = true;
 inline constexpr const char* kVrCockpitItemHandDefault = "left";
 // A quick swing of the item hand forward or back throws the item that way.
@@ -594,9 +599,11 @@ inline void EnsureConfigFile() {
               "first_person_rotation = \"yaw_pitch\"\n"
               "# In the cockpit the vehicle's steering wheel or handlebar turns\n"
               "# with the steering. native_steering_wheel animates the vehicle's\n"
-              "# own model; false draws a separate VR wheel instead.\n"
+              "# own model. placeholder_steering_wheel draws a separate VR wheel\n"
+              "# or handlebar whenever the vehicle's own is not the one turning.\n"
               "steering_wheel = true\n"
               "native_steering_wheel = true\n"
+              "placeholder_steering_wheel = false\n"
               "# The game hides karts and objects its own camera cannot see.\n"
               "# object_culling = false draws them anyway, so a head turn or a\n"
               "# look over the shoulder shows them; it costs GPU time.\n"
@@ -887,6 +894,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
         readRangedFloat("cockpit_units_per_meter", kVrCockpitUnitsPerMeterMin, kVrCockpitUnitsPerMeterMax);
     config.vrSteeringWheel = FindConfigValue<bool>(document, "vr", "steering_wheel");
     config.vrNativeSteeringWheel = FindConfigValue<bool>(document, "vr", "native_steering_wheel");
+    config.vrPlaceholderSteeringWheel = FindConfigValue<bool>(document, "vr", "placeholder_steering_wheel");
     config.vrObjectCulling = FindConfigValue<bool>(document, "vr", "object_culling");
     config.vrHandSteering = FindConfigValue<bool>(document, "vr", "hand_steering");
     config.vrCockpitItemHand = FindConfigValue<std::string>(document, "vr", "cockpit_item_hand");
@@ -1281,6 +1289,11 @@ inline bool SetVrSteeringWheel(bool value) {
 inline bool SetVrNativeSteeringWheel(bool value) {
     Mutable().vrNativeSteeringWheel = value;
     return WriteSetting("vr", "native_steering_wheel", value ? "true" : "false");
+}
+
+inline bool SetVrPlaceholderSteeringWheel(bool value) {
+    Mutable().vrPlaceholderSteeringWheel = value;
+    return WriteSetting("vr", "placeholder_steering_wheel", value ? "true" : "false");
 }
 
 inline bool SetVrObjectCulling(bool value) {
@@ -1785,6 +1798,10 @@ inline bool VrSteeringWheel(bool fallback = kVrSteeringWheelDefault) {
 
 inline bool VrNativeSteeringWheel(bool fallback = kVrNativeSteeringWheelDefault) {
     return Get().vrNativeSteeringWheel.value_or(fallback);
+}
+
+inline bool VrPlaceholderSteeringWheel(bool fallback = kVrPlaceholderSteeringWheelDefault) {
+    return Get().vrPlaceholderSteeringWheel.value_or(fallback);
 }
 
 inline bool VrObjectCulling(bool fallback = kVrObjectCullingDefault) {

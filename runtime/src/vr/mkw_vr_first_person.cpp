@@ -1176,9 +1176,10 @@ bool ComputeCockpitAnchorLocked(const Mtx34& view_from_world, const KartPoseRead
     return true;
 }
 
-// After the frame's draws: drop the wheel copies, and let the VR wheel stand
-// in while no draw takes them (the race's opening pan, for one). Copies keep
-// being published, so the vehicle's own wheel returns as soon as they match.
+// After the frame's draws: drop the wheel copies, and let the placeholder VR
+// wheel stand in (when enabled) while no draw takes them (the race's opening
+// pan, for one). Copies keep being published, so the vehicle's own wheel
+// returns as soon as they match.
 void FinishNativeWheelFrameLocked() noexcept {
     if (!g_state.wheel_arrays_posted) {
         return;
@@ -1206,8 +1207,11 @@ void FinishNativeWheelFrameLocked() noexcept {
             ++g_state.native_wheel_switch_logs;
             RT_LOG(RT_TAG_RUNTIME) << "[mkw-vr] native steering wheel: no draw took the animated copy of vehicle 0x"
                                    << std::hex << g_state.cockpit.body << std::dec << " in "
-                                   << kNativeWheelUnmatchedFrames
-                                   << " frames; drawing the VR steering wheel until one does" << std::endl;
+                                   << kNativeWheelUnmatchedFrames << " frames; "
+                                   << (RuntimeConfigFile::VrPlaceholderSteeringWheel()
+                                           ? "drawing the placeholder VR wheel until one does"
+                                           : "the vehicle's own is drawn as the game poses it until one does")
+                                   << std::endl;
         }
     }
 }

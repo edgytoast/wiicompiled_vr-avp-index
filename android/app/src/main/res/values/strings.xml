@@ -533,6 +533,8 @@
     <string name="vr_seat_helper">The cockpit puts you at the driver\'s eyes, life-size, with the steering wheel or handlebar turning within reach. Custom uses the head offsets from the in-headset settings.</string>
     <string name="vr_seat_cockpit">Cockpit</string>
     <string name="vr_seat_custom">Custom</string>
+    <string name="vr_placeholder_wheel">Placeholder wheel or handlebar</string>
+    <string name="vr_placeholder_wheel_helper">In the cockpit, draws a separate VR steering wheel (karts) or handlebar (bikes) whenever the vehicle\'s own is not the one turning, as in the race\'s opening pan. Off, you only see the vehicle\'s own.</string>
     <string name="vr_hand_steering">Hand steering</string>
     <string name="vr_hand_steering_helper">In the cockpit, squeeze a grip near the steering wheel or handlebar to grab it, and turn it to steer. Releasing both grips gives steering back to the stick. Hand steering by heurazy.</string>
     <string name="vr_cockpit_item_hand">Item in cockpit hand</string>
