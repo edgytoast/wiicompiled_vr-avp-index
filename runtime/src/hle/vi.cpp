@@ -37,6 +37,7 @@
 #endif
 
 #include <aurora/aurora.h>
+#include <aurora/gfx.h>
 
 // Forward declaration for OSWakeupThread - used to wake threads on VI retrace queue
 extern "C" void OSWakeupThread_HLE_801aaaa4(CpuContext* ctx);
@@ -538,6 +539,8 @@ void PaceToRetraceBoundary(Clock::time_point deadline) {
 struct SceneAnchorPublication {
     std::array<float, 12> anchor{};
     bool valid = false;
+    std::array<float, 12> view{};
+    bool viewValid = false;
     // The cockpit seat's exact world scale for this frame, or zero.
     float unitsPerMeter = 0.0f;
 };
@@ -550,6 +553,8 @@ SceneAnchorPublication PublishVrSceneAnchor() {
     mkw::vr::MkwVRFirstPersonCommit();
     const mkw::vr::FirstPersonAnchor anchor = mkw::vr::MkwVRFirstPersonGetAnchor();
     SceneAnchorPublication publication;
+    // Only VR frame interpolation separates the camera, so nothing else pays for the read.
+    publication.viewValid = aurora_get_stereo_frame_interpolation() && mkw::vr::MkwVRReadSceneView(publication.view);
     publication.valid = anchor.valid;
     if (anchor.valid) {
         std::copy(anchor.anchor_from_scene.begin(), anchor.anchor_from_scene.end(), publication.anchor.begin());
@@ -592,6 +597,8 @@ struct GxPresentRecord {
     uint64_t scheduleIntervalNanos = 0;
     std::array<float, 12> anchor{};
     bool anchorValid = false;
+    std::array<float, 12> view{};
+    bool viewValid = false;
     float anchorUnitsPerMeter = 0.0f;
     AuroraCockpitItem cockpitItem{};
     bool reportPaced = false;
@@ -613,6 +620,7 @@ void GxPresent_gx(GxPresentRecord record) {
     }
     aurora_set_stereo_cockpit_item(&record.cockpitItem);
     aurora_set_stereo_local_player_count(record.localPlayerCount);
+    aurora_set_stereo_scene_view(record.viewValid ? record.view.data() : nullptr);
     aurora_end_frame_ex(record.contentTag, record.imguiFrame);
     g_auroraFrameActive.store(false, std::memory_order_release);
     g_auroraFrameHadWork.store(false, std::memory_order_release);
@@ -695,6 +703,8 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
     const SceneAnchorPublication anchor = PublishVrSceneAnchor();
     record.anchor = anchor.anchor;
     record.anchorValid = anchor.valid;
+    record.view = anchor.view;
+    record.viewValid = anchor.viewValid;
     record.anchorUnitsPerMeter = anchor.unitsPerMeter;
     if (anchor.valid) {
         const auto item = mkw::vr::MkwVRFirstPersonGetHeldItem();

@@ -2,6 +2,7 @@
 
 #include "../internal.hpp"
 #include "aurora/gfx.h"
+#include "../gfx/stereo_replay.hpp"
 
 // Guest matrices really do carry NaN/Inf, and the isfinite guards here keep them
 // out of the MatchEdge sort. Needs -fno-finite-math-only (see runtime/CMakeLists.txt).
@@ -44,6 +45,11 @@ std::atomic_uint64_t s_diagFramesLowMatch{0};
 std::atomic_uint64_t s_diagFramesReplayUnsafe{0};
 std::atomic_uint64_t s_diagSlotReductions{0};
 std::atomic_uint64_t s_diagLateSealDrops{0};
+std::atomic_uint32_t s_diagPreparedDraws{0};
+std::atomic_uint32_t s_diagRejectedDraws{0};
+std::atomic_uint32_t s_diagVertexMotionDraws{0};
+std::atomic_uint32_t s_diagVertexMotionHeld{0};
+std::atomic_uint64_t s_diagAnimationWrapCuts{0};
 // Persistent worker pool for the per-sample interpolation tasks. libc++ has no
 // parallel execution policies, so without it the seal loop runs serially. Leaked.
 class InterpolationWorkerPool {
@@ -147,6 +153,19 @@ struct FrameTransformSnapshot {
   Mat3x4<float> position{};
   Mat3x4<float> normal{};
   uint16_t usedMatrixMask = 1;
+  // Direct particle vertices can already be in camera space with identity XF.
+  // Their retained vertex buffer belongs to the current frame, so only the
+  // sampled camera should move them; an old matrix cannot animate those vertices.
+  bool viewSpaceVertices = false;
+  DrawVertexMotion vertexMotion{};
+  // Vertex-motion quads only: centre and edges in the recording camera's space.
+  // The seal rebases `position` as if the quad were world-fixed, but emitters
+  // that follow the kart keep their particles near their old camera-space place.
+  std::array<float, 3> quadCenter{};
+  std::array<std::array<float, 3>, 2> quadEdges{};
+  // Left unmatched in a group whose particles follow the camera: hold it there,
+  // not at a world position the sampled camera would sweep past.
+  bool holdInCamera = false;
   struct IndexedMatrices {
     std::array<Mat3x4<float>, MaxPnMtx> position{};
     std::array<Mat3x4<float>, MaxPnMtx> normal{};
@@ -189,10 +208,14 @@ struct PendingUniformInterpolation {
 
 std::vector<FrameTransformEntry> s_previousFrameTransforms;
 std::vector<FrameTransformEntry> s_currentFrameTransforms;
+Mat3x4<float> s_currentFromPreviousView{}, s_previousFromCurrentView{};
+bool s_rebaseView = false;
 std::unordered_map<HashType, std::vector<size_t>> s_previousTransformIndices;
 std::unordered_map<HashType, std::vector<size_t>> s_currentTransformIndices;
 std::unordered_map<HashType, std::vector<size_t>> s_previousStableTransformIndices;
 std::unordered_map<HashType, std::vector<size_t>> s_currentStableTransformIndices;
+std::unordered_map<HashType, std::vector<size_t>> s_previousGeometryTransformIndices;
+std::unordered_map<HashType, std::vector<size_t>> s_currentGeometryTransformIndices;
 
 // Free list for the indexed-matrix snapshots; per-draw heap allocation was the
 // hottest cost in this path. Unused slots keep stale data, consumers mask first.
@@ -285,6 +308,19 @@ constexpr float kMinimumScale = 1.0e-5f;
 constexpr float kMaximumTranslationPerFrame = 1500.0f;
 constexpr float kMinimumQuaternionDot = 0.70710678f;
 constexpr size_t kNoPreparedPair = std::numeric_limits<size_t>::max();
+// Vertex-motion quad pairing (matchQuadGroup). Costs are squared distances.
+// A pair must undercut the runner-up among other particles by this factor.
+constexpr float kQuadAmbiguity = 1.5f;
+// A particle's edges change by at most 30% of its size per frame.
+constexpr float kQuadShapeChange = 0.3f * 0.3f;
+// A particle with a path lands within a quarter of its last step of the
+// prediction, or within a tenth of its short edge when it barely moves.
+constexpr float kQuadPathTolerance = 0.25f * 0.25f;
+constexpr float kQuadPathFloor = 0.1f * 0.1f;
+// Centres this close belong to one particle: a cross draws two quads per streak.
+constexpr float kQuadSamePlace = 1.0e-4f;
+// All-pairs bound per group. A denser swarm stays where the game drew it.
+constexpr size_t kMaximumQuadPairs = 4096;
 
 HashType combine_identity(HashType first, HashType second) noexcept {
   return xxh3_hash(second, first);
@@ -293,6 +329,10 @@ HashType combine_identity(HashType first, HashType second) noexcept {
 HashType stable_identity(const FrameInterpolationDrawIdentity& identity) noexcept {
   return combine_identity(combine_identity(identity.pipeline, identity.texture),
                           identity.matrixTopology);
+}
+
+HashType geometry_identity(const FrameInterpolationDrawIdentity& identity) noexcept {
+  return combine_identity(combine_identity(identity.pipeline, identity.geometry), identity.matrixTopology);
 }
 
 float dot3(const std::array<float, 3>& a, const std::array<float, 3>& b) noexcept {
@@ -338,50 +378,53 @@ Quaternion quaternion_from_rotation(const std::array<std::array<float, 3>, 3>& m
   return q;
 }
 
+// Splits the 3x3 part into a rotation R and an upper-triangular stretch U with M = R*U
+// (Gram-Schmidt on the columns): scale on U's diagonal, shear above it, a mirror as a
+// negative last diagonal. V*T*R*S puts non-uniform model scale on the columns, so a plain
+// R*S comes back with a diagonal U. A sheared matrix keeps its tilt in U instead of
+// losing it to the nearest rotation. `skew` receives the largest |cosine| between the
+// columns: zero for rotation times scale.
 bool decompose_affine(const Mat3x4<float>& matrix, std::array<std::array<float, 3>, 3>& rotation,
-                      std::array<float, 3>& scale, std::array<float, 3>& translation,
-                      Quaternion& quaternion) noexcept {
+                      std::array<float, 6>& stretch, std::array<float, 3>& translation,
+                      Quaternion& quaternion, float& skew) noexcept {
   const std::array<Vec4<float>, 3> rows{matrix.m0, matrix.m1, matrix.m2};
-  // V*T*R*S puts non-uniform model scale on the columns, so scale must be read off the
-  // columns; row extraction misreads R*S as shear whenever the rotation tilts an axis.
   for (size_t row = 0; row < 3; ++row) {
     translation[row] = rows[row].w();
     if (!std::isfinite(translation[row])) {
       return false;
     }
   }
-  for (size_t column = 0; column < 3; ++column) {
-    const float x = rows[0][column];
-    const float y = rows[1][column];
-    const float z = rows[2][column];
-    scale[column] = std::sqrt(x * x + y * y + z * z);
-    if (!std::isfinite(scale[column]) || scale[column] < kMinimumScale) {
-      return false;
-    }
-    rotation[0][column] = x / scale[column];
-    rotation[1][column] = y / scale[column];
-    rotation[2][column] = z / scale[column];
-  }
-
-  const auto rotationColumn = [&rotation](size_t column) noexcept {
-    return std::array<float, 3>{rotation[0][column], rotation[1][column], rotation[2][column]};
+  const auto column = [&rows](size_t index) noexcept {
+    return std::array<float, 3>{rows[0][index], rows[1][index], rows[2][index]};
   };
-  if (std::abs(dot3(rotationColumn(0), rotationColumn(1))) > 0.05f ||
-      std::abs(dot3(rotationColumn(0), rotationColumn(2))) > 0.05f ||
-      std::abs(dot3(rotationColumn(1), rotationColumn(2))) > 0.05f) {
+  const auto c0 = column(0), c1 = column(1), c2 = column(2);
+  const float u00 = std::sqrt(dot3(c0, c0));
+  if (!std::isfinite(u00) || u00 < kMinimumScale) {
     return false;
   }
-
-  const float determinant = dot3(rotation[0], cross3(rotation[1], rotation[2]));
-  if (!std::isfinite(determinant) || std::abs(std::abs(determinant) - 1.0f) > 0.1f) {
+  const std::array<float, 3> r0{c0[0] / u00, c0[1] / u00, c0[2] / u00};
+  const float u01 = dot3(r0, c1);
+  const std::array<float, 3> c1Rest{c1[0] - u01 * r0[0], c1[1] - u01 * r0[1], c1[2] - u01 * r0[2]};
+  const float u11 = std::sqrt(dot3(c1Rest, c1Rest));
+  if (!std::isfinite(u11) || u11 < kMinimumScale) {
     return false;
   }
-  if (determinant < 0.0f) {
-    scale[0] = -scale[0];
-    for (size_t row = 0; row < 3; ++row) {
-      rotation[row][0] = -rotation[row][0];
-    }
+  const std::array<float, 3> r1{c1Rest[0] / u11, c1Rest[1] / u11, c1Rest[2] / u11};
+  const auto r2 = cross3(r0, r1);
+  const float u02 = dot3(r0, c2);
+  const float u12 = dot3(r1, c2);
+  const float u22 = dot3(r2, c2);
+  if (!std::isfinite(u02) || !std::isfinite(u12) || !std::isfinite(u22) || std::abs(u22) < kMinimumScale) {
+    return false;
   }
+  const float length1 = std::sqrt(dot3(c1, c1));
+  const float length2 = std::sqrt(dot3(c2, c2));
+  skew = std::max({std::abs(u01) / length1, std::abs(u02) / length2,
+                   std::abs(dot3(c1, c2)) / (length1 * length2)});
+  for (size_t row = 0; row < 3; ++row) {
+    rotation[row] = {r0[row], r1[row], r2[row]};
+  }
+  stretch = {u00, u01, u02, u11, u12, u22};
 
   quaternion = quaternion_from_rotation(rotation);
   return std::isfinite(quaternion.x) && std::isfinite(quaternion.y) && std::isfinite(quaternion.z) &&
@@ -408,12 +451,15 @@ std::array<std::array<float, 3>, 3> rotation_from_quaternion(const Quaternion& q
 struct PreparedAffinePair {
   Mat3x4<float> previous{};
   Mat3x4<float> current{};
-  std::array<float, 3> previousScale{};
-  std::array<float, 3> currentScale{};
+  // Upper-triangular stretch from decompose_affine: u00 u01 u02 u11 u12 u22.
+  std::array<float, 6> previousStretch{};
+  std::array<float, 6> currentStretch{};
   std::array<float, 3> previousTranslation{};
   std::array<float, 3> currentTranslation{};
   Quaternion previousQuaternion{};
   Quaternion currentQuaternion{};
+  float rotationAngle = 0.0f;
+  float inverseRotationSin = 0.0f;
   bool linear = false;
   bool identical = false;
   bool valid = false;
@@ -426,6 +472,9 @@ struct PreparedTransformInterpolation {
   // its matrices from a sibling, that is the sibling's partner.
   size_t previousProjectionEntry = kNoPreparedPair;
   bool indexedValid = false;
+  bool desktopIndexedValid = false;
+  // Unpaired quad held in camera space: its own transform is both endpoints.
+  bool cameraHold = false;
 
   PreparedTransformInterpolation() {
     indexedPairOffsets.fill(kNoPreparedPair);
@@ -433,7 +482,7 @@ struct PreparedTransformInterpolation {
 };
 
 PreparedAffinePair prepare_affine_pair(const Mat3x4<float>& previous,
-                                       const Mat3x4<float>& current) noexcept {
+                                       const Mat3x4<float>& current, bool rotatingDraw = false) noexcept {
   PreparedAffinePair pair{.previous = previous, .current = current};
   if (std::memcmp(&previous, &current, sizeof(current)) == 0) {
     pair.identical = true;
@@ -443,10 +492,17 @@ PreparedAffinePair prepare_affine_pair(const Mat3x4<float>& previous,
 
   std::array<std::array<float, 3>, 3> previousRotation{};
   std::array<std::array<float, 3>, 3> currentRotation{};
-  if (!decompose_affine(previous, previousRotation, pair.previousScale,
-                        pair.previousTranslation, pair.previousQuaternion) ||
-      !decompose_affine(current, currentRotation, pair.currentScale,
-                        pair.currentTranslation, pair.currentQuaternion)) {
+  float previousSkew = 0.0f, currentSkew = 0.0f;
+  if (!decompose_affine(previous, previousRotation, pair.previousStretch,
+                        pair.previousTranslation, pair.previousQuaternion, previousSkew) ||
+      !decompose_affine(current, currentRotation, pair.currentStretch,
+                        pair.currentTranslation, pair.currentQuaternion, currentSkew)) {
+    return pair;
+  }
+  // Camera and seat anchors are rigid; a sheared one is garbage. Draws may shear:
+  // MKW's Lakitu sways by tilting his body's Y axis, and dropping that tilt from his
+  // rigid goggles (or holding them at the game frame) sank them into his skinned head.
+  if (!rotatingDraw && std::max(previousSkew, currentSkew) > 0.05f) {
     return pair;
   }
 
@@ -471,8 +527,14 @@ PreparedAffinePair prepare_affine_pair(const Mat3x4<float>& previous,
     pair.currentQuaternion.w = -pair.currentQuaternion.w;
     quaternionDot = -quaternionDot;
   }
-  if (!std::isfinite(quaternionDot) || quaternionDot < kMinimumQuaternionDot) {
+  if (!std::isfinite(quaternionDot) || (!rotatingDraw && quaternionDot < kMinimumQuaternionDot)) {
     return pair;
+  }
+  if (quaternionDot < kMinimumQuaternionDot) {
+    // A fast wheel is not a camera cut. Slerp its shortest arc so arbitrary VR
+    // sample weights keep angular speed constant without shrinking the wheel.
+    pair.rotationAngle = std::acos(std::clamp(quaternionDot, 0.0f, 1.0f));
+    pair.inverseRotationSin = 1.0f / std::sin(pair.rotationAngle);
   }
   pair.valid = true;
   return pair;
@@ -539,10 +601,14 @@ bool evaluate_affine_pair(const PreparedAffinePair& pair, float weight,
     return true;
   }
 
-  // Consecutive 60 Hz transforms stay in one hemisphere and within 90 degrees, so
-  // normalized lerp is stable and skips three transcendentals per matrix.
-  const float previousWeight = 1.0f - weight;
-  const float currentWeight = weight;
+  // Most transforms use the cheaper normalized lerp. Fast rigid spins need
+  // constant angular speed across arbitrary display samples, so use slerp there.
+  const float previousWeight = pair.rotationAngle > 0.0f
+                                   ? std::sin((1.0f - weight) * pair.rotationAngle) * pair.inverseRotationSin
+                                   : 1.0f - weight;
+  const float currentWeight = pair.rotationAngle > 0.0f
+                                  ? std::sin(weight * pair.rotationAngle) * pair.inverseRotationSin
+                                  : weight;
   Quaternion interpolated{
       pair.previousQuaternion.x * previousWeight + pair.currentQuaternion.x * currentWeight,
       pair.previousQuaternion.y * previousWeight + pair.currentQuaternion.y * currentWeight,
@@ -563,28 +629,23 @@ bool evaluate_affine_pair(const PreparedAffinePair& pair, float weight,
   interpolated.w /= quaternionLength;
 
   const auto interpolatedRotation = rotation_from_quaternion(interpolated);
-  std::array<float, 3> interpolatedScale{};
+  std::array<float, 6> u{};
+  for (size_t i = 0; i < u.size(); ++i) {
+    u[i] = pair.previousStretch[i] + (pair.currentStretch[i] - pair.previousStretch[i]) * weight;
+  }
   std::array<float, 3> interpolatedTranslation{};
   for (size_t i = 0; i < 3; ++i) {
-    interpolatedScale[i] = pair.previousScale[i] +
-                           (pair.currentScale[i] - pair.previousScale[i]) * weight;
     interpolatedTranslation[i] =
         pair.previousTranslation[i] +
         (pair.currentTranslation[i] - pair.previousTranslation[i]) * weight;
   }
-  // Column scale mirrors decompose_affine: the reconstruction is R*S, with
-  // each scale component applied down its column.
-  output = {
-      {interpolatedRotation[0][0] * interpolatedScale[0],
-       interpolatedRotation[0][1] * interpolatedScale[1],
-       interpolatedRotation[0][2] * interpolatedScale[2], interpolatedTranslation[0]},
-      {interpolatedRotation[1][0] * interpolatedScale[0],
-       interpolatedRotation[1][1] * interpolatedScale[1],
-       interpolatedRotation[1][2] * interpolatedScale[2], interpolatedTranslation[1]},
-      {interpolatedRotation[2][0] * interpolatedScale[0],
-       interpolatedRotation[2][1] * interpolatedScale[1],
-       interpolatedRotation[2][2] * interpolatedScale[2], interpolatedTranslation[2]},
-  };
+  // Mirrors decompose_affine: the reconstruction is R*U, U upper-triangular.
+  const std::array<Vec4<float>*, 3> outputRows{&output.m0, &output.m1, &output.m2};
+  for (size_t row = 0; row < 3; ++row) {
+    const auto& r = interpolatedRotation[row];
+    *outputRows[row] = {r[0] * u[0], r[0] * u[1] + r[1] * u[3], r[0] * u[2] + r[1] * u[4] + r[2] * u[5],
+                        interpolatedTranslation[row]};
+  }
   return true;
 }
 
@@ -617,6 +678,11 @@ bool interpolate_transform(const Mat3x4<float>& previous, const Mat3x4<float>& c
 bool interpolate_transform_midpoint(const Mat3x4<float>& previous, const Mat3x4<float>& current,
                                     Mat3x4<float>& output) noexcept {
   return interpolate_transform(previous, current, 0.5f, output);
+}
+
+bool interpolate_draw_transform(const Mat3x4<float>& previous, const Mat3x4<float>& current,
+                                float weight, Mat3x4<float>& output) noexcept {
+  return evaluate_affine_pair(prepare_affine_pair(previous, current, true), std::clamp(weight, 0.0f, 1.0f), output);
 }
 
 bool interpolate_indexed_transform(const Mat3x4<float>& previous,
@@ -676,6 +742,23 @@ Mat3x4<float> extrapolate_transform(const Mat3x4<float>& previous,
     }
   }
   return predicted;
+}
+
+std::array<float, 3> translation_of(const Mat3x4<float>& matrix) noexcept {
+  return {matrix.m0.w(), matrix.m1.w(), matrix.m2.w()};
+}
+
+std::array<float, 3> rotate_vector(const Mat3x4<float>& matrix, const std::array<float, 3>& vector) noexcept {
+  const Vec4<float>* rows[] = {&matrix.m0, &matrix.m1, &matrix.m2};
+  std::array<float, 3> result{};
+  for (size_t row = 0; row < 3; ++row)
+    result[row] = (*rows[row])[0] * vector[0] + (*rows[row])[1] * vector[1] + (*rows[row])[2] * vector[2];
+  return result;
+}
+
+float distance_squared(const std::array<float, 3>& a, const std::array<float, 3>& b) noexcept {
+  const std::array<float, 3> delta{a[0] - b[0], a[1] - b[1], a[2] - b[2]};
+  return dot3(delta, delta);
 }
 } // namespace
 
@@ -789,7 +872,17 @@ void report_producer_paced(bool paced) noexcept {
   s_pacingWindowMisses.store(0, std::memory_order_release);
 }
 
+void set_frame_interpolation_view_rebase(const Mat3x4<float>* currentFromPrevious,
+                                         const Mat3x4<float>* previousFromCurrent) noexcept {
+  s_rebaseView = currentFromPrevious && previousFromCurrent && stereo_frame_interpolation_active();
+  if (s_rebaseView) {
+    s_currentFromPreviousView = *currentFromPrevious;
+    s_previousFromCurrentView = *previousFromCurrent;
+  }
+}
+
 void begin_frame_interpolation() noexcept {
+  s_rebaseView = false;
   const uint32_t targetFps = frame_interpolation_fps();
   static bool previousStereo = false;
   const bool stereo = stereo_frame_interpolation_active();
@@ -811,13 +904,17 @@ void begin_frame_interpolation() noexcept {
   // pay thousands of small allocations every frame.
   clear_index_map_keep_nodes(s_previousTransformIndices, s_previousFrameTransforms.size());
   clear_index_map_keep_nodes(s_previousStableTransformIndices, s_previousFrameTransforms.size());
+  clear_index_map_keep_nodes(s_previousGeometryTransformIndices, s_previousFrameTransforms.size());
   for (size_t i = 0; i < s_previousFrameTransforms.size(); ++i) {
     const auto& identity = s_previousFrameTransforms[i].identity;
     s_previousTransformIndices[identity.combined].push_back(i);
     s_previousStableTransformIndices[stable_identity(identity)].push_back(i);
+    if (identity.geometry != 0)
+      s_previousGeometryTransformIndices[geometry_identity(identity)].push_back(i);
   }
   clear_index_map_keep_nodes(s_currentTransformIndices, s_previousFrameTransforms.size());
   clear_index_map_keep_nodes(s_currentStableTransformIndices, s_previousFrameTransforms.size());
+  clear_index_map_keep_nodes(s_currentGeometryTransformIndices, s_previousFrameTransforms.size());
   s_pendingUniformInterpolations.clear();
   s_perspectiveCandidates = 0;
   s_perspectiveMatchable = 0;
@@ -827,6 +924,34 @@ void begin_frame_interpolation() noexcept {
 }
 
 void finalize_frame_interpolation() noexcept {
+  s_diagPreparedDraws.store(0, std::memory_order_relaxed);
+  s_diagRejectedDraws.store(0, std::memory_order_relaxed);
+  s_diagVertexMotionDraws.store(0, std::memory_order_relaxed);
+  s_diagVertexMotionHeld.store(0, std::memory_order_relaxed);
+  if (s_rebaseView) {
+    // The old history retires at the end of this seal. Rebase it once, before
+    // instance matching and motion gates, rather than treating camera rotation
+    // around a distant object as an object teleport.
+    for (auto& entry : s_previousFrameTransforms) {
+      auto& transform = entry.transform;
+      if (transform.viewSpaceVertices) continue;
+      if (transform.indexedMatrices) {
+        for (size_t slot = 0; slot < MaxPnMtx; ++slot) {
+          if ((transform.usedMatrixMask & (1u << slot)) == 0) continue;
+          auto& matrices = *transform.indexedMatrices;
+          matrices.position[slot] = gfx::stereo_replay::compose_affine(s_currentFromPreviousView, matrices.position[slot]);
+          matrices.normal[slot] = gfx::stereo_replay::compose_normal(s_currentFromPreviousView, matrices.normal[slot]);
+          matrices.slotHash[slot] = xxh3_hash_s(&matrices.position[slot], sizeof(Mat3x4<float>),
+                                               xxh3_hash_s(&matrices.normal[slot], sizeof(Mat3x4<float>)));
+        }
+      } else {
+        transform.position = gfx::stereo_replay::compose_affine(s_currentFromPreviousView, transform.position);
+        transform.normal = gfx::stereo_replay::compose_normal(s_currentFromPreviousView, transform.normal);
+        if (entry.hasPrediction)
+          entry.predictedPosition = gfx::stereo_replay::compose_affine(s_currentFromPreviousView, entry.predictedPosition);
+      }
+    }
+  }
   // A frame reported late seals without inserted slots, so the encode phase renders
   // the native frame only. Its transforms still seed the next frame's matching.
   const bool late = s_dropInterpolationAtSeal.exchange(false, std::memory_order_acq_rel);
@@ -893,6 +1018,210 @@ void finalize_frame_interpolation() noexcept {
            static_cast<uint64_t>(cz);
   };
 
+  // Vertex-motion quads come from particle emitters, which draw many look-alike
+  // quads: a speed line is two crossed quads, two new ones start on the same ring
+  // every frame, and each moves further per frame than the gap to its neighbours.
+  // Nearest-centre pairing swaps them and every swap sweeps a quad across the view,
+  // so these groups keep only pairs that are unambiguous in centre and shape.
+  struct QuadPrevious {
+    std::array<float, 3> world{}, camera{}, predicted{};
+    std::array<std::array<float, 3>, 2> worldEdges{}, cameraEdges{};
+    float size2 = 0.f, step2 = 0.f;
+    bool tracked = false;
+  };
+  struct QuadCurrent {
+    std::array<float, 3> center{};
+    std::array<std::array<float, 3>, 2> edges{};
+    float size2 = 0.f, shortEdge2 = 0.f;
+  };
+  struct QuadCandidate {
+    float cost = 0.f;
+    uint32_t previous = 0, current = 0;
+  };
+  struct QuadBest {
+    float cost = std::numeric_limits<float>::infinity();
+    float runnerUp = std::numeric_limits<float>::infinity();
+    uint32_t index = UINT32_MAX;
+  };
+  static std::vector<QuadPrevious> quadPrevious;
+  static std::vector<QuadCurrent> quadCurrent;
+  static std::vector<QuadCandidate> quadCandidates;
+  static std::vector<QuadBest> quadBestForCurrent, quadBestForPrevious;
+  static std::array<std::vector<uint32_t>, 2> quadPairs;
+  // A first pair that only one reading supports seeds the particle's path but is
+  // drawn held; it moves once the next frame lands on the prediction.
+  static std::vector<uint8_t> quadSeedOnly;
+  quadSeedOnly.assign(s_currentFrameTransforms.size(), 0);
+
+  const auto samePlace = [](const std::array<float, 3>& a, const std::array<float, 3>& b, float size2) noexcept {
+    return distance_squared(a, b) <= kQuadSamePlace * (size2 + 1.f);
+  };
+  const auto buildQuadCandidates = [&](bool followsCamera) {
+    quadCandidates.clear();
+    for (uint32_t current = 0; current < quadCurrent.size(); ++current) {
+      const auto& quad = quadCurrent[current];
+      for (uint32_t previous = 0; previous < quadPrevious.size(); ++previous) {
+        const auto& before = quadPrevious[previous];
+        // `<=` also drops a NaN delta.
+        if (!(distance_squared(before.world, quad.center) <=
+              kMaximumTranslationPerFrame * kMaximumTranslationPerFrame)) {
+          continue;
+        }
+        const auto shapeDistance = [&](const std::array<std::array<float, 3>, 2>& edges) noexcept {
+          return distance_squared(edges[0], quad.edges[0]) + distance_squared(edges[1], quad.edges[1]);
+        };
+        float centerCost, shapeCost;
+        if (before.tracked) {
+          centerCost = distance_squared(before.predicted, quad.center);
+          if (!(centerCost <= std::max(kQuadPathTolerance * before.step2, kQuadPathFloor * quad.shortEdge2))) {
+            continue;
+          }
+          shapeCost = std::min(shapeDistance(before.worldEdges), shapeDistance(before.cameraEdges));
+        } else {
+          centerCost = distance_squared(followsCamera ? before.camera : before.world, quad.center);
+          shapeCost = shapeDistance(followsCamera ? before.cameraEdges : before.worldEdges);
+        }
+        const float cost = centerCost + shapeCost;
+        if (!(shapeCost <= kQuadShapeChange * quad.size2) || !std::isfinite(cost)) {
+          continue;
+        }
+        quadCandidates.push_back({cost, previous, current});
+      }
+    }
+  };
+  // Keeps a pair only when each side prefers the other and beats its runner-up
+  // among other particles; the two quads of one cross are not each other's rivals.
+  const auto selectQuadPairs = [&](std::vector<uint32_t>& pairs) {
+    quadBestForCurrent.assign(quadCurrent.size(), {});
+    quadBestForPrevious.assign(quadPrevious.size(), {});
+    for (const auto& candidate : quadCandidates) {
+      auto& forCurrent = quadBestForCurrent[candidate.current];
+      if (candidate.cost < forCurrent.cost) {
+        forCurrent.cost = candidate.cost;
+        forCurrent.index = candidate.previous;
+      }
+      auto& forPrevious = quadBestForPrevious[candidate.previous];
+      if (candidate.cost < forPrevious.cost) {
+        forPrevious.cost = candidate.cost;
+        forPrevious.index = candidate.current;
+      }
+    }
+    for (const auto& candidate : quadCandidates) {
+      auto& forCurrent = quadBestForCurrent[candidate.current];
+      const auto& rival = quadPrevious[candidate.previous];
+      if (!samePlace(rival.world, quadPrevious[forCurrent.index].world, rival.size2)) {
+        forCurrent.runnerUp = std::min(forCurrent.runnerUp, candidate.cost);
+      }
+      auto& forPrevious = quadBestForPrevious[candidate.previous];
+      const auto& other = quadCurrent[candidate.current];
+      if (!samePlace(other.center, quadCurrent[forPrevious.index].center, other.size2)) {
+        forPrevious.runnerUp = std::min(forPrevious.runnerUp, candidate.cost);
+      }
+    }
+    pairs.assign(quadCurrent.size(), UINT32_MAX);
+    for (uint32_t current = 0; current < quadCurrent.size(); ++current) {
+      const auto& forCurrent = quadBestForCurrent[current];
+      if (forCurrent.index == UINT32_MAX) {
+        continue;
+      }
+      const auto& forPrevious = quadBestForPrevious[forCurrent.index];
+      if (samePlace(quadCurrent[current].center, quadCurrent[forPrevious.index].center,
+                    quadCurrent[current].size2) &&
+          forCurrent.cost * kQuadAmbiguity < forCurrent.runnerUp &&
+          forPrevious.cost * kQuadAmbiguity < forPrevious.runnerUp) {
+        pairs[current] = forCurrent.index;
+      }
+    }
+  };
+  const auto matchQuadGroup = [&] {
+    const size_t previousCount = groupPreviousIndices.size();
+    const size_t currentCount = groupCurrentIndices.size();
+    if (previousCount * currentCount > kMaximumQuadPairs) {
+      return;
+    }
+    quadPrevious.resize(previousCount);
+    for (size_t index = 0; index < previousCount; ++index) {
+      const auto& entry = s_previousFrameTransforms[groupPreviousIndices[index]];
+      auto& quad = quadPrevious[index];
+      quad.world = translation_of(entry.transform.position);
+      quad.camera = entry.transform.quadCenter;
+      quad.cameraEdges = entry.transform.quadEdges;
+      for (size_t edge = 0; edge < 2; ++edge) {
+        quad.worldEdges[edge] =
+            s_rebaseView ? rotate_vector(s_currentFromPreviousView, quad.cameraEdges[edge]) : quad.cameraEdges[edge];
+      }
+      quad.size2 = dot3(quad.cameraEdges[0], quad.cameraEdges[0]) + dot3(quad.cameraEdges[1], quad.cameraEdges[1]);
+      quad.tracked = entry.hasPrediction;
+      if (quad.tracked) {
+        quad.predicted = translation_of(entry.predictedPosition);
+        quad.step2 = distance_squared(quad.predicted, quad.world);
+      }
+    }
+    quadCurrent.resize(currentCount);
+    for (size_t index = 0; index < currentCount; ++index) {
+      const auto& transform = s_currentFrameTransforms[groupCurrentIndices[index]].transform;
+      auto& quad = quadCurrent[index];
+      quad.center = translation_of(transform.position);
+      quad.edges = transform.quadEdges;
+      const float edge0 = dot3(quad.edges[0], quad.edges[0]);
+      const float edge1 = dot3(quad.edges[1], quad.edges[1]);
+      quad.size2 = edge0 + edge1;
+      quad.shortEdge2 = std::min(edge0, edge1);
+    }
+    // A particle without a path is read two ways: fixed in the world (smoke left
+    // behind) or carried with the camera (speed lines follow the kart). Without a
+    // camera rebase the two readings coincide.
+    const size_t readings = s_rebaseView ? 2 : 1;
+    for (size_t reading = 0; reading < readings; ++reading) {
+      buildQuadCandidates(reading == 1);
+      selectQuadPairs(quadPairs[reading]);
+    }
+    // One emitter's particles move alike. Particles with a path show which reading
+    // fits: carried ones step less in camera space than in the world.
+    bool followsCamera = false;
+    if (readings == 2) {
+      double worldSteps = 0.0, cameraSteps = 0.0;
+      uint32_t tracked = 0, worldFirstSteps = 0, cameraFirstSteps = 0;
+      for (size_t current = 0; current < currentCount; ++current) {
+        if (const uint32_t previous = quadPairs[0][current]; previous != UINT32_MAX) {
+          const auto& before = quadPrevious[previous];
+          if (before.tracked) {
+            worldSteps += distance_squared(before.world, quadCurrent[current].center);
+            cameraSteps += distance_squared(before.camera, quadCurrent[current].center);
+            ++tracked;
+          } else {
+            ++worldFirstSteps;
+          }
+        }
+        if (const uint32_t previous = quadPairs[1][current];
+            previous != UINT32_MAX && !quadPrevious[previous].tracked) {
+          ++cameraFirstSteps;
+        }
+      }
+      followsCamera = tracked != 0 ? cameraSteps < worldSteps : cameraFirstSteps > worldFirstSteps;
+    }
+    const auto& pairs = quadPairs[followsCamera ? 1 : 0];
+    const auto& otherPairs = quadPairs[followsCamera ? 0 : 1];
+    for (size_t current = 0; current < currentCount; ++current) {
+      const size_t currentIndex = groupCurrentIndices[current];
+      auto& transform = s_currentFrameTransforms[currentIndex].transform;
+      const uint32_t previous = pairs[current];
+      // A first step shows only when both readings choose it. A newborn that spawns
+      // where the last one did fools one reading, rarely both.
+      const bool seedOnly = previous != UINT32_MAX && !quadPrevious[previous].tracked &&
+                            !(readings == 2 && otherPairs[current] == previous);
+      transform.holdInCamera = followsCamera && (previous == UINT32_MAX || seedOnly);
+      if (previous == UINT32_MAX) {
+        continue;
+      }
+      const size_t previousIndex = groupPreviousIndices[previous];
+      currentToPrevious[currentIndex] = previousIndex;
+      currentMatched[currentIndex] = 1;
+      previousMatched[previousIndex] = 1;
+      quadSeedOnly[currentIndex] = seedOnly;
+    }
+  };
+
   const auto matchGroups =
       [&](const auto& currentGroups, const auto& previousGroups,
           bool allowOrderedFallback) {
@@ -917,6 +1246,12 @@ void finalize_frame_interpolation() noexcept {
         }
       }
       if (groupCurrentIndices.empty() || groupPreviousIndices.empty()) {
+        continue;
+      }
+      // Draw identity includes the vertex-motion flag, so a group is all quads or none.
+      // One quad on each side is no proof either: a particle died and another spawned.
+      if (s_currentFrameTransforms[groupCurrentIndices.front()].transform.vertexMotion.enabled) {
+        matchQuadGroup();
         continue;
       }
 
@@ -1078,6 +1413,9 @@ void finalize_frame_interpolation() noexcept {
     }
   };
   matchGroups(s_currentTransformIndices, s_previousTransformIndices, false);
+  // Prefer unchanged meshes across a texture flip before the material-only
+  // fallback for deforming geometry. Both passes keep palette topology strict.
+  matchGroups(s_currentGeometryTransformIndices, s_previousGeometryTransformIndices, false);
   matchGroups(s_currentStableTransformIndices, s_previousStableTransformIndices, true);
 
   s_perspectiveMatches = static_cast<uint32_t>(std::count_if(
@@ -1097,7 +1435,7 @@ void finalize_frame_interpolation() noexcept {
     s_diagMatches.store(s_perspectiveMatches, std::memory_order_relaxed);
     s_diagEligible.store(eligible, std::memory_order_relaxed);
     s_diagReplaySafe.store(replaySafe, std::memory_order_relaxed);
-    if (eligible) {
+    if (eligible || stereo_frame_interpolation_active()) {
       s_diagFramesSealed.fetch_add(1, std::memory_order_relaxed);
       if (s_perspectiveMatchable != 0 &&
           s_perspectiveMatches * 100 < s_perspectiveMatchable * kLowMatchPercent) {
@@ -1113,15 +1451,52 @@ void finalize_frame_interpolation() noexcept {
   // identity encoded by PNMTXIDX and are prepared as one coherent draw below.
   constexpr float kMaximumPredictionSeedDeltaSquared =
       kMaximumTranslationPerFrame * kMaximumTranslationPerFrame;
+  uint32_t quadsHeld = 0;
   for (size_t currentIndex = 0; currentIndex < currentToPrevious.size(); ++currentIndex) {
     const size_t previousIndex = currentToPrevious[currentIndex];
     if (previousIndex == SIZE_MAX) {
+      quadsHeld += s_currentFrameTransforms[currentIndex].transform.vertexMotion.enabled;
       continue;
     }
     auto& currentEntry = s_currentFrameTransforms[currentIndex];
     const auto& previousEntry = s_previousFrameTransforms[previousIndex];
     if (currentEntry.transform.indexedMatrices || previousEntry.transform.indexedMatrices) {
       continue;
+    }
+    // A looping rigid animation can wrap by far less than the teleport limit
+    // (Coconut Mall resets its escalator phase every 20 local units). Blending
+    // that jump produces a brief reverse sweep. Only cut a large, nearly
+    // opposite jump after a measured velocity, with the same mesh and basis.
+    // Camera motion has already been removed above. Particle births are not
+    // cyclic rigid animations and must not use this test.
+    if (s_rebaseView && previousEntry.hasPrediction &&
+        !currentEntry.transform.vertexMotion.enabled && currentEntry.identity.geometry != 0 &&
+        currentEntry.identity.geometry == previousEntry.identity.geometry) {
+      const auto& before = previousEntry.transform.position;
+      const auto& now = currentEntry.transform.position;
+      const auto& predicted = previousEntry.predictedPosition;
+      const Vec4<float>* oldRows[] = {&before.m0, &before.m1, &before.m2};
+      const Vec4<float>* newRows[] = {&now.m0, &now.m1, &now.m2};
+      const Vec4<float>* predictedRows[] = {&predicted.m0, &predicted.m1, &predicted.m2};
+      float speed2 = 0.f, jump2 = 0.f, dot = 0.f, basisDelta = 0.f, basisSize = 0.f;
+      for (size_t row = 0; row < 3; ++row) {
+        const float velocity = (*predictedRows[row])[3] - (*oldRows[row])[3];
+        const float delta = (*newRows[row])[3] - (*oldRows[row])[3];
+        speed2 += velocity * velocity;
+        jump2 += delta * delta;
+        dot += velocity * delta;
+        for (size_t col = 0; col < 3; ++col) {
+          const float difference = (*newRows[row])[col] - (*oldRows[row])[col];
+          basisDelta += difference * difference;
+          basisSize += (*newRows[row])[col] * (*newRows[row])[col];
+        }
+      }
+      if (speed2 > 0.0001f && jump2 > std::max(1.f, 16.f * speed2) && dot < 0.f &&
+          dot * dot > 0.9f * speed2 * jump2 && basisDelta < 0.0001f * basisSize) {
+        currentToPrevious[currentIndex] = SIZE_MAX;
+        s_diagAnimationWrapCuts.fetch_add(1, std::memory_order_relaxed);
+        continue; // Do not seed the next frame with the reset's apparent velocity.
+      }
     }
     // Seed the next frame's matching with a constant-velocity reference, but never from
     // a pair the interpolator would reject as a teleport (`<=` so NaN fails too).
@@ -1132,7 +1507,13 @@ void finalize_frame_interpolation() noexcept {
                                                              currentEntry.transform.position);
       currentEntry.hasPrediction = true;
     }
+    if (quadSeedOnly[currentIndex]) {
+      // Seeded above, drawn held: it moves once the next frame lands on the path.
+      currentToPrevious[currentIndex] = SIZE_MAX;
+      ++quadsHeld;
+    }
   }
+  s_diagVertexMotionHeld.store(quadsHeld, std::memory_order_relaxed);
 
   if (eligible || stereo_frame_interpolation_active()) {
     // Prepare each matched pair once: every sample of a draw shares the same
@@ -1140,18 +1521,38 @@ void finalize_frame_interpolation() noexcept {
     std::vector<PreparedTransformInterpolation> preparedTransforms(s_currentFrameTransforms.size());
     std::vector<uint8_t> preparedTransformState(s_currentFrameTransforms.size(), 0);
     std::vector<PreparedAffinePair> preparedPairs;
+    std::vector<PreparedAffinePair> desktopPairs;
+    const bool separateDesktopPairs = s_rebaseView && eligible;
     preparedPairs.reserve(s_pendingUniformInterpolations.size() * 2);
 
     const auto appendPreparedPair = [&](const Mat3x4<float>& previousPosition,
                                         const Mat3x4<float>& currentPosition,
                                         const Mat3x4<float>& previousNormal,
                                         const Mat3x4<float>& currentNormal,
-                                        bool indexed) {
+                                        bool indexed, bool rebased = true, bool vertexMotion = false) {
       const size_t pairOffset = preparedPairs.size();
+      const auto retainCurrentBasis = [&](const Mat3x4<float>& position) {
+        if (!vertexMotion) return position;
+        auto result = currentPosition;
+        result.m0[3] = position.m0[3];
+        result.m1[3] = position.m1[3];
+        result.m2[3] = position.m2[3];
+        return result;
+      };
+      if (separateDesktopPairs) {
+        const auto originalPosition = rebased ? gfx::stereo_replay::compose_affine(s_previousFromCurrentView, previousPosition)
+                                              : previousPosition;
+        const auto originalNormal = rebased ? gfx::stereo_replay::compose_normal(s_previousFromCurrentView, previousNormal)
+                                            : previousNormal;
+        desktopPairs.push_back(indexed ? prepare_indexed_pair(originalPosition, currentPosition)
+                                       : prepare_affine_pair(retainCurrentBasis(originalPosition), currentPosition, true));
+        desktopPairs.push_back(indexed ? prepare_indexed_pair(originalNormal, currentNormal)
+                                       : prepare_affine_pair(vertexMotion ? currentNormal : originalNormal, currentNormal, true));
+      }
       preparedPairs.push_back(indexed ? prepare_indexed_pair(previousPosition, currentPosition)
-                                      : prepare_affine_pair(previousPosition, currentPosition));
+                                      : prepare_affine_pair(retainCurrentBasis(previousPosition), currentPosition, true));
       preparedPairs.push_back(indexed ? prepare_indexed_pair(previousNormal, currentNormal)
-                                      : prepare_affine_pair(previousNormal, currentNormal));
+                                      : prepare_affine_pair(vertexMotion ? currentNormal : previousNormal, currentNormal, true));
       return pairOffset;
     };
 
@@ -1276,6 +1677,7 @@ void finalize_frame_interpolation() noexcept {
         // A palette is one deformation unit: interpolating only the resolved slots cracks
         // the mesh, so any unresolved slot duplicates the whole current draw.
         bool allSlotsValid = true;
+        bool desktopSlotsValid = true;
         for (size_t slot = 0; slot < MaxPnMtx; ++slot) {
           if ((current.usedMatrixMask & (1u << slot)) == 0) {
             continue;
@@ -1283,6 +1685,7 @@ void finalize_frame_interpolation() noexcept {
           const auto& resolved = resolvedSlots[static_cast<size_t>(palette) * MaxPnMtx + slot];
           if (resolved.position == nullptr) {
             allSlotsValid = false;
+            desktopSlotsValid = false;
             break;
           }
           const size_t pairOffset =
@@ -1291,21 +1694,57 @@ void finalize_frame_interpolation() noexcept {
           prepared.indexedPairOffsets[slot] = pairOffset;
           if (!preparedPairs[pairOffset].valid || !preparedPairs[pairOffset + 1].valid) {
             allSlotsValid = false;
-            break;
           }
+          const auto& desktop = separateDesktopPairs ? desktopPairs : preparedPairs;
+          desktopSlotsValid &= desktop[pairOffset].valid && desktop[pairOffset + 1].valid;
         }
         prepared.indexedValid = allSlotsValid;
+        prepared.desktopIndexedValid = desktopSlotsValid;
       } else {
         const size_t previousTransformIndex = currentToPrevious[task.currentTransformIndex];
         if (previousTransformIndex >= s_previousFrameTransforms.size()) {
+          if (current.holdInCamera && s_rebaseView) {
+            // As if it sat at the same camera-space place last frame: the sampled
+            // camera then carries it, like the emitter it follows.
+            prepared.cameraHold = true;
+            prepared.nonIndexedPairOffset = appendPreparedPair(
+                gfx::stereo_replay::compose_affine(s_currentFromPreviousView, current.position), current.position,
+                current.normal, current.normal, false, true, true);
+          }
           continue;
         }
         const auto& previous = s_previousFrameTransforms[previousTransformIndex].transform;
         prepared.previousProjectionEntry = previousTransformIndex;
         prepared.nonIndexedPairOffset = appendPreparedPair(
-            previous.position, current.position, previous.normal, current.normal, false);
+            previous.position, current.position, previous.normal, current.normal, false, !previous.viewSpaceVertices,
+            current.vertexMotion.enabled);
       }
     }
+
+    uint32_t preparedDraws = 0;
+    uint32_t rejectedDraws = 0;
+    uint32_t vertexMotionDraws = 0;
+    for (size_t i = 0; i < preparedTransforms.size(); ++i) {
+      if (preparedTransformState[i] == 0)
+        continue;
+      const auto& prepared = preparedTransforms[i];
+      if (prepared.previousProjectionEntry == kNoPreparedPair)
+        continue;
+      const bool valid = s_currentFrameTransforms[i].transform.indexedMatrices
+                             ? prepared.indexedValid
+                             : prepared.nonIndexedPairOffset != kNoPreparedPair &&
+                                   preparedPairs[prepared.nonIndexedPairOffset].valid &&
+                                   preparedPairs[prepared.nonIndexedPairOffset + 1].valid;
+      if (valid)
+        ++preparedDraws;
+      else
+        ++rejectedDraws;
+      if (valid && s_currentFrameTransforms[i].transform.vertexMotion.enabled)
+        ++vertexMotionDraws;
+    }
+    s_diagPreparedDraws.store(preparedDraws, std::memory_order_relaxed);
+    s_diagRejectedDraws.store(rejectedDraws, std::memory_order_relaxed);
+    s_diagVertexMotionDraws.store(vertexMotionDraws, std::memory_order_relaxed);
 
     const auto interpolatePendingUniform = [&](const auto& task) {
       if (task.currentTransformIndex >= s_currentFrameTransforms.size()) {
@@ -1315,20 +1754,24 @@ void finalize_frame_interpolation() noexcept {
       const auto& current = s_currentFrameTransforms[task.currentTransformIndex].transform;
       std::memcpy(task.uniformData, task.sourceUniformData, task.uniformSize);
       const auto& prepared = preparedTransforms[task.currentTransformIndex];
-      if (task.indexedMatrices && !prepared.indexedValid) {
+      const bool desktopSample = task.numerator != 0;
+      const auto& pairs = desktopSample && separateDesktopPairs ? desktopPairs : preparedPairs;
+      if (task.indexedMatrices && !(desktopSample ? prepared.desktopIndexedValid : prepared.indexedValid)) {
         return;
       }
       // The projection comes from whichever previous entry supplied the transforms, which
-      // for a borrowed palette is a sibling's partner.
+      // for a borrowed palette is a sibling's partner. A camera hold has no partner.
       const size_t previousTransformIndex = prepared.previousProjectionEntry;
-      if (previousTransformIndex >= s_previousFrameTransforms.size()) {
+      if (previousTransformIndex >= s_previousFrameTransforms.size() && !prepared.cameraHold) {
         return;
       }
-      const auto& previous = s_previousFrameTransforms[previousTransformIndex].transform;
+      const auto& previousProjection = prepared.cameraHold
+                                           ? current.projection
+                                           : s_previousFrameTransforms[previousTransformIndex].transform.projection;
       const float weight =
           static_cast<float>(task.numerator) / static_cast<float>(task.denominator);
       const auto interpolatedProjection =
-          interpolate_projection(previous.projection, current.projection, weight);
+          interpolate_projection(previousProjection, current.projection, weight);
       std::memcpy(task.uniformData + task.projectionOffset, &interpolatedProjection,
                   sizeof(interpolatedProjection));
 
@@ -1338,8 +1781,10 @@ void finalize_frame_interpolation() noexcept {
         }
         Mat3x4<float> interpolatedPosition{};
         Mat3x4<float> interpolatedNormal{};
-        evaluate_affine_pair(preparedPairs[pairOffset], weight, interpolatedPosition);
-        evaluate_affine_pair(preparedPairs[pairOffset + 1], weight, interpolatedNormal);
+        evaluate_affine_pair(pairs[pairOffset], weight, interpolatedPosition);
+        evaluate_affine_pair(pairs[pairOffset + 1], weight, interpolatedNormal);
+        if (current.vertexMotion.enabled && !task.indexedMatrices)
+          interpolatedPosition = offset_transform_origin(interpolatedPosition, current.vertexMotion.center, -1.f);
         std::memcpy(task.uniformData + task.positionOffset + currentIndex * sizeof(Mat3x4<float>),
                     &interpolatedPosition, sizeof(interpolatedPosition));
         std::memcpy(task.uniformData + task.normalOffset + currentIndex * sizeof(Mat3x4<float>),
@@ -1393,6 +1838,11 @@ void get_frame_interpolation_diagnostics(AuroraFrameInterpolationDiagnostics& di
   diagnostics.framesReplayUnsafe = s_diagFramesReplayUnsafe.load(std::memory_order_relaxed);
   diagnostics.slotReductions = s_diagSlotReductions.load(std::memory_order_relaxed);
   diagnostics.lateSealDrops = s_diagLateSealDrops.load(std::memory_order_relaxed);
+  diagnostics.preparedDraws = s_diagPreparedDraws.load(std::memory_order_relaxed);
+  diagnostics.rejectedDraws = s_diagRejectedDraws.load(std::memory_order_relaxed);
+  diagnostics.vertexMotionDraws = s_diagVertexMotionDraws.load(std::memory_order_relaxed);
+  diagnostics.vertexMotionHeld = s_diagVertexMotionHeld.load(std::memory_order_relaxed);
+  diagnostics.animationWrapCuts = s_diagAnimationWrapCuts.load(std::memory_order_relaxed);
 }
 
 bool has_interpolated_frame() noexcept {
@@ -1463,6 +1913,7 @@ std::array<gfx::Range, MaxInterpolatedFrames> record_interpolation_draw(const Fr
   FrameTransformSnapshot snapshot{
       .projection = projection,
       .usedMatrixMask = usedPnMtxMask,
+      .vertexMotion = uniformLayout.vertexMotion,
   };
   if (uniformLayout.indexedMatrices) {
     snapshot.indexedMatrices = acquire_indexed_matrices();
@@ -1482,6 +1933,23 @@ std::array<gfx::Range, MaxInterpolatedFrames> record_interpolation_draw(const Fr
     const size_t currentMatrix = std::min<size_t>(g_gxState.currentPnMtx, MaxPnMtx - 1);
     snapshot.position = g_gxState.pnMtx[currentMatrix].pos;
     snapshot.normal = g_gxState.pnMtx[currentMatrix].nrm;
+    if (uniformLayout.vertexMotion.enabled) {
+      snapshot.position = offset_transform_origin(snapshot.position, uniformLayout.vertexMotion.center);
+      const Vec4<float>* rows[] = {&snapshot.position.m0, &snapshot.position.m1, &snapshot.position.m2};
+      const auto& shape = uniformLayout.vertexShape;
+      for (size_t row = 0; row < 3; ++row) {
+        const auto& basis = *rows[row];
+        snapshot.quadCenter[row] = basis[3];
+        snapshot.quadEdges[0][row] = basis[0] * shape.edge0[0] + basis[1] * shape.edge0[1] + basis[2] * shape.edge0[2];
+        snapshot.quadEdges[1][row] = basis[0] * shape.edge1[0] + basis[1] * shape.edge1[1] + basis[2] * shape.edge1[2];
+      }
+    } else if (g_gxState.vtxDesc[GX_VA_POS] == GX_DIRECT) {
+      const Vec4<float>* rows[] = {&snapshot.position.m0, &snapshot.position.m1, &snapshot.position.m2};
+      snapshot.viewSpaceVertices = true;
+      for (size_t row = 0; row < 3; ++row)
+        for (size_t col = 0; col < 4; ++col)
+          snapshot.viewSpaceVertices &= (*rows[row])[col] == (row == col ? 1.f : 0.f);
+    }
   }
 
   const size_t currentTransformIndex = s_currentFrameTransforms.size();
@@ -1492,14 +1960,20 @@ std::array<gfx::Range, MaxInterpolatedFrames> record_interpolation_draw(const Fr
   s_currentTransformIndices[identity.combined].push_back(currentTransformIndex);
   const HashType stableIdentity = stable_identity(identity);
   s_currentStableTransformIndices[stableIdentity].push_back(currentTransformIndex);
+  if (identity.geometry != 0)
+    s_currentGeometryTransformIndices[geometry_identity(identity)].push_back(currentTransformIndex);
 
   std::array<gfx::Range, MaxInterpolatedFrames> interpolatedRanges{};
   ++s_perspectiveCandidates;
   const auto exactPrevious = s_previousTransformIndices.find(identity.combined);
   const auto stablePrevious = s_previousStableTransformIndices.find(stableIdentity);
+  const auto geometryPrevious = identity.geometry != 0
+                                    ? s_previousGeometryTransformIndices.find(geometry_identity(identity))
+                                    : s_previousGeometryTransformIndices.end();
   const bool hasPreviousPartner =
       (exactPrevious != s_previousTransformIndices.end() && !exactPrevious->second.empty()) ||
-      (stablePrevious != s_previousStableTransformIndices.end() && !stablePrevious->second.empty());
+      (stablePrevious != s_previousStableTransformIndices.end() && !stablePrevious->second.empty()) ||
+      (geometryPrevious != s_previousGeometryTransformIndices.end() && !geometryPrevious->second.empty());
   if (hasPreviousPartner) {
     ++s_perspectiveMatchable;
   }

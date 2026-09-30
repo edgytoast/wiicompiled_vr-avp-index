@@ -11,8 +11,8 @@
 namespace aurora::gx {
 constexpr uint32_t MaxInterpolatedFrames = 3;
 
-// Identifies a draw across frames. `combined` includes the geometry signature and is exact, while
-// `pipeline`/`texture` is the material-only fallback for meshes whose vertex data changes.
+// Identifies a draw across frames. Match exact `combined` first, then `pipeline`/`geometry`
+// across texture animation, then `pipeline`/`texture` for meshes whose vertex data changes.
 struct FrameInterpolationDrawIdentity {
   HashType combined = 0;
   HashType pipeline = 0;
@@ -20,7 +20,34 @@ struct FrameInterpolationDrawIdentity {
   // Hash of the per-vertex PNMTXIDX stream. Matrix values animate, but this topology decides which
   // absolute palette slot each vertex reads, so it must match across a pair.
   HashType matrixTopology = 0;
+  // Exact geometry without its texture binding. Texture-pattern animations may
+  // swap images while the same mesh still needs continuous camera/object motion.
+  // Zero means unavailable; do not use it as a wildcard geometry match.
+  HashType geometry = 0;
 };
+
+// CPU-authored particle quads move inside their vertex stream, often with an
+// identity position matrix. Track their center while retaining the current
+// shape, UVs and colour; no renderer thread needs access to guest particles.
+struct DrawVertexMotion {
+  std::array<float, 3> center{};
+  bool enabled = false;
+};
+
+// Matching-only shape of such a quad: the two edges leaving its first corner.
+// Emitters draw many look-alike quads, and a speed line moves further per
+// frame than the gap to its neighbours; its size and orientation still tell
+// them apart. Replay never needs it, so it stays out of UniformReplayLayout.
+struct DrawVertexShape {
+  std::array<float, 3> edge0{}, edge1{};
+};
+
+inline Mat3x4<float> offset_transform_origin(Mat3x4<float> matrix,
+                                            const std::array<float, 3>& center, float sign = 1.f) noexcept {
+  for (auto* row : {&matrix.m0, &matrix.m1, &matrix.m2})
+    (*row)[3] += sign * ((*row)[0] * center[0] + (*row)[1] * center[1] + (*row)[2] * center[2]);
+  return matrix;
+}
 
 // Where the transforms live inside a draw's staged uniform block. Offsets are
 // relative to the start of the mapped range.
@@ -33,6 +60,8 @@ struct InterpolatedUniformLayout {
   // Slot the live matrix occupies; a compacted position region holds it at 0.
   size_t currentMatrix = 0;
   bool indexedMatrices = false;
+  DrawVertexMotion vertexMotion{};
+  DrawVertexShape vertexShape{};
 };
 
 namespace detail {
@@ -61,6 +90,10 @@ void report_producer_paced(bool paced) noexcept;
 
 void begin_frame_interpolation() noexcept;
 void finalize_frame_interpolation() noexcept;
+// Before seal, re-express previous VR endpoints in the current recorded camera.
+// Both null disables the operation. begin_frame_interpolation clears it.
+void set_frame_interpolation_view_rebase(const Mat3x4<float>* currentFromPrevious,
+                                         const Mat3x4<float>* previousFromCurrent) noexcept;
 // Fills the observability snapshot behind aurora_get_frame_interpolation_diagnostics.
 void get_frame_interpolation_diagnostics(AuroraFrameInterpolationDiagnostics& diagnostics) noexcept;
 bool has_interpolated_frame() noexcept;
@@ -87,6 +120,11 @@ bool interpolate_transform(const Mat3x4<float>& previous, const Mat3x4<float>& c
                            float weight, Mat3x4<float>& output) noexcept;
 bool interpolate_transform_midpoint(const Mat3x4<float>& previous, const Mat3x4<float>& current,
                                     Mat3x4<float>& output) noexcept;
+// Matched rigid draws can spin more than 90 degrees per guest frame (kart tires), and
+// a draw matrix may shear (Lakitu's sway tilts his whole body). Camera/seat anchors
+// keep the conservative rotation and rigidity guards above.
+bool interpolate_draw_transform(const Mat3x4<float>& previous, const Mat3x4<float>& current,
+                                float weight, Mat3x4<float>& output) noexcept;
 // Matrix palettes are already-composed skinning transforms, so interpolating their coefficients
 // keeps shared boundaries intact. Ordinary one-matrix draws keep the rigid TRS path above.
 bool interpolate_indexed_transform(const Mat3x4<float>& previous,

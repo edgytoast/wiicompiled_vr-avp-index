@@ -893,6 +893,7 @@ private:
             }
 
             const MkwVRPolicySnapshot policy = MkwVRPolicyGetSnapshot();
+            aurora_set_stereo_motion_logging(diagnostics::Enabled());
             // Diagnostics lift the cap: a presentation flickering between the
             // race and the virtual screen is exactly what a report needs to show.
             if ((!presentation_logged || policy.presentation != logged_presentation) &&

@@ -573,6 +573,10 @@ void MkwVRFirstPersonRecenter() noexcept;
 // anchor has been missing long enough to give up holding the last one.
 FirstPersonAnchor MkwVRFirstPersonGetAnchor() noexcept;
 
+// Checked guest-thread read of the camera that authored this frame's GX draws.
+// Also available with first person off; render workers receive only its copy.
+bool MkwVRReadSceneView(Mtx34& view) noexcept;
+
 // Guest-frame inventory snapshot, sampled at the race draw boundary. A
 // generation change invalidates any item retained by a prior race.
 HeldItem MkwVRFirstPersonGetHeldItem() noexcept;

@@ -125,13 +125,16 @@ scenes continue at the game's rate; assess interpolation during an immersive rac
 
 VR interpolation is independent of **Graphics > Race frame interpolation**. The simulation,
 physics, audio and VI remain at 60 Hz. Scene motion is delayed by one game frame (about 16.7 ms)
-to interpolate between known transforms; each rendered eye pair uses a fresh predicted head
-pose. This needs enough GPU headroom to render both eyes at the target rate, and carries the
+to interpolate between known transforms. A monotonic scene playback clock is anchored when
+continuous history starts and follows the VI cadence without following per-frame seal jitter.
+Each rendered eye pair still uses a fresh predicted head pose. In particular, a runtime predicting
+head poses 40-60 ms ahead must not advance scene playback beyond its known endpoints.
+This needs enough GPU headroom to render both eyes at the target rate, and carries the
 desktop interpolator's experimental artifacts, especially for unmatched or changing geometry.
 
 Refresh detection uses `XR_FB_display_refresh_rate` when available and the OpenXR predicted
 display period otherwise. Interpolation requires `XR_KHR_win32_convert_performance_counter_time`
-to relate those display deadlines to the game's clock; the menu reports if it is unavailable.
+for the packet's display-time metadata; the menu reports if it is unavailable.
 The old Eager Frame Heartbeat option has been removed and existing `eager_frame_heartbeat`
 settings are ignored. Completed rendering wakes the XR thread immediately. A 50 ms keep-alive
 still protects pauses and window dragging without eager repeats during rendering.
@@ -816,11 +819,52 @@ latency, runtime throttling and visible blackouts.
 
 With VR interpolation enabled, Aurora retains each sealed race's command stream and matched
 previous/current transform uniforms. New OpenXR packets wake the frame worker between game
-frames. It interpolates at the requested display time, then applies that packet's head pose and
+frames. It interpolates at the local scene playback time, then applies that packet's predicted head pose and
 the scene anchor to both eyes. Native offscreen effects and the 2D HUD retain their game-frame
 updates. A mid-frame EFB readback invalidates retained GPU data; a policy-tag mismatch rejects
 the replay. Missing matches use current transforms, and stalls clamp at the last known pose
 instead of extrapolating. The ordinary desktop interpolation settings remain independent.
+
+Matched rigid draws retain transform history through rotations over 90 degrees per game frame
+(such as spinning kart tires); large spins use spherical interpolation to preserve angular speed
+and wheel shape. A one-matrix draw is split into a rotation and an upper-triangular stretch
+(scale and shear), so a sheared matrix interpolates too. Lakitu sways by tilting his whole
+body's Y axis (`Lakitu::Movement::UpdateScale`): his goggles and eyes ride his face bone as
+one-matrix draws, and his head is skinned to that same bone. When the shear was rejected, the
+goggles stayed on the game frame while the head moved on, and sank into it. Camera/seat
+anchors keep their conservative cut and rigidity guards, and draw translation, matrix validity
+and indexed-palette topology checks still apply. Exact mesh/pipeline identity can
+also retain motion across texture-pattern swaps, as used by the Waluigi Stadium crowd. The crowd's
+image animation itself still updates at the game's cadence; its transform can move at the headset
+rate without snapping whenever the image changes.
+
+For single-player races the guest thread also publishes the recorded scene camera with the
+frame. VR matching and previous transform endpoints are expressed in the current camera's
+coordinates, while replay samples the world-space camera/seat pose separately. Camera turns
+therefore do not trip the 1500-unit object-motion guard on distant scenery. Held particles,
+new objects and rejected billboard animations also follow that sampled camera instead of
+mixing a current-frame view with an interpolated seat. Direct vertices already in view space
+with an identity position matrix retain that matrix, avoiding a second camera transform.
+Particle simulation and texture/vertex animation still run at the game rate. Actual teleports,
+camera cuts and malformed view matrices retain their guards. Multi-camera frames and hosts
+that do not publish a view keep the existing interpolation path.
+
+CPU-built particle quads are paired one quad at a time, and only where the pairing is
+unambiguous. An emitter draws many look-alike quads: a boost speed line (`rk_koukasen`) is two
+crossed 12 × 300 quads, two new lines start on the same ring every frame, and each moves
+further per frame than the gap to its neighbours. Pairing nearest centres swapped about half
+of them and swept every new line in from one that had just died. Each quad therefore also
+records its two edges. A pair must change shape by less than 30%, each side must prefer the
+other, and its cost (squared centre distance plus squared edge change) must beat the runner-up
+among other particles by 1.5×. The two quads of one cross share a centre and do not count as
+rivals. A particle already tracked must land within a quarter of its last step of its
+predicted position. A particle without a path is read two ways, fixed in the world or carried
+with the camera, and the group follows the reading that fits its tracked particles: carried
+ones step less in camera space. A first step is drawn moving only when both readings choose
+it; otherwise it just seeds the path. An unpaired quad is held where the game drew it: in
+camera space when its group follows the camera (speed lines, kart sparks), in the world
+otherwise (smoke left behind). Groups with more than 4096 candidate pairs are held without
+matching.
 
 The D3D12 pacing thread retains the last completed projection or virtual-screen layer and
 resubmits it during stalls, including while moving the desktop window,
@@ -1047,6 +1091,31 @@ When it is on, `console.log` receives lines tagged `[runtime] [xr-diag]`
   than 0.5° or 0.5 mm. It gives per-eye FOV half-angles, the eye cant (the angle between the two
   eyes' forward axes: 0 for parallel displays, non-zero for canted ones such as Pimax without
   parallel projections), and the IPD.
+- **Scene motion (`[vr-motion]`).** With VR interpolation active, Aurora logs a separate
+  one-second summary. `blended`, `previous`, and `current` count samples inside the two
+  known scene endpoints or clamped to either endpoint. `discontinuous` counts samples
+  without continuous history/timing. `same-time` and `backwards` compare the sampled
+  game-scene timeline, not head poses, pixels, or compositor submission FPS. Persistent
+  `same-time` with fresh XR layers can explain smooth head tracking but juddering steering.
+  The latest `sample-boundary` and `weight` expose exhausted scene history; `display-boundary`
+  and `prediction-lead` describe the independent runtime head-prediction horizon.
+  Latest draw counts distinguish identity `matched` from transform `prepared`; `rejected`
+  means a paired draw failed the transform guards. Unmatched draws can also snap, and
+  these counts do not measure GPU time. `max-rejected` is the highest rejection count
+  observed during the window. `scene-step` gives minimum/maximum forward scene-time
+  advancement per sample in milliseconds; steady 90 Hz scene motion should advance about
+  11.11 ms each time, even when every submission is fresh. Enable the same renderer log with
+  `debug.wiicompiled.fpslog=1` on Android, or `AURORA_VR_MOTION_LOG=1` in the environment
+  before launching a host that does not use OpenXR.
+
+  `camera-separated=true` confirms the frame used the published scene camera and the separate
+  camera/object interpolation path. If false during a single-player race, include that in the
+  capture so a missing/invalid camera publication can be distinguished from object rejection.
+  For steering judder, capture a single-player race with **VR frame interpolation = Auto**
+  (the Graphics interpolation setting is separate). Keep the headset refresh, render scale,
+  camera mode, and opponent count fixed. Compare a stationary head while alternating steering
+  left/right with a stationary kart while turning the head. On PC, keep SSW disabled for this
+  capture so generated compositor frames do not mask the application's scene cadence.
 - **A one-second summary.** Timings are `median/worst` in milliseconds; for `end-margin`, worst is
   the minimum.
 
@@ -1204,11 +1273,38 @@ ownership and retained-layer submission without a headset.
 
 For a Windows GPU check, configure Aurora with its tests enabled and
 `AURORA_GPU_SMOKE_TESTS=ON`, then build/run `stereo_frame_worker_smoke`. This feeds the actual
-renderer a 60 Hz GX stream and an independent 90 Hz stereo provider. The development check
+renderer a 60 Hz GX stream and an independent 90 Hz stereo provider, with a default 40 ms
+head-prediction lead to exercise the multi-frame horizon seen in VDXR. The development check
 produced 359 new stereo submissions in 4 seconds (89.7 FPS). This verifies submission cadence,
 not full-race performance or visual quality on a headset. Pass a draw count, for example
 `stereo_frame_worker_smoke 2000`, to stress uniform preparation and renderer/producer overlap;
 `stereo_frame_worker_smoke 2000 0` checks native stereo with interpolation Off.
+The fourth and fifth arguments select headset Hz and prediction lead in milliseconds:
+`stereo_frame_worker_smoke 1 1 0 90 65` exercises a 90 Hz headset predicting 65 ms ahead.
+Add a sixth argument of `1` to rotate the published camera around geometry 100000 units away;
+`stereo_frame_worker_smoke 1000 1 1 90 65 1` combines that with indexed-palette stress. Check
+`camera-separated=true`, transform rejection counts and scene cadence together.
+Add a seventh argument of `1` for CPU-authored particle quads, for example
+`stereo_frame_worker_smoke 1000 1 0 90 65 1 1`. Their matrices stay at identity
+while their vertex centers move. VR interpolation records each four-vertex,
+direct-F32 quad separately, pairs it across frames by centre and shape, and
+shifts the current shape to the sampled center. Current texture, colour and
+shape changes still occur at the game's rate; this is position interpolation,
+not a particle simulation or a blend between texture animation frames. The
+smoke's thousand overlapping quads exceed the pairing bound, so they measure
+decoder and replay cost, not pairing. The GX tests cover pairing:
+`VrSpeedLineEmitterKeepsEachStreakOnItsOwnPath` replays a speed-line emitter
+for 90 frames and prints how many quads moved, were held or were misattributed.
+
+Rigid meshes with a stable basis also reject a large reverse jump relative to
+their measured, camera-independent velocity. This holds the new phase when an
+animation resets, instead of interpolating backward through the loop. Coconut
+Mall's escalator uses a repeating 20-unit phase. Normal direction changes remain
+interpolated. `[vr-motion]` reports `vertex-motion` (usable particle pairs in
+the latest seal), `vertex-held` (particle quads drawn where the game put them
+because no unambiguous partner exists yet) and cumulative `wrap-cuts`; check
+those during the affected effects, then confirm the visual result in the headset.
+The `[vr-motion]` scene-step range measures actual playback cadence separately from submission FPS.
 Use `stereo_frame_worker_smoke 1000 1 1` to exercise ten-matrix palettes and their
 larger uniform history, or `stereo_frame_worker_smoke 1000 2 1` to switch interpolation
 On/Off during recording. The test compositor discards obsolete ticks and uses

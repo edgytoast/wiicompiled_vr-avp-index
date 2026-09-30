@@ -2188,10 +2188,19 @@ bool prepare_late_stereo_replay(SealedFrame& frame, wgpu::CommandEncoder& cmd, c
           Mat3x4<float> before, current, result;
           std::memcpy(&before, previous + at, sizeof(before));
           std::memcpy(&current, uniform.data() + at, sizeof(current));
+          const bool vertexMotion = layout.vertexMotion.enabled && offset == layout.positionOffset &&
+                                    !layout.indexedMatrices;
+          if (vertexMotion) {
+            before = gx::offset_transform_origin(before, layout.vertexMotion.center);
+            current = gx::offset_transform_origin(current, layout.vertexMotion.center);
+          }
           const bool valid = layout.indexedMatrices ? gx::interpolate_indexed_transform(before, current, weight, result)
-                                                    : gx::interpolate_transform(before, current, weight, result);
-          if (valid)
+                                                    : gx::interpolate_draw_transform(before, current, weight, result);
+          if (valid) {
+            if (vertexMotion)
+              result = gx::offset_transform_origin(result, layout.vertexMotion.center, -1.f);
             std::memcpy(uniform.data() + at, &result, sizeof(result));
+          }
         }
       };
       interpolateMatrices(layout.positionOffset, layout.positionMatrixCount, layout.positionMatrixMask);

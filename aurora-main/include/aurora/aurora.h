@@ -197,7 +197,8 @@ typedef struct {
   AuroraStereoFrameMode mode;
   uint64_t contentTag;
   // Predicted display time converted to std::chrono::steady_clock nanoseconds.
-  // Zero disables temporal interpolation for this packet.
+  // Used for diagnostics. Scene playback has its own clock; the eye poses remain
+  // predicted for this time even when the runtime looks several game frames ahead.
   uint64_t displayTimeNanos;
   // Optional; inactive when zero-initialised.
   AuroraCockpit cockpit;
@@ -334,6 +335,10 @@ void aurora_set_stereo_scene_anchor(const float anchorFromScene[12]);
 // The sealed frame then owns that scale: each eye's head/IPD translation is
 // rescaled from the packet's AuroraCockpit::unitsPerMeter to it.
 void aurora_set_stereo_scene_anchor_scaled(const float anchorFromScene[12], float unitsPerMeter);
+
+// Recorded world-to-view camera, copied on the GX thread beside the scene anchor.
+// Null disables camera-separated interpolation for this frame.
+void aurora_set_stereo_scene_view(const float viewFromWorld[12]);
 // GX producer thread, after the scene anchor and before sealing that frame.
 void aurora_set_stereo_cockpit_item(const AuroraCockpitItem* item);
 // Copies a user-supplied Race/Common.szs archive. May be called on the guest

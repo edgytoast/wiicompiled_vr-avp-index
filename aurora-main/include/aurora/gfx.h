@@ -63,6 +63,12 @@ typedef struct {
   uint64_t framesReplayUnsafe;
   uint64_t slotReductions;
   uint64_t lateSealDrops;
+  // Matched identity does not guarantee usable interpolation transforms.
+  uint32_t preparedDraws;      // latest seal: draws with usable endpoint pairs
+  uint32_t rejectedDraws;      // latest seal: paired draws rejected by transform guards
+  uint32_t vertexMotionDraws;  // latest seal: CPU-authored quads with usable motion pairs
+  uint32_t vertexMotionHeld;   // latest seal: such quads drawn where recorded (no unambiguous partner yet)
+  uint64_t animationWrapCuts;  // cumulative rigid animation resets held at their new phase
 } AuroraFrameInterpolationDiagnostics;
 
 void aurora_get_frame_interpolation_diagnostics(AuroraFrameInterpolationDiagnostics* diagnostics);
@@ -76,6 +82,8 @@ uint32_t aurora_get_frame_interpolation_fps();
 // each headset deadline, leaving guest simulation and VI timing at 60 Hz.
 void aurora_set_stereo_frame_interpolation(bool enabled);
 bool aurora_get_stereo_frame_interpolation();
+// Logs scene sampling and transform acceptance separately from headset submission FPS.
+void aurora_set_stereo_motion_logging(bool enabled);
 
 // Newly encountered GX pipelines compile on the bounded worker queue. Draws whose pipeline is not
 // ready are skipped rather than stalling submission, and pick it up once compilation finishes.

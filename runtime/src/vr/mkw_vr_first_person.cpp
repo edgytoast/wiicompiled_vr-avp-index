@@ -1422,6 +1422,10 @@ void MkwVRFirstPersonRecenter() noexcept {
     g_recenter_requested.store(true, std::memory_order_release);
 }
 
+bool MkwVRReadSceneView(Mtx34& view) noexcept {
+    return ReadSceneViewMatrix(view);
+}
+
 void MkwVRFirstPersonUpdate(uint64_t guest_frame_index, uint32_t race_camera_address) noexcept {
     std::lock_guard lock(g_mutex);
     g_state.held_item = {};

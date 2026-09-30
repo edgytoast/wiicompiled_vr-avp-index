@@ -2379,6 +2379,17 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
   return true;
 }
 
+// Runs for every draw, VR interpolation or not: the shape tests come first so that
+// ordinary draws never reach the atomic flag.
+static bool particle_quad_motion(GXPrimitive prim, GXVtxFmt fmt, uint16_t count) noexcept {
+  if (prim != GX_QUADS || count != 4 || g_gxState.vtxDesc[GX_VA_POS] != GX_DIRECT) {
+    return false;
+  }
+  const auto& attr = g_gxState.vtxFmts[fmt].attrs[GX_VA_POS];
+  return g_gxState.vtxDesc[GX_VA_PNMTXIDX] == GX_NONE && attr.cnt == GX_POS_XYZ && attr.type == GX_F32 &&
+         g_gxState.projType == GX_PERSPECTIVE && stereo_frame_interpolation_active();
+}
+
 static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndian) {
   ZoneScoped;
   GXVtxFmt fmt = static_cast<GXVtxFmt>(cmd & CP_VAT_MASK);
@@ -2418,13 +2429,15 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   NativeWheelArray* const nativeWheel = resolve_native_wheel(fmt, vertices, vtxCount, vtxSize);
 
   // Try to merge with previous draw call.
-  if (!g_gxState.stateDirty && !(aurora::stereo_frame_provider_active() && g_gxState.projType == GX_ORTHOGRAPHIC))
+  if (!g_gxState.stateDirty && !particle_quad_motion(prim, fmt, vtxCount) &&
+      !(aurora::stereo_frame_provider_active() && g_gxState.projType == GX_ORTHOGRAPHIC))
     LIKELY {
       auto* lastDraw = gfx::get_last_draw_command<DrawData>();
       // Only if the previous draw call was a single instance draw (no lines/points handling), and only into a draw
       // that resolved the same animated array: the merged whole renders through that draw's binding. Anything the
       // decision cache cannot vouch for (a command it was not recorded against) stays unmerged.
       if (lastDraw != nullptr && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS &&
+          !lastDraw->uniformReplayLayout.vertexMotion.enabled &&
           lastDraw->instanceCount == 1 &&
           (nativeWheelArrays.empty() ||
            (nativeWheelLastDrawCommand == lastDraw && nativeWheelLastDecision == nativeWheel)))
@@ -2527,11 +2540,34 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
   // Draw-identity hashing only feeds frame interpolation, and only for perspective draws: build_uniform reads the
   // identity exclusively past its `!perspective || frame_interpolation_fps() == 0` early-out.
   FrameInterpolationDrawIdentity drawIdentity{};
+  DrawVertexMotion vertexMotion{};
+  DrawVertexShape vertexShape{};
+  if (interpolationIdentityActive && particle_quad_motion(prim, fmt, vtxCount)) {
+    const uint32_t offset = matrix_index_prefix_size(fmt);
+    if (offset + 3 * sizeof(float) <= vtxStride) {
+      vertexMotion.enabled = true;
+      std::array<std::array<float, 3>, 4> corners{};
+      for (uint32_t vertex = 0; vertex < 4; ++vertex) {
+        for (uint32_t component = 0; component < 3; ++component) {
+          const auto* at = vertices + vertex * vtxStride + offset + component * sizeof(float);
+          // Bitwise finite test also works in fast-math product builds.
+          vertexMotion.enabled &= (read_u32(at, true) & 0x7f800000u) != 0x7f800000u;
+          corners[vertex][component] = read_f32(at, true);
+          vertexMotion.center[component] += corners[vertex][component] * 0.25f;
+        }
+      }
+      for (uint32_t component = 0; component < 3; ++component) {
+        vertexShape.edge0[component] = corners[1][component] - corners[0][component];
+        vertexShape.edge1[component] = corners[3][component] - corners[0][component];
+      }
+    }
+  }
   if (interpolationIdentityActive)
     UNLIKELY {
       const HashType drawShape = static_cast<HashType>(vtxCount) | (static_cast<HashType>(underlying(prim)) << 16) |
                                  (static_cast<HashType>(underlying(fmt)) << 24);
-      const HashType pipelineDrawSignature = xxh3_hash(pipelineState.configHash, drawShape);
+      const HashType pipelineDrawSignature =
+          xxh3_hash(pipelineState.configHash, drawShape | (HashType(vertexMotion.enabled) << 32));
       const HashType textureSignature = xxh3_hash(bindGroups.textureBindGroup);
       const HashType materialAndTopology =
           xxh3_hash(matrixTopologySignature, xxh3_hash(bindGroups.textureBindGroup, pipelineDrawSignature));
@@ -2540,10 +2576,12 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
           .pipeline = pipelineDrawSignature,
           .texture = textureSignature,
           .matrixTopology = matrixTopologySignature,
+          .geometry = geometrySignature,
       };
     }
   const bool perspective = g_gxState.projType == GX_PERSPECTIVE;
-  const auto uniformRanges = build_uniform(info, vertRange.offset, ranges, drawIdentity, perspective, usedPnMtxMask);
+  const auto uniformRanges = build_uniform(info, vertRange.offset, ranges, drawIdentity, perspective, usedPnMtxMask,
+                                          vertexMotion, vertexShape);
   const auto& replayLayout = uniformRanges.replayLayout;
   const bool stereo = aurora::stereo_frame_provider_active();
   const bool screen = !replayLayout.perspective && !replayLayout.nativeEfbEffect;
