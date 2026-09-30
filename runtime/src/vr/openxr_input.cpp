@@ -215,8 +215,9 @@ VirtualGamepadRelay& Relay() {
 // directions push the Nunchuk stick). `panel` presses the settings panel's
 // button (left Y, or both thumbsticks for a gamepad), opening or closing it,
 // where `a` then selects. `flick` plays the bare hands' flick, one shake of the
-// remote. The property is unset in normal use, so this costs one property read
-// every few frames.
+// remote; `throw_forward` and `throw_backward` play a throw of the held item.
+// The property is unset in normal use, so this costs one property read every
+// few frames.
 constexpr uint32_t kInjectHoldFrames = 12;
 constexpr uint32_t kInjectPollFrames = 4;
 
@@ -857,6 +858,7 @@ void OpenXRInput::Destroy() {
     m_sources_logged_at = 0;
     m_squeeze_active = m_hand_driven = m_pinch = {};
     m_injected_flick_held = false;
+    m_injected_throw_held = false;
     m_profile_serial = 0;
     DestroyPoseSpaces();
     if (m_action_set != XR_NULL_HANDLE) {
@@ -1133,6 +1135,10 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
     m_injected_flick_held = injected_flick;
 #endif
 
+    // Throwing the held item: a quick swing of the item hand forward or back
+    // plays an aimed throw on the stick and the item button.
+    UpdateItemThrow(dt_seconds, hands, withheld);
+
     // What the game sees of the controllers: nothing held while they are withheld.
     static const std::array<wii_remote::HandInputs, kHands> kIdleHands{};
     const auto& game_hands = withheld ? kIdleHands : hands;
@@ -1319,7 +1325,74 @@ void OpenXRInput::ResetDriving() {
     }
     m_flick.Reset();
     m_flick_start = 0;
+    m_throw.Reset();
+    m_throw_sequence.Reset();
     OpenXRPublishDriving(m_driving);
+}
+
+void OpenXRInput::UpdateItemThrow(float dt_seconds, std::array<wii_remote::HandInputs, kHands>& hands,
+                                  bool withheld) {
+    const std::string item_hand = RuntimeConfigFile::VrCockpitItemHand();
+    const uint32_t hand = item_hand == "right" ? 1u : 0u;
+    item_throw::Direction direction = item_throw::Direction::None;
+    if (!withheld && m_driving.cockpit_active && item_hand != "off" && RuntimeConfigFile::VrCockpitItemThrow()) {
+        // The hand as the cockpit draws the item on it: the palm joint when the
+        // hand is drawn from joints, else the grip. The detector follows it with
+        // or without an item, so it always knows when the hand left the wheel.
+        const DrivingHand& located = m_driving.hands[hand];
+        const std::array<float, 12>& pose =
+            located.joints_valid ? m_joint_frame.seat_from_joint[hand][hand_tracking::kPalm] : located.seat_from_grip;
+        item_throw::HandSample sample{};
+        sample.tracked = located.tracked;
+        sample.held = located.held;
+        sample.bare = located.bare;
+        sample.position = {pose[3], pose[7], pose[11]};
+        direction = m_throw.Update(sample, dt_seconds);
+        // A swing with nothing in the hand throws nothing.
+        if (direction != item_throw::Direction::None) {
+            const HeldItem item = MkwVRFirstPersonGetHeldItem();
+            if (!item.valid || item.count == 0) {
+                direction = item_throw::Direction::None;
+            }
+        }
+    } else {
+        m_throw.Reset();
+    }
+    // `debug.wiicompiled.inject <n>:throw_forward` or `throw_backward` plays the
+    // same throw without the swing, to try it unattended.
+    const bool injected_forward = Injected("throw_forward");
+    const bool injected_backward = Injected("throw_backward");
+    bool injected = false;
+    if ((injected_forward || injected_backward) && !m_injected_throw_held && !withheld) {
+        direction = injected_forward ? item_throw::Direction::Forward : item_throw::Direction::Backward;
+        injected = true;
+    }
+    m_injected_throw_held = injected_forward || injected_backward;
+    if (direction != item_throw::Direction::None) {
+        m_throw_sequence.Start(direction);
+        if (RuntimeConfigFile::VrWheelTuning().haptics) {
+            constexpr XrDuration kThrowPulseNs = 40'000'000;
+            ApplyHaptic(hand, 0.5f, kThrowPulseNs);
+        }
+        // What the swing measured, to tune the thresholds from a run log.
+        std::ostringstream message;
+        message << "Held item thrown " << item_throw::DirectionLabel(direction);
+        if (injected) {
+            message << " (injected)";
+        } else {
+            const auto& measure = m_throw.Last();
+            message << " (" << (measure.bare ? "bare hand" : "controller") << ", "
+                    << std::lround(std::fabs(measure.travel) * 100.0f) << " cm in "
+                    << std::lround(measure.seconds * 1000.0f) << " ms"
+                    << (measure.bridged ? ", across a tracking gap" : "") << ')';
+        }
+        Log(OpenXRLogLevel::Info, message.str());
+    }
+    if (withheld) {
+        m_throw_sequence.Reset();
+        return;
+    }
+    m_throw_sequence.Apply(hands[0], dt_seconds);
 }
 
 void OpenXRInput::UpdateDriving(XrTime display_time, const driving::SeatFrame& seat,

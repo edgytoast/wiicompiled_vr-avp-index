@@ -7,6 +7,7 @@
 #include "vr/camera_toggle.h"
 #include "vr/openxr_driving.h"
 #include "vr/openxr_hand_tracking.h"
+#include "vr/openxr_item_throw.h"
 #include "vr/openxr_runtime.h"
 #include "vr/openxr_settings_panel.h"
 #include "vr/openxr_wii_remote.h"
@@ -71,6 +72,11 @@ struct OpenXRPointerScreen {
 // the left stick's X axis in both presentations and that grip no longer reaches
 // the game (a shoulder on the gamepad; as a Wii Remote the grips are unbound,
 // so a hand on the wheel cannot hold down a button).
+//
+// Throwing the held item ([vr] cockpit_item_throw, openxr_item_throw.h): in the
+// cockpit, a quick swing forward or back of the hand showing the item pushes the
+// left stick that way while the left trigger (Z, or the GameCube's L) is pressed
+// and released, which the game reads as an aimed throw.
 //
 // Tracked hands ([vr] hand_tracking, with hand steering): two hand trackers
 // (XR_EXT_hand_tracking) located every frame give the cockpit the hands' own
@@ -160,6 +166,9 @@ private:
     void UpdateDriving(XrTime display_time, const driving::SeatFrame& seat,
                        std::array<wii_remote::HandInputs, kHands>& hands, bool withheld);
     void ResetDriving();
+    // After the wheel and the bare hands: the item hand's swing, and the throw it
+    // plays on the left hand's stick and trigger.
+    void UpdateItemThrow(float dt_seconds, std::array<wii_remote::HandInputs, kHands>& hands, bool withheld);
     // Tracked hands: the extension's functions at Create, the trackers as the
     // settings ask for them, and both hands located for `time`, their joints
     // in `seat` when it is valid.
@@ -255,6 +264,10 @@ private:
     hand_tracking::FlickDetector m_flick;
     XrTime m_flick_start = 0;
     bool m_injected_flick_held = false;
+    // Throwing the held item.
+    item_throw::ThrowDetector m_throw;
+    item_throw::ThrowSequence m_throw_sequence;
+    bool m_injected_throw_held = false;
     uint64_t m_profile_serial = 0;
 
     bool m_created = false;

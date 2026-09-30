@@ -63,6 +63,7 @@ native_steering_wheel = true
 object_culling = false
 hand_steering = true
 cockpit_item_hand = "left"
+cockpit_item_throw = true
 performance_level = "boost"
 ```
 
@@ -313,6 +314,30 @@ and animations are not reproduced in the hand. Each material is drawn from its o
 layers with their wrap modes, SRT and environment mapping, vertex colours, culling, blending and up
 to four TEV stages. Only the lighting is approximated, by a fixed cockpit light in place of the
 course's light set.
+
+**Throwing the held item.** With `cockpit_item_throw` on (the default; F10 > VR and the Quest
+launcher), a quick swing of the item hand forward throws the item ahead of the kart, and a swing back
+throws it behind. The swing plays what the game reads for an aimed throw: the stick pushed fully
+forward or back, the item button (the left trigger: Z, or the GameCube's L) pressed and released
+while it stays pushed, then the stick handed back. Items used on the press and items thrown on the
+release (a trailed shell or banana) both see the aim. Swinging while holding the item button throws
+the trailed item, and that held button is then ignored until it is let go, so it does not use the
+next item of a triple. Only the stick's Y axis moves, so a held wheel keeps steering. A swing counts
+when the hand covers enough ground along the seat's forward axis within a short window, mostly
+along that axis, and is still moving that way: with a controller 18 cm forward or 15 cm back within
+0.12 s. A bare hand gets an easier profile, 15 cm forward or 13 cm back within 0.15 s. The headset's
+cameras lag and smooth a bare hand, and often lose it for a few frames in the middle of a fast swing.
+A loss of up to 0.2 s (0.1 s for a controller) is bridged by the positions either side of it. The
+window counts only tracked time, and across a gap the swing must still average 70 % of the window's
+speed, so a slow drift the cameras briefly lost never throws. Reaching for the wheel, bringing a
+hand back to rest, a sideways sweep and the upward flick of a trick never throw either. The hand
+must not be holding the wheel and must have been free for a quarter of a second, and after a throw
+the next one waits 0.6 s. It works with controllers and tracked hands, in both controller modes, and
+a short pulse confirms it. Each throw's line in the run log gives what the swing measured (for
+example `Held item thrown forward (bare hand, 21 cm in 150 ms, across a tracking gap)`).
+Mario Kart Wii reads tricks and wheelies from the Wii Remote's accelerometer only
+(`MotionController::UpdateForNunchuck` never reads the Nunchuk's), so a swing of the left hand cannot
+trick. With the item in the right hand, a hard swing can also read as a shake of the remote.
 
 **Bare hands.** On the Quest, with `hand_tracking` on and the controllers put down, the hands drive
 `khr/simple_controller`: a right pinch is A with the pointer on the hand's aim ray, the left

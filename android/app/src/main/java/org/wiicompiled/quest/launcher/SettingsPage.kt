@@ -196,6 +196,13 @@ class SettingsPage(
                 write = { c, index -> c.setString("vr", "cockpit_item_hand", ITEM_HANDS[index]) },
                 enabledIf = cockpit,
             )
+            // runtime_config.h's kVrCockpitItemThrowDefault is on.
+            toggle(
+                R.string.vr_cockpit_item_throw, R.string.vr_cockpit_item_throw_helper,
+                read = { it.bool("vr", "cockpit_item_throw") ?: true },
+                write = { c, value -> c.setBool("vr", "cockpit_item_throw", value) },
+                enabledIf = { c -> cockpit(c) && stringIndex(c, "vr", "cockpit_item_hand", ITEM_HANDS) != 2 },
+            )
             // Tracked hands can show the item with stick steering as well.
             toggle(
                 R.string.vr_hand_tracking, R.string.vr_hand_tracking_helper,

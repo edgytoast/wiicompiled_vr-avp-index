@@ -171,6 +171,7 @@ bool g_vrNativeSteeringWheel = RuntimeConfigFile::VrNativeSteeringWheel();
 bool g_vrObjectCulling = RuntimeConfigFile::VrObjectCulling();
 bool g_vrHandSteering = RuntimeConfigFile::VrHandSteering();
 constexpr std::array<const char*, 3> kVrCockpitItemHands{"Left", "Right", "Off"};
+bool g_vrCockpitItemThrow = RuntimeConfigFile::VrCockpitItemThrow();
 int g_vrCockpitItemHand = RuntimeConfigFile::VrCockpitItemHand() == "right" ? 1 :
                           RuntimeConfigFile::VrCockpitItemHand() == "off" ? 2 : 0;
 mkw::vr::WheelTuning g_vrWheelTuning = RuntimeConfigFile::VrWheelTuning();
@@ -1235,6 +1236,17 @@ void DrawVrSteeringWheelSettings() {
         ImGui::SetTooltip("Show Player 1's settled inventory item above this palm. "
                           "Triple items show their remaining count. Using or losing the item hides it.");
     }
+    ImGui::BeginDisabled(g_vrCockpitItemHand == 2);
+    if (ImGui::Checkbox("Throw the item by swinging that hand", &g_vrCockpitItemThrow)) {
+        RuntimeConfigFile::SetVrCockpitItemThrow(g_vrCockpitItemThrow);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("With the hand off the wheel, swing it quickly forward to throw the item ahead "
+                          "of the kart, or back to throw it behind: the stick and item button the game "
+                          "reads for an aimed throw. Swinging while holding the item button throws the "
+                          "trailed item.");
+    }
+    ImGui::EndDisabled();
 #if defined(__ANDROID__)
     ImGui::BeginDisabled(!g_vrHandSteering && g_vrCockpitItemHand == 2);
     if (ImGui::Checkbox("Tracked hands", &g_vrHandTracking)) {
@@ -1759,12 +1771,14 @@ void DrawVrCameraSettings() {
         g_vrNativeSteeringWheel = RuntimeConfigFile::kVrNativeSteeringWheelDefault;
         g_vrHandSteering = RuntimeConfigFile::kVrHandSteeringDefault;
         g_vrCockpitItemHand = 0;
+        g_vrCockpitItemThrow = RuntimeConfigFile::kVrCockpitItemThrowDefault;
         RuntimeConfigFile::SetVrFirstPersonSeat(RuntimeConfigFile::kVrFirstPersonSeatDefault);
         RuntimeConfigFile::SetVrCockpitUnitsPerMeter(g_vrCockpitUnitsPerMeter);
         RuntimeConfigFile::SetVrSteeringWheel(g_vrSteeringWheel);
         RuntimeConfigFile::SetVrNativeSteeringWheel(g_vrNativeSteeringWheel);
         RuntimeConfigFile::SetVrHandSteering(g_vrHandSteering);
         RuntimeConfigFile::SetVrCockpitItemHand(RuntimeConfigFile::kVrCockpitItemHandDefault);
+        RuntimeConfigFile::SetVrCockpitItemThrow(g_vrCockpitItemThrow);
 #if defined(__ANDROID__)
         g_vrHandTracking = RuntimeConfigFile::kVrHandTrackingDefault;
         RuntimeConfigFile::SetVrHandTracking(g_vrHandTracking);
