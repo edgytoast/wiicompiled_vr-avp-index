@@ -467,7 +467,7 @@ constexpr std::array<JointName, kHandJointCount - 1> kJointNames{{
     {XR_HAND_JOINT_LITTLE_TIP_EXT, ar_hand_skeleton_joint_name_little_finger_tip},
 }};
 
-void ReadHand(ar_hand_anchor_t anchor, HandSample& sample) noexcept {
+void ReadHand(ar_hand_anchor_t anchor, uint32_t handIndex, HandSample& sample) noexcept {
     sample = {};
     if (anchor == nullptr || !ar_trackable_anchor_is_tracked(anchor)) {
         return;
@@ -481,15 +481,19 @@ void ReadHand(ar_hand_anchor_t anchor, HandSample& sample) noexcept {
         sample.joints[static_cast<size_t>(entry.slot)] = JointSample(skeleton, sample.worldFromAnchor, entry.name);
     }
     // The palm: the middle of the hand, between the wrist and the middle
-    // finger's knuckle (where HandFrame puts the grip too), with the wrist's
-    // orientation. Only its position matters: the grasp and the flick read
-    // positions, and visionOS draws no hand of its own.
+    // finger's knuckle (where HandFrame puts the grip too), with HandAxes'
+    // orientation: OpenXR's -Z towards the fingers and +Y out of the back of
+    // the hand. Estimated joints serve too, as they do for every other joint.
+    // The other joints keep ARKit's own axes (+X along the bone), which nothing
+    // reads, but the held item faces along the palm's -Z.
     const HandJointSample& wrist = sample.wrist();
     const HandJointSample& knuckle = sample.middleKnuckle();
     HandJointSample& palm = sample.joints[XR_HAND_JOINT_PALM_EXT];
     palm.tracked = wrist.tracked && knuckle.tracked;
     palm.position = (wrist.position + knuckle.position) * 0.5f;
-    palm.orientation = wrist.orientation;
+    simd_float3x3 worldFromHand;
+    palm.orientation = HandAxes(sample, handIndex, worldFromHand) ? simd_normalize(simd_quaternion(worldFromHand))
+                                                                  : wrist.orientation;
 }
 } // namespace
 
@@ -505,8 +509,8 @@ void Compositor::Hands(std::array<HandSample, 2>& hands) noexcept {
     if (!ar_hand_tracking_provider_get_latest_anchors(m_handTracking, m_leftHand, m_rightHand)) {
         return;
     }
-    ReadHand(m_leftHand, hands[0]);
-    ReadHand(m_rightHand, hands[1]);
+    ReadHand(m_leftHand, 0, hands[0]);
+    ReadHand(m_rightHand, 1, hands[1]);
 }
 
 bool Compositor::HandsAt(int64_t timeNanos, std::array<HandSample, 2>& hands) noexcept {
@@ -520,8 +524,8 @@ bool Compositor::HandsAt(int64_t timeNanos, std::array<HandSample, 2>& hands) no
                                                              m_rightHandAt) != ar_hand_anchor_query_status_success) {
         return false;
     }
-    ReadHand(m_leftHandAt, hands[0]);
-    ReadHand(m_rightHandAt, hands[1]);
+    ReadHand(m_leftHandAt, 0, hands[0]);
+    ReadHand(m_rightHandAt, 1, hands[1]);
     // The anchors carry the time they were measured at; the sample stands for
     // the time it was asked for.
     for (HandSample& hand : hands) {

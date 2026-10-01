@@ -361,6 +361,9 @@ Gestures GesturesOf(const HandSample& hand) noexcept;
 Gestures GesturesOfHand(const Session& session, uint32_t hand) noexcept;
 // A pinch or curl at or past this reads as a click.
 inline constexpr float kClickThreshold = 0.7f;
+// A hand's axes from its joint positions, OpenXR style (-Z towards the fingers,
+// +Y out of the back of the hand), whether ARKit measures or estimates them.
+bool HandAxes(const HandSample& hand, uint32_t handIndex, simd_float3x3& worldFromHand) noexcept;
 // A hand's aim and grip frames from its joints, OpenXR style; false when the
 // joints that define them are not tracked.
 bool HandFrame(const HandSample& hand, uint32_t handIndex, simd_float4x4& worldFromAim,

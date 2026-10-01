@@ -244,7 +244,7 @@ inline void build_geometry(const AuroraCockpit& cockpit, std::vector<Vertex>& ve
   }
   std::array<std::shared_ptr<const HandMesh>,2> current;
   { std::lock_guard lock(meshMutex);current=meshes; }
-  for(int side=0;side<2;++side) if(cockpit.hands[side].tracked) {
+  for(int side=0;side<2;++side) if(cockpit.hands[side].tracked && !cockpit.hands[side].hidden) {
     const auto& hand=cockpit.hands[side];
     const bool joints=hand.jointsValid && joints_finite(hand);
     if(current[side]) joints ? tracked_hand(vertices,hand,*current[side]) : runtime_hand(vertices,hand,*current[side]);
@@ -348,7 +348,11 @@ inline void render(wgpu::CommandEncoder& cmd,const StereoReplayFrame& frame,uint
     cachedCockpit=frame.cockpit;cachedCockpitItem=frame.cockpitItem;cachedMeshRevision=revision;
   }
   const auto& vertices=frameVertices;
-  if(vertices.empty()) return;
+  // The held item is drawn in this pass even with nothing else to draw: with
+  // hidden hands and the vehicle's own wheel, as on the Vision Pro, the
+  // overlay is empty but for the badge of a triple.
+  const bool overlay=!vertices.empty();
+  if(!overlay && !frame.cockpitItem.valid) return;
   struct ClipVertex { float p[4]; V color; };
   static std::vector<ClipVertex> clip;
   clip.resize(vertices.size());
@@ -362,14 +366,14 @@ inline void render(wgpu::CommandEncoder& cmd,const StereoReplayFrame& frame,uint
       std::clamp(z,0.0f,std::max(-p[2],0.0f)),-p[2]},vertices[i].color};
   }
   const uint64_t bytes=clip.size()*sizeof(ClipVertex);
-  if (!vertexBuffers[eye] || vertexCapacity[eye]<bytes) {
+  if (overlay && (!vertexBuffers[eye] || vertexCapacity[eye]<bytes)) {
     vertexCapacity[eye]=(bytes+65535)&~uint64_t(65535);
     const wgpu::BufferDescriptor bd{.label="VR cockpit vertices",.usage=wgpu::BufferUsage::Vertex|wgpu::BufferUsage::CopyDst,
       .size=vertexCapacity[eye]};
     vertexBuffers[eye]=g_device.CreateBuffer(&bd);
   }
   auto& buffer=vertexBuffers[eye];
-  g_queue.WriteBuffer(buffer,0,clip.data(),bytes);
+  if(overlay) g_queue.WriteBuffer(buffer,0,clip.data(),bytes);
   const wgpu::RenderPassColorAttachment attachment{.view=target.colorView,.resolveTarget=target.resolveView,
     .loadOp=wgpu::LoadOp::Load,.storeOp=wgpu::StoreOp::Store};
   const wgpu::RenderPassDepthStencilAttachment depth{.view=target.depthView,.depthLoadOp=wgpu::LoadOp::Load,
@@ -382,7 +386,7 @@ inline void render(wgpu::CommandEncoder& cmd,const StereoReplayFrame& frame,uint
   pass.SetScissorRect(0,0,target.size.width,target.size.height);
   // Mark only depth-visible samples; later virtual-screen draws test for zero.
   pass.SetStencilReference(1);
-  pass.SetPipeline(pipeline);pass.SetVertexBuffer(0,buffer);pass.Draw(clip.size());
+  if(overlay) { pass.SetPipeline(pipeline);pass.SetVertexBuffer(0,buffer);pass.Draw(clip.size()); }
   cockpit_item::render(pass,frame,eye,sceneDepth.z,sceneDepth.constant);
   pass.SetStencilReference(0);
   if(!existingPass) pass.End();

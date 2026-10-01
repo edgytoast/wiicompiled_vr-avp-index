@@ -387,25 +387,20 @@ void BindingsFor(Instance& instance, const Action& action, XrPath subaction,
 
 } // namespace
 
-// A hand's frame from its joints, OpenXR style: -Z along the index metacarpal
-// (where the finger points when extended), +Y out of the back of the hand, +X
-// to the hand's right. Built from joint positions alone so ARKit's own hand
-// anchor axes never matter.
-bool HandFrame(const HandSample& hand, uint32_t handIndex, simd_float4x4& worldFromAim,
-               simd_float4x4& worldFromGrip) noexcept {
-    const HandJointSample& wrist = hand.wrist();
-    const HandJointSample& indexKnuckle = hand.indexKnuckle();
-    const HandJointSample& middleKnuckle = hand.middleKnuckle();
-    if (!hand.tracked || !wrist.tracked || !indexKnuckle.tracked || !middleKnuckle.tracked) {
-        return false;
-    }
-    simd_float3 forward = indexKnuckle.position - wrist.position;
+// A hand's axes from its joint positions, OpenXR style: -Z along the index
+// metacarpal (where the finger points when extended), +Y out of the back of
+// the hand, +X to the hand's right. Built from positions alone so ARKit's own
+// joint axes never matter; false only when the joints coincide.
+bool HandAxes(const HandSample& hand, uint32_t handIndex, simd_float3x3& worldFromHand) noexcept {
+    const simd_float3 wrist = hand.wrist().position;
+    const simd_float3 indexKnuckle = hand.indexKnuckle().position;
+    const simd_float3 middleKnuckle = hand.middleKnuckle().position;
+    simd_float3 forward = indexKnuckle - wrist;
     if (simd_length(forward) < 1.0e-4f) {
         return false;
     }
     forward = simd_normalize(forward);
-    simd_float3 right = handIndex == 1 ? middleKnuckle.position - indexKnuckle.position
-                                       : indexKnuckle.position - middleKnuckle.position;
+    simd_float3 right = handIndex == 1 ? middleKnuckle - indexKnuckle : indexKnuckle - middleKnuckle;
     if (simd_length(right) < 1.0e-4f) {
         return false;
     }
@@ -416,12 +411,28 @@ bool HandFrame(const HandSample& hand, uint32_t handIndex, simd_float4x4& worldF
     }
     up = simd_normalize(up);
     right = simd_normalize(simd_cross(forward, up));
-    const simd_float3 back = -forward;
-    worldFromAim = simd_matrix(simd_make_float4(right, 0.0f), simd_make_float4(up, 0.0f), simd_make_float4(back, 0.0f),
-                               simd_make_float4(indexKnuckle.position, 1.0f));
-    const simd_float3 palm = (wrist.position + middleKnuckle.position) * 0.5f;
-    worldFromGrip = simd_matrix(simd_make_float4(right, 0.0f), simd_make_float4(up, 0.0f), simd_make_float4(back, 0.0f),
-                                simd_make_float4(palm, 1.0f));
+    worldFromHand = simd_matrix(right, up, -forward);
+    return true;
+}
+
+// The aim and grip frames, from HandAxes, only while ARKit is measuring the
+// joints that define them rather than estimating them.
+bool HandFrame(const HandSample& hand, uint32_t handIndex, simd_float4x4& worldFromAim,
+               simd_float4x4& worldFromGrip) noexcept {
+    const HandJointSample& wrist = hand.wrist();
+    const HandJointSample& indexKnuckle = hand.indexKnuckle();
+    const HandJointSample& middleKnuckle = hand.middleKnuckle();
+    simd_float3x3 axes;
+    if (!hand.tracked || !wrist.tracked || !indexKnuckle.tracked || !middleKnuckle.tracked ||
+        !HandAxes(hand, handIndex, axes)) {
+        return false;
+    }
+    const auto frame = [&axes](simd_float3 origin) {
+        return simd_matrix(simd_make_float4(axes.columns[0], 0.0f), simd_make_float4(axes.columns[1], 0.0f),
+                           simd_make_float4(axes.columns[2], 0.0f), simd_make_float4(origin, 1.0f));
+    };
+    worldFromAim = frame(indexKnuckle.position);
+    worldFromGrip = frame((wrist.position + middleKnuckle.position) * 0.5f);
     return true;
 }
 

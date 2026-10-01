@@ -128,9 +128,15 @@ The joints come from `ar_hand_tracking_provider_query_anchors_at_timestamp` at
 the frame's predicted time, so every 90 Hz frame has a fresh sample (the latest
 anchors repeat between ARKit's ~30 Hz updates, which the flick detector would
 read as a hand standing still). ARKit has no palm joint; the provider
-synthesizes one between the wrist and the middle knuckle. No hand of ours is
+synthesizes one between the wrist and the middle knuckle, oriented from the
+wrist and knuckle positions (OpenXR's −Z towards the fingers, +Y out of the
+back of the hand) whether ARKit measures or estimates them, so the held item
+faces the player. The other joints keep ARKit's own axes (+X along the bone);
+only their positions are read. No hand of ours is
 drawn: the app's `upperLimbVisibility(.visible)` composites the wearer's own
-hands over the immersive race, and `BuildCockpit` sends none. Manual drift has
+hands over the immersive race, and `BuildCockpit` sends each hand's pose
+marked hidden, so Aurora draws no hand but still stands the held item
+(`cockpit_item_hand`) over the real palm. Manual drift has
 no gesture: choose Automatic drift. The headset panel's "Drive with your
 hands" checkbox reads out each hand's grasp, hold and pinch for tuning.
 

@@ -1413,7 +1413,8 @@ private:
 #if defined(MKW_PLATFORM_VISIONOS)
             // The headset composites the wearer's own hands over the race
             // (upperLimbVisibility), so no hand of ours is drawn: not the
-            // gloves, not the joints. The wheel still is.
+            // gloves, not the joints. The wheel still is, and so is the item
+            // held over a palm, which needs the hand's pose.
             RT_LOG(RT_TAG_RUNTIME) << "[mkw-vr] cockpit hands: none (the headset shows your own)" << std::endl;
 #else
             // Tracked hands' trackers, when they exist, serve the mesh too.
@@ -1445,18 +1446,15 @@ private:
             ViewFromBase(source.xr_frame.views[eye].pose, base_position_, true, 1.0f, lean_back_radians,
                          cockpit.eyeFromSeat[eye]);
         }
-#if defined(MKW_PLATFORM_VISIONOS)
-        // Real hands, see above: nothing to draw.
-        for (auto& hand : cockpit.hands) {
-            hand.tracked = false;
-            hand.jointsValid = false;
-        }
-#else
         const hand_tracking::HandJointFrame* joints = input_ != nullptr ? &input_->HandJoints() : nullptr;
         for (size_t hand = 0; hand < 2; ++hand) {
             auto& target = cockpit.hands[hand];
             const auto& from = driving.hands[hand];
             target.tracked = from.tracked;
+#if defined(MKW_PLATFORM_VISIONOS)
+            // Real hands, see above: posed for the held item, never drawn.
+            target.hidden = true;
+#endif
             target.held = from.held;
             target.squeeze = from.squeeze;
             std::copy(from.seat_from_grip.begin(), from.seat_from_grip.end(), target.seatFromGrip);
@@ -1469,7 +1467,6 @@ private:
                 }
             }
         }
-#endif
     }
 
     // The immersive window's eyes, aimed through the window itself: each keeps its position but looks
