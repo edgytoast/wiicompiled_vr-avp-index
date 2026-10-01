@@ -151,6 +151,14 @@ The script names what is wrong and what to do. The usual ones:
   finish. Run the script again; it checks the headset and copies again if
   needed. If the game itself stops, its transcript is in the Logs folder next
   to `Config.toml` in the Files app.
+- **Retro Rewind online stops with error code 61070** ("You have been
+  disconnected from Retro WFC"), but works right after another device on your
+  network went online: iCloud Private Relay is on. Retro WFC only lets the game
+  in from the internet address that logged in, and Private Relay sends the
+  headset's login through Apple's servers instead. Turn it off on the headset,
+  for your home network only (**Settings > Wi-Fi**, ⓘ next to the network,
+  **Limit IP Address Tracking** off) or everywhere (**Settings > *your name* >
+  iCloud > Private Relay**).
 - **Everything else**: the full output is in Terminal; open an issue with it.
 
 ## What it does not do
