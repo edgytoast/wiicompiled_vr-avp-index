@@ -186,7 +186,9 @@ endforeach()
 # the same contraction/rounding policy as translated PPC shards.
 set(MKW_PPC_SEMANTIC_RUNTIME_SOURCES
     "${MKW_RUNTIME_SOURCE_DIR}/src/ppc_helpers.cpp"
-    "${MKW_RUNTIME_SOURCE_DIR}/src/fpu_helpers.cpp")
+    "${MKW_RUNTIME_SOURCE_DIR}/src/fpu_helpers.cpp"
+    # Native reimplementations of the game's culling math (VR object culling).
+    "${MKW_RUNTIME_SOURCE_DIR}/src/vr/mkw_vr_culling.cpp")
 set_source_files_properties(${MKW_PPC_SEMANTIC_RUNTIME_SOURCES} PROPERTIES
     SKIP_UNITY_BUILD_INCLUSION ON
     SKIP_PRECOMPILE_HEADERS ON

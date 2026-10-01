@@ -1,6 +1,12 @@
 include(FetchContent)
 include(GoogleTest)
 
+# The parser test uses synthetic malformed inputs by default. Passing the
+# user's Race/Common.szs additionally audits every required model and texture.
+add_executable(cockpit_item_data_test cockpit_item_data_test.cpp)
+target_compile_features(cockpit_item_data_test PRIVATE cxx_std_20)
+add_test(NAME cockpit_item_data_test COMMAND cockpit_item_data_test)
+
 option(AURORA_GPU_SMOKE_TESTS "Build opt-in tests requiring a desktop GPU" OFF)
 if (AURORA_GPU_SMOKE_TESTS AND AURORA_ENABLE_GX AND WIN32)
   # Exercises the custom Dawn DLL's Aurora Vulkan ABI (patches/dawn). Run it with that
@@ -29,7 +35,7 @@ if (AURORA_GPU_SMOKE_TESTS AND AURORA_ENABLE_GX AND WIN32)
                         dawn::dawncpp_headers)
   # VR cockpit overlay (hands, synthetic wheel) against real scene depth. Standalone: it
   # defines the GPU globals itself and needs only the header.
-  add_executable(cockpit_gpu_smoke cockpit_gpu_smoke.cpp)
+  add_executable(cockpit_gpu_smoke cockpit_gpu_smoke.cpp ../lib/gfx/texture_convert.cpp)
   target_include_directories(cockpit_gpu_smoke PRIVATE ../include ../lib)
   target_compile_definitions(cockpit_gpu_smoke PRIVATE AURORA TARGET_PC WEBGPU_DAWN)
   target_link_libraries(cockpit_gpu_smoke PRIVATE fmt::fmt xxhash absl::flat_hash_map absl::btree
@@ -64,6 +70,7 @@ if (AURORA_ENABLE_GX)
     eye_pass_plan_test.cpp
     foveation_test.cpp
     native_wheel_test.cpp
+    model_visibility_test.cpp
     cockpit_geometry_test.cpp
     texture_bind_group_cache_key_test.cpp
     ../lib/gfx/efb_ram_encoder.cpp

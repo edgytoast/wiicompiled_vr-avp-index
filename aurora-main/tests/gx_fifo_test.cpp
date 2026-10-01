@@ -7,6 +7,7 @@
 #include "gfx/texture.hpp"
 #include "gx/shader_info.hpp"
 #include "gx/pipeline.hpp"
+#include "scene_camera.hpp"
 #include "__gx.h"
 
 #include <algorithm>
@@ -240,6 +241,631 @@ TEST_F(GXFifoTest, VrKeepsMatchedEndpointsWithDesktopInterpolationOff) {
                           [](auto range) { return range.size == 0; }));
   EXPECT_EQ(build(30, 200).previous.size, 0u);       // Unmatched draws use current transforms.
   EXPECT_EQ(build(40, 200, true).previous.size, 0u); // Readback split invalidates replay.
+}
+
+TEST_F(GXFifoTest, VrDiagnosticsExposeDistantCameraTurnRejectionDespiteMatchedIdentity) {
+  struct Reset {
+    ~Reset() {
+      aurora::gx::detail::g_stereoFrameInterpolation.store(false);
+      aurora::gx::set_frame_interpolation_fps(0);
+      aurora::gx::begin_frame_interpolation();
+    }
+  } reset;
+  aurora::gx::set_frame_interpolation_fps(0);
+  aurora::gx::detail::g_stereoFrameInterpolation.store(true);
+  const auto info = aurora::gx::build_shader_info({});
+  gxState().currentPnMtx = 0;
+  const auto build = [&](float yaw) {
+    aurora::gx::begin_frame_interpolation();
+    aurora::gfx::testing::reset_uniform_allocations();
+    const float c = std::cos(yaw), s = std::sin(yaw);
+    gxState().pnMtx[0].nrm = {{c, 0, s, 0}, {0, 1, 0, 0}, {-s, 0, c, 0}};
+    for (unsigned i = 0; i < 2; ++i) {
+      const float distance = i == 0 ? 1000.0f : 100000.0f;
+      // Two stationary objects, seen from one camera rotating by two degrees.
+      gxState().pnMtx[0].pos = {{c, 0, s, -s * distance}, {0, 1, 0, 0}, {-s, 0, c, -c * distance}};
+      aurora::gx::build_uniform(info, 0, {}, {100u + i, 100u + i, 7}, true);
+    }
+    aurora::gx::finalize_frame_interpolation();
+  };
+  build(0);
+  build(2.0f * 3.14159265f / 180.0f);
+  AuroraFrameInterpolationDiagnostics diagnostics{};
+  aurora::gx::get_frame_interpolation_diagnostics(diagnostics);
+  EXPECT_EQ(diagnostics.candidates, 2u);
+  EXPECT_EQ(diagnostics.matches, 2u);
+  EXPECT_EQ(diagnostics.preparedDraws, 1u);
+  EXPECT_EQ(diagnostics.rejectedDraws, 1u);
+  EXPECT_EQ(diagnostics.framesSealed, 2u); // VR-only frames must count too.
+}
+
+TEST_F(GXFifoTest, VrRetainsFastSpinningWheelEndpoints) {
+  struct Reset {
+    ~Reset() {
+      aurora::gx::detail::g_stereoFrameInterpolation.store(false);
+      aurora::gx::set_frame_interpolation_fps(0);
+      aurora::gx::begin_frame_interpolation();
+    }
+  } reset;
+  aurora::gx::set_frame_interpolation_fps(0);
+  aurora::gx::detail::g_stereoFrameInterpolation.store(true);
+  const auto info = aurora::gx::build_shader_info({});
+  gxState().currentPnMtx = 0;
+  const auto build = [&](float angle, float x) {
+    aurora::gx::begin_frame_interpolation();
+    aurora::gfx::testing::reset_uniform_allocations();
+    const float c = std::cos(angle), s = std::sin(angle);
+    gxState().pnMtx[0].pos = {{c, -s, 0, x}, {s, c, 0, 0}, {0, 0, 1, -50}};
+    gxState().pnMtx[0].nrm = {{c, -s, 0, 0}, {s, c, 0, 0}, {0, 0, 1, 0}};
+    const auto result = aurora::gx::build_uniform(info, 0, {}, {100, 42, 7}, true);
+    aurora::gx::finalize_frame_interpolation();
+    return result;
+  };
+  EXPECT_EQ(build(0, 10).previous.size, 0u);
+  const auto uniforms = build(2.0f * 3.14159265f / 3.0f, 30);
+  ASSERT_NE(uniforms.previous.size, 0u);
+  const auto& bytes = aurora::gfx::testing::uniform_allocation(uniforms.previous.offset);
+  aurora::Mat3x4<float> previousPosition{}, previousNormal{};
+  std::memcpy(static_cast<void*>(&previousPosition), bytes.data() + uniforms.replayLayout.positionOffset,
+              sizeof(previousPosition));
+  std::memcpy(static_cast<void*>(&previousNormal), bytes.data() + uniforms.replayLayout.normalOffset,
+              sizeof(previousNormal));
+  // Rejecting a >90-degree wheel spin used to copy the current position here too,
+  // leaving the entire wheel at 60 Hz even as the kart body moved smoothly.
+  EXPECT_FLOAT_EQ(previousPosition.m0.w(), 10);
+  EXPECT_FLOAT_EQ(previousPosition.m0.x(), 1);
+  EXPECT_FLOAT_EQ(previousNormal.m0.x(), 1);
+  AuroraFrameInterpolationDiagnostics diagnostics{};
+  aurora::gx::get_frame_interpolation_diagnostics(diagnostics);
+  EXPECT_EQ(diagnostics.matches, 1u);
+  EXPECT_EQ(diagnostics.preparedDraws, 1u);
+  EXPECT_EQ(diagnostics.rejectedDraws, 0u);
+}
+
+TEST_F(GXFifoTest, VrTextureAnimationRetainsSpatialHistoryWithStrictMeshIdentity) {
+  struct Reset {
+    ~Reset() {
+      aurora::gx::detail::g_stereoFrameInterpolation.store(false);
+      aurora::gx::set_frame_interpolation_fps(0);
+      aurora::gx::begin_frame_interpolation();
+    }
+  } reset;
+  aurora::gx::set_frame_interpolation_fps(0);
+  aurora::gx::detail::g_stereoFrameInterpolation.store(true);
+  const auto info = aurora::gx::build_shader_info({});
+  gxState().currentPnMtx = 0;
+  gxState().pnMtx[0].pos = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, -50}};
+  gxState().pnMtx[0].nrm = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}};
+  const auto begin = [&] {
+    aurora::gx::begin_frame_interpolation();
+    aurora::gfx::testing::reset_uniform_allocations();
+  };
+  const auto draw = [&](float x, aurora::HashType texture, aurora::HashType geometry = 123,
+                        aurora::HashType topology = 0, aurora::HashType pipeline = 42) {
+    gxState().pnMtx[0].pos.m0[3] = x;
+    const aurora::gx::FrameInterpolationDrawIdentity identity{
+        .combined = texture + 1000, .pipeline = pipeline, .texture = texture,
+        .matrixTopology = topology, .geometry = geometry};
+    return aurora::gx::build_uniform(info, 0, {}, identity, true);
+  };
+  const auto previousX = [&](const auto& uniforms) {
+    const auto& bytes = aurora::gfx::testing::uniform_allocation(uniforms.previous.offset);
+    float x;
+    std::memcpy(&x, bytes.data() + uniforms.replayLayout.positionOffset + 3 * sizeof(float), sizeof(x));
+    return x;
+  };
+  begin();
+  draw(10, 1);
+  draw(100, 2);
+  draw(200, 3);
+  aurora::gx::finalize_frame_interpolation();
+  begin();
+  // The transparent sort reverses two animated instances. An unchanged exact
+  // match must also keep priority over the texture-independent mesh fallback.
+  const auto right = draw(110, 4);
+  const auto left = draw(20, 4);
+  const auto unchanged = draw(210, 3);
+  aurora::gx::finalize_frame_interpolation();
+  ASSERT_NE(right.previous.size, 0u);
+  ASSERT_NE(left.previous.size, 0u);
+  ASSERT_NE(unchanged.previous.size, 0u);
+  EXPECT_FLOAT_EQ(previousX(right), 100);
+  EXPECT_FLOAT_EQ(previousX(left), 10);
+  EXPECT_FLOAT_EQ(previousX(unchanged), 200);
+  AuroraFrameInterpolationDiagnostics diagnostics{};
+  aurora::gx::get_frame_interpolation_diagnostics(diagnostics);
+  EXPECT_EQ(diagnostics.preparedDraws, 3u);
+  EXPECT_EQ(diagnostics.rejectedDraws, 0u);
+
+  begin();
+  EXPECT_EQ(draw(120, 5, 456).previous.size, 0u);    // Different mesh.
+  EXPECT_EQ(draw(120, 6, 0).previous.size, 0u);      // Missing mesh identity.
+  EXPECT_EQ(draw(120, 7, 123, 9).previous.size, 0u); // Different palette topology.
+  EXPECT_EQ(draw(120, 8, 123, 0, 43).previous.size, 0u); // Different pipeline.
+  aurora::gx::finalize_frame_interpolation();
+}
+
+TEST(FrameInterpolationContract, FastRigidSpinsKeepAngularSpeedAndDiscontinuityGuards) {
+  const aurora::Mat3x4<float> previous{{1, 0, 0, 10}, {0, 1, 0, 0}, {0, 0, 1, 0}};
+  // Include rotations whose quaternion representation needs hemisphere correction.
+  for (float degrees : {120.0f, 170.0f, -120.0f, 240.0f}) {
+    const float angle = degrees * 3.14159265f / 180.0f;
+    const float c = std::cos(angle), s = std::sin(angle);
+    const aurora::Mat3x4<float> current{{c, -s, 0, 30}, {s, c, 0, 0}, {0, 0, 1, 0}};
+    aurora::Mat3x4<float> output{};
+    EXPECT_FALSE(aurora::gx::interpolate_transform(previous, current, 0.5f, output)); // Anchor cut guard.
+    for (float weight : {0.0f, 1.0f / 3, 2.0f / 3, 1.0f}) {
+      ASSERT_TRUE(aurora::gx::interpolate_draw_transform(previous, current, weight, output));
+      const float expectedAngle = (degrees > 180 ? degrees - 360 : degrees) * 3.14159265f / 180.0f * weight;
+      EXPECT_NEAR(output.m0.x(), std::cos(expectedAngle), 1e-5f);
+      EXPECT_NEAR(output.m1.x(), std::sin(expectedAngle), 1e-5f);
+      EXPECT_NEAR(output.m0.w(), 10 + 20 * weight, 1e-5f);
+      EXPECT_NEAR(output.m0.x() * output.m0.x() + output.m1.x() * output.m1.x(), 1, 1e-5f);
+    }
+  }
+  aurora::Mat3x4<float> invalid = previous, output{};
+  invalid.m0[3] = 2010;
+  EXPECT_FALSE(aurora::gx::interpolate_draw_transform(previous, invalid, 0.5f, output));
+  EXPECT_FLOAT_EQ(output.m0.w(), 2010);
+  invalid = previous;
+  invalid.m0[0] = 0; // Singular axis.
+  EXPECT_FALSE(aurora::gx::interpolate_draw_transform(previous, invalid, 0.5f, output));
+  invalid = previous;
+  invalid.m0[3] = std::numeric_limits<float>::quiet_NaN();
+  EXPECT_FALSE(aurora::gx::interpolate_draw_transform(previous, invalid, 0.5f, output));
+}
+
+TEST(FrameInterpolationContract, ShearedRigidDrawsMoveWithTheSkinnedMeshOnTheirBone) {
+  // Lakitu::Movement::UpdateScale sways MKW's Lakitu by tilting his Y axis: the model
+  // matrix gets a Y column of (A cos p, 1, A sin p). His goggles are rigid on the face
+  // bone and his head is skinned to that same bone. The rigid path rejected the shear,
+  // holding the goggles at the game frame while the head moved on, so they sank in.
+  const auto swaying = [](float amplitude, float phase, float lift) {
+    const float c = std::cos(0.698f), s = std::sin(0.698f); // the face bone's roll
+    const float x = amplitude * std::cos(phase), z = amplitude * std::sin(phase);
+    // [[1, x, 0], [0, 1, 0], [0, z, 1]] * Rz, then placed in front of the camera.
+    return aurora::Mat3x4<float>{{c + x * s, -s + x * c, 0, 10}, {s, c, 0, 50 + lift}, {z * s, z * c, 1, -300}};
+  };
+  const auto previous = swaying(0.25f, 0.3f, 0), current = swaying(0.3f, 0.5f, 3);
+  const auto apply = [](const aurora::Mat3x4<float>& matrix, const std::array<float, 3>& point) {
+    const aurora::Vec4<float>* rows[] = {&matrix.m0, &matrix.m1, &matrix.m2};
+    std::array<float, 3> result{};
+    for (size_t row = 0; row < 3; ++row)
+      result[row] = (*rows[row])[0] * point[0] + (*rows[row])[1] * point[1] + (*rows[row])[2] * point[2] +
+                    (*rows[row])[3];
+    return result;
+  };
+  const std::array<float, 3> goggleCorner{30, -20, 10};
+  for (float weight : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+    aurora::Mat3x4<float> head{}, goggles{};
+    ASSERT_TRUE(aurora::gx::interpolate_indexed_transform(previous, current, weight, head));
+    ASSERT_TRUE(aurora::gx::interpolate_draw_transform(previous, current, weight, goggles));
+    const auto onHead = apply(head, goggleCorner), onGoggles = apply(goggles, goggleCorner);
+    for (size_t axis = 0; axis < 3; ++axis) EXPECT_NEAR(onGoggles[axis], onHead[axis], 0.05f) << weight;
+  }
+  // Camera and seat anchors are rigid; a sheared one still counts as a cut.
+  aurora::Mat3x4<float> anchor{};
+  EXPECT_FALSE(aurora::gx::interpolate_transform(previous, current, 0.5f, anchor));
+}
+
+TEST_F(GXFifoTest, VrCameraRebaseKeepsFarInstancesAndHeldParticlesContinuous) {
+  using aurora::Mat3x4;
+  using aurora::gfx::stereo_replay::compose_affine;
+  struct Reset {
+    ~Reset() {
+      aurora::gx::detail::g_stereoFrameInterpolation.store(false);
+      aurora::gx::set_frame_interpolation_fps(0);
+      aurora::gx::begin_frame_interpolation();
+    }
+  } reset;
+  aurora::gx::set_frame_interpolation_fps(120); // Desktop and VR enabled together.
+  aurora::gx::detail::g_stereoFrameInterpolation.store(true);
+  const auto info = aurora::gx::build_shader_info({});
+  gxState().currentPnMtx = 0;
+  const Mat3x4<float> identity{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}};
+  const float angle = 0.08f, c = std::cos(angle), s = std::sin(angle);
+  const Mat3x4<float> currentView{{c, 0, s, 0}, {0, 1, 0, 0}, {-s, 0, c, 0}};
+  aurora::stereo::SceneCameraMotion motion;
+  ASSERT_TRUE(motion.prepare(identity, currentView, identity, identity));
+  const auto draw = [&](const Mat3x4<float>& view, float x, bool particle = false) {
+    gxState().vtxDesc[GX_VA_POS] = particle ? GX_DIRECT : GX_INDEX16;
+    gxState().pnMtx[0].pos = particle ? identity : compose_affine(view, {{1, 0, 0, x}, {0, 1, 0, 0}, {0, 0, 1, -100000}});
+    if (particle) gxState().pnMtx[0].pos.m0[1] = -0.0f;
+    gxState().pnMtx[0].nrm = particle ? identity : view;
+    return aurora::gx::build_uniform(info, 0, {}, particle ? aurora::gx::FrameInterpolationDrawIdentity{200, 20, 1}
+                                                         : aurora::gx::FrameInterpolationDrawIdentity{100, 10, 1}, true);
+  };
+  aurora::gx::begin_frame_interpolation();
+  aurora::gfx::testing::reset_uniform_allocations();
+  draw(identity, -2000);
+  draw(identity, 2000);
+  draw(identity, 0, true);
+  aurora::gx::finalize_frame_interpolation();
+  aurora::gx::begin_frame_interpolation();
+  aurora::gfx::testing::reset_uniform_allocations();
+  // All far instances move over the old 1500-unit gate just from camera yaw.
+  // Submission order also changes, and the right instance moves 30 world units.
+  const auto right = draw(currentView, 2030);
+  const auto left = draw(currentView, -2000);
+  const auto particle = draw(currentView, 0, true);
+  aurora::gx::set_frame_interpolation_view_rebase(&motion.currentFromPrevious, &motion.previousFromCurrent);
+  aurora::gx::finalize_frame_interpolation();
+  const auto read = [&](const auto& uniform, aurora::gfx::Range range) {
+    Mat3x4<float> matrix;
+    const auto& bytes = aurora::gfx::testing::uniform_allocation(range.offset);
+    std::memcpy(static_cast<void*>(&matrix), bytes.data() + uniform.replayLayout.positionOffset, sizeof(matrix));
+    return matrix;
+  };
+  ASSERT_NE(right.previous.size, 0u);
+  ASSERT_NE(left.previous.size, 0u);
+  ASSERT_NE(particle.previous.size, 0u);
+  const auto previousRight = read(right, right.previous);
+  const auto expectedRight = compose_affine(currentView, {{1, 0, 0, 2000}, {0, 1, 0, 0}, {0, 0, 1, -100000}});
+  EXPECT_NEAR(previousRight.m0.w(), expectedRight.m0.w(), 0.01f);
+  EXPECT_NEAR(previousRight.m2.w(), expectedRight.m2.w(), 0.01f);
+  EXPECT_NEAR(read(left, left.previous).m0.w(), read(left, left.current).m0.w(), 0.01f);
+  EXPECT_FLOAT_EQ(read(particle, particle.previous).m0.x(), 1);
+  EXPECT_FLOAT_EQ(read(particle, particle.previous).m0.w(), 0); // No camera applied twice to baked vertices.
+  // Desktop retains its original guarded camera-space behavior.
+  ASSERT_NE(right.interpolated[0].size, 0u);
+  EXPECT_NEAR(read(right, right.interpolated[0]).m0.w(), read(right, right.current).m0.w(), 0.01f);
+  AuroraFrameInterpolationDiagnostics diagnostics{};
+  aurora::gx::get_frame_interpolation_diagnostics(diagnostics);
+  EXPECT_EQ(diagnostics.matches, 3u);
+  EXPECT_EQ(diagnostics.preparedDraws, 3u);
+  EXPECT_EQ(diagnostics.rejectedDraws, 0u);
+}
+
+TEST_F(GXFifoTest, VrParticleCentersFollowMotionAcrossSortChangesAndCameraTurns) {
+  using aurora::Mat3x4;
+  using aurora::gx::offset_transform_origin;
+  using aurora::gfx::stereo_replay::compose_affine;
+  struct Reset {
+    ~Reset() {
+      aurora::gx::detail::g_stereoFrameInterpolation.store(false);
+      aurora::gx::set_frame_interpolation_fps(0);
+      aurora::gx::begin_frame_interpolation();
+    }
+  } reset;
+  aurora::gx::set_frame_interpolation_fps(120);
+  aurora::gx::detail::g_stereoFrameInterpolation.store(true);
+  const auto info = aurora::gx::build_shader_info({});
+  const Mat3x4<float> identity{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}};
+  const float angle = 0.08f, c = std::cos(angle), s = std::sin(angle);
+  const Mat3x4<float> view{{c, 0, s, 0}, {0, 1, 0, 0}, {-s, 0, c, 0}};
+  aurora::stereo::SceneCameraMotion motion;
+  ASSERT_TRUE(motion.prepare(identity, view, identity, identity));
+  gxState().vtxDesc[GX_VA_POS] = GX_DIRECT;
+  gxState().pnMtx[0].pos = gxState().pnMtx[0].nrm = identity;
+  const auto center = [&](const Mat3x4<float>& camera, float x) {
+    const auto matrix = offset_transform_origin(camera, {x, 0, -5000});
+    return std::array<float, 3>{matrix.m0.w(), matrix.m1.w(), matrix.m2.w()};
+  };
+  const auto record = [&](const Mat3x4<float>& camera, float x, uint64_t geometry) {
+    return aurora::gx::build_uniform(info, 0, {}, {geometry, 7, 9, 0, geometry}, true, 1,
+                                     {center(camera, x), true});
+  };
+  aurora::gx::begin_frame_interpolation();
+  aurora::gfx::testing::reset_uniform_allocations();
+  record(identity, -600, 101);
+  record(identity, 600, 102);
+  aurora::gx::finalize_frame_interpolation();
+  aurora::gx::begin_frame_interpolation();
+  aurora::gfx::testing::reset_uniform_allocations();
+  // Vertex bytes change and transparent submission order reverses. Both draw
+  // matrices are identity, so matrix-only matching cannot identify the centers.
+  const auto right = record(view, 630, 201);
+  const auto left = record(view, -570, 202);
+  const auto newborn = record(view, 10000, 203);
+  aurora::gx::set_frame_interpolation_view_rebase(&motion.currentFromPrevious, &motion.previousFromCurrent);
+  aurora::gx::finalize_frame_interpolation();
+  const auto readCenter = [&](const auto& uniform, aurora::gfx::Range range) {
+    Mat3x4<float> matrix;
+    const auto& bytes = aurora::gfx::testing::uniform_allocation(range.offset);
+    std::memcpy(&matrix, bytes.data() + uniform.replayLayout.positionOffset, sizeof(matrix));
+    EXPECT_FLOAT_EQ(matrix.m0.x(), 1); // Keep the current billboard's orientation.
+    EXPECT_FLOAT_EQ(matrix.m2.x(), 0);
+    return offset_transform_origin(matrix, uniform.replayLayout.vertexMotion.center);
+  };
+  for (const auto& [uniform, x] : {std::pair{right, 600.f}, std::pair{left, -600.f}}) {
+    ASSERT_NE(uniform.previous.size, 0u);
+    const auto previous = readCenter(uniform, uniform.previous);
+    EXPECT_NEAR(previous.m0.w(), center(view, x)[0], 0.002f);
+    EXPECT_NEAR(previous.m2.w(), center(view, x)[2], 0.002f);
+    const auto current = readCenter(uniform, uniform.current);
+    Mat3x4<float> half;
+    ASSERT_TRUE(aurora::gx::interpolate_draw_transform(previous, current, 0.5f, half));
+    EXPECT_NEAR(half.m0.w(), center(view, x + 15)[0], 0.002f);
+    // Simultaneous desktop interpolation uses its original camera endpoint.
+    const auto desktop = readCenter(uniform, uniform.interpolated[0]);
+    EXPECT_NEAR(desktop.m0.w(), (center(identity, x)[0] + center(view, x + 30)[0]) * 0.5f, 0.002f);
+  }
+  EXPECT_NEAR(readCenter(newborn, newborn.previous).m0.w(), center(view, 10000)[0], 0.002f);
+  AuroraFrameInterpolationDiagnostics diagnostics{};
+  aurora::gx::get_frame_interpolation_diagnostics(diagnostics);
+  EXPECT_EQ(diagnostics.vertexMotionDraws, 2u);
+}
+
+namespace {
+using Vec3f = std::array<float, 3>;
+
+// One CPU-built particle quad the way nw4r::ef submits it: camera-space corners under
+// an identity position matrix, all quads of an emitter sharing pipeline and texture.
+aurora::gx::UniformRanges record_particle_quad(const aurora::gx::ShaderInfo& info, uint64_t geometry,
+                                               const Vec3f& center, const Vec3f& edge0, const Vec3f& edge1) {
+  return aurora::gx::build_uniform(info, 0, {}, {geometry, 7, 9, 0, geometry}, true, 1, {center, true},
+                                   {edge0, edge1});
+}
+
+// The centre a staged uniform draws the quad at.
+Vec3f drawn_center(const aurora::gx::UniformRanges& uniform, aurora::gfx::Range range) {
+  aurora::Mat3x4<float> matrix;
+  const auto& bytes = aurora::gfx::testing::uniform_allocation(range.offset);
+  std::memcpy(static_cast<void*>(&matrix), bytes.data() + uniform.replayLayout.positionOffset, sizeof(matrix));
+  matrix = aurora::gx::offset_transform_origin(matrix, uniform.replayLayout.vertexMotion.center);
+  return {matrix.m0.w(), matrix.m1.w(), matrix.m2.w()};
+}
+
+Vec3f transform_point(const aurora::Mat3x4<float>& matrix, const Vec3f& point) {
+  return {matrix.m0[0] * point[0] + matrix.m0[1] * point[1] + matrix.m0[2] * point[2] + matrix.m0[3],
+          matrix.m1[0] * point[0] + matrix.m1[1] * point[1] + matrix.m1[2] * point[2] + matrix.m1[3],
+          matrix.m2[0] * point[0] + matrix.m2[1] * point[1] + matrix.m2[2] * point[2] + matrix.m2[3]};
+}
+
+bool same_point(const Vec3f& a, const Vec3f& b, float tolerance = 0.05f) {
+  return std::abs(a[0] - b[0]) <= tolerance && std::abs(a[1] - b[1]) <= tolerance &&
+         std::abs(a[2] - b[2]) <= tolerance;
+}
+
+struct ParticleInterpolationReset {
+  ~ParticleInterpolationReset() {
+    aurora::gx::detail::g_stereoFrameInterpolation.store(false);
+    aurora::gx::set_frame_interpolation_fps(0);
+    aurora::gx::begin_frame_interpolation();
+  }
+};
+} // namespace
+
+TEST_F(GXFifoTest, VrParticleQuadsPairByShapeWhereNearestCentresSwap) {
+  ParticleInterpolationReset reset;
+  aurora::gx::set_frame_interpolation_fps(0);
+  aurora::gx::detail::g_stereoFrameInterpolation.store(true);
+  const auto info = aurora::gx::build_shader_info({});
+  const aurora::Mat3x4<float> identity{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}};
+  gxState().currentPnMtx = 0;
+  gxState().vtxDesc[GX_VA_POS] = GX_DIRECT;
+  gxState().pnMtx[0].pos = gxState().pnMtx[0].nrm = identity;
+  // The camera flies 100 units forward and carries two streaks, each moving 60 along its
+  // own length. The one lying across the view ends nearer the other's old centre, so
+  // pairing centres alone swaps them and both sweep sideways.
+  const aurora::Mat3x4<float> forward{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 100}};
+  aurora::stereo::SceneCameraMotion motion;
+  ASSERT_TRUE(motion.prepare(identity, forward, identity, identity));
+  const Vec3f across{300, 0, 0}, upright{0, 300, 0}, thinX{12, 0, 0}, thinY{0, 12, 0};
+  aurora::gx::begin_frame_interpolation();
+  aurora::gfx::testing::reset_uniform_allocations();
+  record_particle_quad(info, 1, {-20, 0, -500}, across, thinY);
+  record_particle_quad(info, 2, {20, 0, -500}, upright, thinX);
+  aurora::gx::finalize_frame_interpolation();
+  aurora::gx::begin_frame_interpolation();
+  aurora::gfx::testing::reset_uniform_allocations();
+  const auto lying = record_particle_quad(info, 3, {40, 0, -500}, across, thinY);
+  const auto standing = record_particle_quad(info, 4, {20, 60, -500}, upright, thinX);
+  aurora::gx::set_frame_interpolation_view_rebase(&motion.currentFromPrevious, &motion.previousFromCurrent);
+  aurora::gx::finalize_frame_interpolation();
+  ASSERT_NE(lying.previous.size, 0u);
+  ASSERT_NE(standing.previous.size, 0u);
+  // Each starts from its own old place, as the new camera position sees it.
+  EXPECT_TRUE(same_point(drawn_center(lying, lying.previous), {-20, 0, -400}));
+  EXPECT_TRUE(same_point(drawn_center(standing, standing.previous), {20, 0, -400}));
+  AuroraFrameInterpolationDiagnostics diagnostics{};
+  aurora::gx::get_frame_interpolation_diagnostics(diagnostics);
+  EXPECT_EQ(diagnostics.vertexMotionDraws, 2u);
+  EXPECT_EQ(diagnostics.vertexMotionHeld, 0u);
+}
+
+TEST_F(GXFifoTest, VrParticleQuadBornElsewhereDoesNotSweepFromOneThatDied) {
+  ParticleInterpolationReset reset;
+  aurora::gx::set_frame_interpolation_fps(0);
+  aurora::gx::detail::g_stereoFrameInterpolation.store(true);
+  const auto info = aurora::gx::build_shader_info({});
+  const aurora::Mat3x4<float> identity{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}};
+  gxState().currentPnMtx = 0;
+  gxState().vtxDesc[GX_VA_POS] = GX_DIRECT;
+  gxState().pnMtx[0].pos = gxState().pnMtx[0].nrm = identity;
+  const aurora::Mat3x4<float> forward{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 100}};
+  aurora::stereo::SceneCameraMotion motion;
+  ASSERT_TRUE(motion.prepare(identity, forward, identity, identity));
+  aurora::gx::begin_frame_interpolation();
+  aurora::gfx::testing::reset_uniform_allocations();
+  record_particle_quad(info, 1, {-100, 0, -500}, {300, 0, 0}, {0, 12, 0});
+  aurora::gx::finalize_frame_interpolation();
+  aurora::gx::begin_frame_interpolation();
+  aurora::gfx::testing::reset_uniform_allocations();
+  // That streak died; another one starts elsewhere. One quad on each side of the frame
+  // is no evidence that they are the same particle.
+  const auto newborn = record_particle_quad(info, 2, {100, 0, -500}, {0, 300, 0}, {12, 0, 0});
+  aurora::gx::set_frame_interpolation_view_rebase(&motion.currentFromPrevious, &motion.previousFromCurrent);
+  aurora::gx::finalize_frame_interpolation();
+  ASSERT_NE(newborn.previous.size, 0u);
+  EXPECT_TRUE(same_point(drawn_center(newborn, newborn.previous), {100, 0, -500}));
+  AuroraFrameInterpolationDiagnostics diagnostics{};
+  aurora::gx::get_frame_interpolation_diagnostics(diagnostics);
+  EXPECT_EQ(diagnostics.vertexMotionDraws, 0u);
+  EXPECT_EQ(diagnostics.vertexMotionHeld, 1u);
+}
+
+TEST_F(GXFifoTest, VrSpeedLineEmitterKeepsEachStreakOnItsOwnPath) {
+  // A deterministic stand-in for the boost speed lines (rk_koukasen in RKRace.breff):
+  // 12x300 streaks, each drawn as two crossed quads, two born per frame on a 90-unit
+  // ring, six-frame life, about 50 units per frame outwards and back, all carried by a
+  // camera that flies 100 units per frame while turning. Pairing nearest centres swapped
+  // about half of them and swept every newborn in from a streak that had just died.
+  ParticleInterpolationReset reset;
+  aurora::gx::set_frame_interpolation_fps(0);
+  aurora::gx::detail::g_stereoFrameInterpolation.store(true);
+  const auto info = aurora::gx::build_shader_info({});
+  const aurora::Mat3x4<float> identity{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}};
+  gxState().currentPnMtx = 0;
+  gxState().vtxDesc[GX_VA_POS] = GX_DIRECT;
+  gxState().pnMtx[0].pos = gxState().pnMtx[0].nrm = identity;
+
+  struct Streak {
+    uint32_t id, birth;
+    Vec3f origin, velocity;
+  };
+  struct Quad {
+    uint32_t streak, side;
+    Vec3f center, edge0, edge1;
+  };
+  uint32_t seed = 0x5eed1234u;
+  const auto random = [&seed] {
+    seed = seed * 1664525u + 1013904223u;
+    return static_cast<float>(seed >> 8) * (1.0f / 16777216.0f);
+  };
+  const auto quads_of = [](const Streak& streak, uint32_t frame) {
+    const float age = static_cast<float>(frame - streak.birth);
+    const auto& v = streak.velocity;
+    const float speed = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    const Vec3f axis{v[0] / speed, v[1] / speed, v[2] / speed};
+    // Two sides across the axis: the crossed planes of one streak.
+    const float across = std::sqrt(axis[0] * axis[0] + axis[2] * axis[2]);
+    const Vec3f side0{axis[2] / across, 0, -axis[0] / across};
+    const Vec3f side1{axis[1] * side0[2] - axis[2] * side0[1], axis[2] * side0[0] - axis[0] * side0[2],
+                      axis[0] * side0[1] - axis[1] * side0[0]};
+    Vec3f center{};
+    for (size_t i = 0; i < 3; ++i) center[i] = streak.origin[i] + v[i] * age - axis[i] * 150;
+    std::array<Quad, 2> quads{};
+    for (uint32_t side = 0; side < 2; ++side) {
+      const auto& s = side == 0 ? side0 : side1;
+      quads[side] = {streak.id, side, center, {axis[0] * 300, axis[1] * 300, axis[2] * 300},
+                     {s[0] * 12, s[1] * 12, s[2] * 12}};
+    }
+    return quads;
+  };
+
+  std::vector<Streak> streaks;
+  std::vector<Quad> previousQuads;
+  aurora::Mat3x4<float> previousView = identity;
+  Vec3f cameraPosition{};
+  float yaw = 0;
+  uint32_t nextId = 0, survivors = 0, moved = 0, held = 0, wrong = 0, newborns = 0, newbornsMoved = 0;
+  for (uint32_t frame = 0; frame < 90; ++frame) {
+    yaw += 0.01f;
+    const float c = std::cos(yaw), s = std::sin(yaw);
+    cameraPosition = {cameraPosition[0] - s * 100, 0, cameraPosition[2] - c * 100};
+    // Camera looks down -Z, rotated by yaw about +Y; the view is its inverse.
+    const aurora::Mat3x4<float> view{
+        {c, 0, -s, -(c * cameraPosition[0] - s * cameraPosition[2])},
+        {0, 1, 0, 0},
+        {s, 0, c, -(s * cameraPosition[0] + c * cameraPosition[2])}};
+    aurora::stereo::SceneCameraMotion motion;
+    const bool rebase = frame != 0 && motion.prepare(previousView, view, identity, identity);
+    ASSERT_TRUE(frame == 0 || rebase);
+    std::erase_if(streaks, [frame](const Streak& streak) { return frame - streak.birth >= 6; });
+    for (int born = 0; born < 2; ++born) {
+      const float angle = random() * 6.2831853f;
+      const float speed = 1.0f + (random() - 0.5f) * 0.46f;
+      streaks.push_back({nextId++, frame, {90 * std::cos(angle), 90 * std::sin(angle), -300},
+                         {40 * speed * std::cos(angle), 40 * speed * std::sin(angle) + 10 * speed, 30 * speed}});
+    }
+    aurora::gx::begin_frame_interpolation();
+    aurora::gfx::testing::reset_uniform_allocations();
+    std::vector<Quad> quads;
+    std::vector<aurora::gx::UniformRanges> uniforms;
+    for (const auto& streak : streaks) {
+      for (const auto& quad : quads_of(streak, frame)) {
+        quads.push_back(quad);
+        uniforms.push_back(record_particle_quad(info, 1000 + quads.size() + frame * 100, quad.center,
+                                                quad.edge0, quad.edge1));
+      }
+    }
+    if (rebase)
+      aurora::gx::set_frame_interpolation_view_rebase(&motion.currentFromPrevious, &motion.previousFromCurrent);
+    aurora::gx::finalize_frame_interpolation();
+    if (rebase) {
+      for (size_t index = 0; index < quads.size(); ++index) {
+        const auto& quad = quads[index];
+        if (uniforms[index].previous.size == 0) continue;
+        const auto start = drawn_center(uniforms[index], uniforms[index].previous);
+        const auto before = std::find_if(previousQuads.begin(), previousQuads.end(), [&](const Quad& old) {
+          return old.streak == quad.streak && old.side == quad.side;
+        });
+        const bool heldHere = same_point(start, quad.center) ||
+                              same_point(start, transform_point(motion.currentFromPrevious, quad.center));
+        if (before == previousQuads.end()) {
+          ++newborns;
+          newbornsMoved += !heldHere;
+          continue;
+        }
+        ++survivors;
+        if (heldHere) {
+          ++held;
+        } else if (same_point(start, transform_point(motion.currentFromPrevious, before->center))) {
+          ++moved;
+        } else {
+          ++wrong;
+        }
+      }
+    }
+    previousQuads = std::move(quads);
+    previousView = view;
+  }
+  ASSERT_GT(survivors, 800u);
+  // Most streak quads keep moving along their own path...
+  EXPECT_GT(moved, survivors / 2);
+  // ...and almost none borrows another streak's (it was about half, plus every newborn).
+  EXPECT_LE(wrong * 50, survivors);
+  EXPECT_LE(newbornsMoved * 20, newborns);
+  std::printf("speed lines: %u survivor quads: %u moved, %u held, %u wrong; %u of %u newborn quads moved\n",
+              survivors, moved, held, wrong, newbornsMoved, newborns);
+}
+
+TEST_F(GXFifoTest, VrCyclicRigidMotionDoesNotBlendBackwardsAcrossReset) {
+  struct Reset {
+    ~Reset() {
+      aurora::gx::detail::g_stereoFrameInterpolation.store(false);
+      aurora::gx::begin_frame_interpolation();
+    }
+  } reset;
+  aurora::gx::set_frame_interpolation_fps(0);
+  aurora::gx::detail::g_stereoFrameInterpolation.store(true);
+  const auto info = aurora::gx::build_shader_info({});
+  const aurora::Mat3x4<float> identity{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}};
+  gxState().vtxDesc[GX_VA_POS] = GX_INDEX16;
+  auto previousView = identity;
+  const auto record = [&](float phase, float yaw) {
+    aurora::gx::begin_frame_interpolation();
+    aurora::gfx::testing::reset_uniform_allocations();
+    const aurora::Mat3x4<float> view{{std::cos(yaw), 0, std::sin(yaw), 0}, {0, 1, 0, 0},
+                                    {-std::sin(yaw), 0, std::cos(yaw), 0}};
+    aurora::stereo::SceneCameraMotion camera;
+    EXPECT_TRUE(camera.prepare(previousView, view, identity, identity));
+    gxState().pnMtx[0].pos = aurora::gx::offset_transform_origin(view, {phase, 0, -5000});
+    gxState().pnMtx[0].nrm = view;
+    const auto result = aurora::gx::build_uniform(info, 0, {}, {11, 1, 2, 0, 11}, true);
+    aurora::gx::set_frame_interpolation_view_rebase(&camera.currentFromPrevious, &camera.previousFromCurrent);
+    aurora::gx::finalize_frame_interpolation();
+    previousView = view;
+    return result;
+  };
+  record(16, 0);
+  record(17, 0.02f);
+  record(18, 0.04f);
+  record(19, 0.06f);
+  AuroraFrameInterpolationDiagnostics before{}, after{};
+  aurora::gx::get_frame_interpolation_diagnostics(before);
+  const auto resetFrame = record(0, 0.08f);
+  aurora::gx::get_frame_interpolation_diagnostics(after);
+  EXPECT_EQ(after.animationWrapCuts, before.animationWrapCuts + 1);
+  const auto& current = aurora::gfx::testing::uniform_allocation(resetFrame.current.offset);
+  const auto& previous = aurora::gfx::testing::uniform_allocation(resetFrame.previous.offset);
+  EXPECT_EQ(current, previous); // Hold the new phase instead of reverse sweeping.
+  record(1, 0.10f);
+  record(0, 0.12f); // A normal same-speed direction change must still interpolate.
+  aurora::gx::get_frame_interpolation_diagnostics(after);
+  EXPECT_EQ(after.animationWrapCuts, before.animationWrapCuts + 1);
+  EXPECT_EQ(after.preparedDraws, 1u);
 }
 
 TEST(FrameInterpolationContract, RequiresStablePerspectiveDrawSequence) {
@@ -2267,6 +2893,103 @@ TEST_F(GXFifoTest, MergedDrawOffsetsCachedTopologyWithoutJoiningPrimitives) {
 
   EXPECT_EQ(aurora::gfx::g_mergedDrawCallCount, 1u);
   EXPECT_EQ(aurora::gfx::testing::last_pushed_indices(), (std::vector<u16>{3, 4, 5}));
+}
+
+TEST_F(GXFifoTest, VrDirectParticleQuadsRetainSeparateCentersInFifoAndRawDraws) {
+  struct Reset {
+    ~Reset() {
+      aurora::gx::detail::g_stereoFrameInterpolation.store(false);
+      aurora::gx::begin_frame_interpolation();
+    }
+  } reset;
+  aurora::gx::detail::g_stereoFrameInterpolation.store(true);
+  aurora::gx::begin_frame_interpolation();
+  aurora::gfx::testing::use_real_vertex_format_helpers(true);
+  aurora::gfx::testing::use_draw_command_tracking(true);
+  gxState().projType = GX_PERSPECTIVE;
+  gxState().vtxDesc[GX_VA_POS] = GX_DIRECT;
+  gxState().vtxFmts[GX_VTXFMT0].attrs[GX_VA_POS] = {GX_POS_XYZ, GX_F32, 0};
+  gxState().pnMtx[0].pos = gxState().pnMtx[0].nrm = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}};
+  gxState().stateDirty = true;
+  const auto makeVertices = [](float x) {
+    std::vector<uint8_t> vertices;
+    for (const auto& point : {std::array{x - 5, -5.f, -200.f}, std::array{x + 5, -5.f, -200.f},
+                              std::array{x + 5, 5.f, -200.f}, std::array{x - 5, 5.f, -200.f}}) {
+      for (float component : point) {
+        uint32_t bits;
+        std::memcpy(&bits, &component, sizeof(bits));
+        for (int shift : {24, 16, 8, 0}) vertices.push_back(static_cast<uint8_t>(bits >> shift));
+      }
+    }
+    return vertices;
+  };
+  std::vector<uint8_t> commands;
+  for (float x : {20.f, 100.f}) {
+    commands.insert(commands.end(), {static_cast<uint8_t>(GX_QUADS), 0, 4});
+    const auto vertices = makeVertices(x);
+    commands.insert(commands.end(), vertices.begin(), vertices.end());
+  }
+  decode_fifo(commands);
+  EXPECT_EQ(aurora::gfx::g_mergedDrawCallCount, 0u);
+  auto* draw = aurora::gfx::get_last_draw_command<aurora::gx::DrawData>();
+  ASSERT_NE(draw, nullptr);
+  EXPECT_TRUE(draw->uniformReplayLayout.vertexMotion.enabled);
+  EXPECT_EQ(draw->uniformReplayLayout.vertexMotion.center, (std::array{100.f, 0.f, -200.f}));
+  const auto raw = makeVertices(300);
+  ASSERT_TRUE(aurora::gx::fifo::submit_raw_draw(GX_QUADS, GX_VTXFMT0, raw.data(), 4, raw.size()));
+  draw = aurora::gfx::get_last_draw_command<aurora::gx::DrawData>();
+  ASSERT_NE(draw, nullptr);
+  EXPECT_TRUE(draw->uniformReplayLayout.vertexMotion.enabled);
+  EXPECT_EQ(draw->uniformReplayLayout.vertexMotion.center, (std::array{300.f, 0.f, -200.f}));
+  // Turning VR interpolation off restores ordinary batching.
+  aurora::gx::detail::g_stereoFrameInterpolation.store(false);
+  gxState().stateDirty = true;
+  decode_fifo(commands);
+  EXPECT_EQ(aurora::gfx::g_mergedDrawCallCount, 1u);
+}
+
+TEST_F(GXFifoTest, InterpolationOffRecordsNothingForParticlesOrMatching) {
+  // The Quest ships with VR interpolation off. Those frames must not pay for any
+  // of it: no draw is recorded, no particle quad is tracked, nothing is matched.
+  struct Reset {
+    ~Reset() { aurora::gx::begin_frame_interpolation(); }
+  } reset;
+  aurora::gx::detail::g_stereoFrameInterpolation.store(false);
+  aurora::gx::set_frame_interpolation_fps(0);
+  aurora::gx::begin_frame_interpolation();
+  aurora::gfx::testing::use_real_vertex_format_helpers(true);
+  aurora::gfx::testing::use_draw_command_tracking(true);
+  gxState().projType = GX_PERSPECTIVE;
+  gxState().vtxDesc[GX_VA_POS] = GX_DIRECT;
+  gxState().vtxFmts[GX_VTXFMT0].attrs[GX_VA_POS] = {GX_POS_XYZ, GX_F32, 0};
+  gxState().pnMtx[0].pos = gxState().pnMtx[0].nrm = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}};
+  gxState().stateDirty = true;
+  std::vector<uint8_t> commands;
+  for (float x : {20.f, 100.f, 180.f}) {
+    commands.insert(commands.end(), {static_cast<uint8_t>(GX_QUADS), 0, 4});
+    for (const auto& point : {std::array{x - 5, -5.f, -200.f}, std::array{x + 5, -5.f, -200.f},
+                              std::array{x + 5, 5.f, -200.f}, std::array{x - 5, 5.f, -200.f}}) {
+      for (float component : point) {
+        uint32_t bits;
+        std::memcpy(&bits, &component, sizeof(bits));
+        for (int shift : {24, 16, 8, 0}) commands.push_back(static_cast<uint8_t>(bits >> shift));
+      }
+    }
+  }
+  decode_fifo(commands);
+  aurora::gx::finalize_frame_interpolation();
+  EXPECT_EQ(aurora::gfx::g_mergedDrawCallCount, 2u); // Ordinary batching.
+  auto* draw = aurora::gfx::get_last_draw_command<aurora::gx::DrawData>();
+  ASSERT_NE(draw, nullptr);
+  EXPECT_FALSE(draw->uniformReplayLayout.vertexMotion.enabled);
+  AuroraFrameInterpolationDiagnostics diagnostics{};
+  aurora::gx::get_frame_interpolation_diagnostics(diagnostics);
+  EXPECT_EQ(diagnostics.candidates, 0u);
+  EXPECT_EQ(diagnostics.matches, 0u);
+  EXPECT_EQ(diagnostics.preparedDraws, 0u);
+  EXPECT_EQ(diagnostics.vertexMotionDraws, 0u);
+  EXPECT_EQ(diagnostics.vertexMotionHeld, 0u);
+  EXPECT_FALSE(aurora::gx::has_interpolated_frame());
 }
 
 TEST_F(GXFifoTest, OrthographicQuadRecordsScreenRectForVrFurniture) {

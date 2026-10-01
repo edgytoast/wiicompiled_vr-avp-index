@@ -3,6 +3,7 @@
 #pragma once
 
 #include "vr/steering_wheel.h"
+#include "vr/mkw_vr_item.h"
 
 #include <algorithm>
 #include <array>
@@ -206,6 +207,17 @@ inline float EyeBehindControls(float eyeForward, float controlsForward, float un
     return std::min(eyeForward, controlsForward - clearance);
 }
 
+// Once the eye is pulled behind the controls, a long neck or snout must not
+// leave them down at the player's knees. Keep the measured character scale,
+// but cap the seated eye at 40 cm above the neutral hand targets.
+inline float EyeAboveControls(float eyeHeight, float controlsHeight, float units) noexcept {
+    if (!detail::IsFiniteFloat(&controlsHeight) || !detail::IsFiniteFloat(&units) || units <= 0.0f) {
+        return eyeHeight;
+    }
+    const float limit = controlsHeight + 0.40f * units;
+    return limit >= 5.0f ? std::min(eyeHeight, limit) : eyeHeight;
+}
+
 // Tall characters sit higher; normalise them to a comfortable perceived cockpit
 // height by growing the world scale with the measured eye height.
 inline float CharacterCockpitScale(float eyeHeight) noexcept {
@@ -237,6 +249,15 @@ inline bool NeutralPlayerScale(const std::array<float, 3>& scale) noexcept {
     return true;
 }
 
+inline bool ValidSeatedEye(const std::array<float, 3>& eye) noexcept {
+    for (const auto& value : eye) {
+        if (!detail::IsFiniteFloat(&value) || std::abs(value) > 500.0f) {
+            return false;
+        }
+    }
+    return eye[1] >= 5.0f;
+}
+
 // Eye position resources are in the face bone's local coordinates, whose axes
 // differ between characters. Transform their centre through the complete bind
 // matrix before applying the vehicle-specific driver placement.
@@ -258,12 +279,7 @@ inline bool ComputeDriverEyeFromBounds(const Mtx34& face, const Mtx34& placement
                                               (minimum.z + maximum.z) * 0.5f);
     const auto seat = detail::TransformPoint(placement, model.x, model.y, model.z);
     const std::array<float, 3> result{seat.x, seat.y, seat.z};
-    for (const auto& value : result) {
-        if (!detail::IsFiniteFloat(&value) || std::abs(value) > 500.0f) {
-            return false;
-        }
-    }
-    if (seat.y < 5.0f) {
+    if (!ValidSeatedEye(result)) {
         return false;
     }
     eye = result;
@@ -288,29 +304,50 @@ inline bool ComputeSeatedEye(const Mtx34& faceWorld, const Mtx34& bodyWorld, det
     const detail::Vec3 delta{world.x - bodyWorld[3], world.y - bodyWorld[7], world.z - bodyWorld[11]};
     const std::array<float, 3> result{detail::Dot(bc, delta) / det, detail::Dot(ca, delta) / det,
                                       detail::Dot(ab, delta) / det};
-    for (const auto& value : result) {
-        if (!detail::IsFiniteFloat(&value) || std::abs(value) > 500.0f) {
-            return false;
-        }
-    }
-    if (result[1] < 5.0f) {
+    if (!ValidSeatedEye(result)) {
         return false;
     }
     eye = result;
     return true;
 }
 
+// Mods may have no separately named eye geometry. Estimate just above/ahead
+// of the evaluated head, in vehicle axes, not the head bone's rotated axes.
+// The animated pose includes the character animation's scale and placement;
+// adding the driver's placement again would put some mods below the vehicle.
+inline bool ComputeDriverEyeFromHead(const Mtx34& headWorld, const Mtx34& bodyWorld,
+                                    std::array<float, 3>& eye) noexcept {
+    std::array<float, 3> head{};
+    if (!ComputeSeatedEye(headWorld, bodyWorld, {0, 0, 0}, head)) {
+        return false;
+    }
+    head[1] += 8.0f;
+    head[2] += 8.0f;
+    if (!ValidSeatedEye(head)) {
+        return false;
+    }
+    eye = head;
+    return true;
+}
+
 // The neutral seated eye, accepted once eight consecutive safe samples agree
-// within two units, then frozen until the driver or the race changes.
+// within two units of the first sample, then frozen until the driver or the
+// race changes, or a recenter asks for another calibration. Keep the previous
+// seat while waiting for a safe replacement.
 struct SeatedEyeReference {
     std::array<float, 3> value{}, candidate{};
     unsigned stable = 0;
     bool valid = false;
+    bool recalibrating = false;
+    void Recalibrate() noexcept {
+        stable = 0;
+        recalibrating = true;
+    }
     void Observe(const std::array<float, 3>& sample, bool safe, bool freeze) {
-        if (freeze && valid) {
+        if (freeze && valid && !recalibrating) {
             return;
         }
-        if (!safe) {
+        if (!safe || !ValidSeatedEye(sample)) {
             stable = 0;
             return;
         }
@@ -318,11 +355,16 @@ struct SeatedEyeReference {
         for (int i = 0; i < 3; ++i) {
             delta = std::max(delta, std::abs(sample[i] - candidate[i]));
         }
-        stable = stable && delta < 2.0f ? stable + 1 : 1;
-        candidate = sample;
+        if (stable && delta < 2.0f) {
+            ++stable;
+        } else {
+            stable = 1;
+            candidate = sample;
+        }
         if (stable >= 8) {
             value = sample;
             valid = true;
+            recalibrating = false;
             stable = 8;
         }
     }
@@ -521,10 +563,22 @@ void MkwVRFirstPersonCommit() noexcept;
 // Drops every captured pointer and the held anchor. Call on race entry/exit.
 void MkwVRFirstPersonReset() noexcept;
 
+// Thread-safe request; the guest thread remeasures the cockpit on subsequent
+// neutral frames. Keeps the current seat until a replacement is ready.
+void MkwVRFirstPersonRecenter() noexcept;
+
 // Producer-side read. Thread-safe. A valid anchor is also what marks the mode
 // as engaged, and so what selects the first-person world scale: it is invalid
 // whenever the mode is off, the race has not produced a usable anchor, or the
 // anchor has been missing long enough to give up holding the last one.
 FirstPersonAnchor MkwVRFirstPersonGetAnchor() noexcept;
+
+// Checked guest-thread read of the camera that authored this frame's GX draws.
+// Also available with first person off; render workers receive only its copy.
+bool MkwVRReadSceneView(Mtx34& view) noexcept;
+
+// Guest-frame inventory snapshot, sampled at the race draw boundary. A
+// generation change invalidates any item retained by a prior race.
+HeldItem MkwVRFirstPersonGetHeldItem() noexcept;
 
 } // namespace mkw::vr

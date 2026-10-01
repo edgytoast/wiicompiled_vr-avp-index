@@ -516,10 +516,10 @@ add_test(NAME mkw_vr_first_person_tests COMMAND mkw_vr_first_person_tests)
 
 # The first-person cockpit (seated eye, wheel and handlebar geometry, level seat,
 # native wheel vertices) and hand steering (grab, turn, hand-off to the game),
-# ported from heurazy's mario-kart-wii-VR-port, and tracked hands (grasp, bare-hand
-# buttons, flick). All header-only.
-foreach(test_name mkw_steering_wheel_tests mkw_vr_cockpit_tests mkw_vr_hand_steering_tests mkw_vr_camera_toggle_tests
-                  mkw_vr_hand_tracking_tests)
+# ported from heurazy's mario-kart-wii-VR-port, tracked hands (grasp, bare-hand
+# buttons, flick) and throwing the held item. All header-only.
+foreach(test_name mkw_steering_wheel_tests mkw_vr_cockpit_tests mkw_vr_bullet_bill_tests mkw_vr_hand_steering_tests mkw_vr_camera_toggle_tests
+                  mkw_vr_hand_tracking_tests mkw_vr_culling_tests mkw_vr_item_throw_tests)
     string(REGEX REPLACE "^mkw_" "" test_source "${test_name}")
     add_executable(${test_name} "${CMAKE_CURRENT_LIST_DIR}/tests/${test_source}.cpp")
     target_include_directories(${test_name} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")
@@ -556,6 +556,11 @@ add_executable(mkw_vr_player_tests "${CMAKE_CURRENT_LIST_DIR}/tests/vr_player_te
 target_include_directories(mkw_vr_player_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")
 target_compile_features(mkw_vr_player_tests PRIVATE cxx_std_17)
 add_test(NAME mkw_vr_player_tests COMMAND mkw_vr_player_tests)
+
+add_executable(mkw_vr_item_tests "${CMAKE_CURRENT_LIST_DIR}/tests/vr_item_tests.cpp")
+target_include_directories(mkw_vr_item_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")
+target_compile_features(mkw_vr_item_tests PRIVATE cxx_std_17)
+add_test(NAME mkw_vr_item_tests COMMAND mkw_vr_item_tests)
 
 add_executable(mkw_vr_policy_tests tests/vr_policy_tests.cpp src/vr/mkw_vr_policy.cpp)
 target_include_directories(mkw_vr_policy_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")

@@ -582,7 +582,8 @@ static Mat4x4<float> effective_projection() noexcept {
 
 UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRanges& ranges,
                             const FrameInterpolationDrawIdentity& drawIdentity, bool perspective,
-                            uint16_t usedPnMtxMask) noexcept {
+                            uint16_t usedPnMtxMask, DrawVertexMotion vertexMotion,
+                            const DrawVertexShape& vertexShape) noexcept {
   ZoneScoped;
 
   auto [buf, range] = gfx::map_uniform(info.uniformSize);
@@ -793,6 +794,7 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
       .normalMatrixCount = layout.nrmCount,
       .perspective = perspective,
       .indexedMatrices = info.indexAttr.test(GX_VA_PNMTXIDX),
+      .vertexMotion = vertexMotion,
       .nativeEfbEffect = nativeEfbEffect,
       .compositeDepthCopy = nativeEfbEffect ? compositeDepthCopy : nullptr,
   };
@@ -818,6 +820,8 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
           // A compacted position region holds the current matrix at slot 0.
           .currentMatrix = layout.absolutePosRegion ? std::min<size_t>(g_gxState.currentPnMtx, MaxPnMtx - 1) : 0,
           .indexedMatrices = info.indexAttr.test(GX_VA_PNMTXIDX),
+          .vertexMotion = vertexMotion,
+          .vertexShape = vertexShape,
       },
       &previousUniform);
   g_gxState.stateDirty = false;

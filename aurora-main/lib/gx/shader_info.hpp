@@ -14,6 +14,7 @@ struct UniformReplayLayout {
   uint8_t normalMatrixCount = 0;
   bool perspective = false;
   bool indexedMatrices = false;
+  DrawVertexMotion vertexMotion{};
   // A 2D draw compositing the framebuffer back over itself: bloom, blur and the
   // rest of the native post-processing chain. It belongs to the rendered image,
   // not to the game's 2D layer, so it must stay where the game aimed it.
@@ -38,6 +39,7 @@ ShaderInfo build_shader_info(const ShaderConfig& config) noexcept;
 Light prepare_shader_light(Light light) noexcept;
 UniformRanges build_uniform(const ShaderInfo& info, uint32_t vtxStart, const BindGroupRanges& ranges,
                             const FrameInterpolationDrawIdentity& drawIdentity, bool perspective,
-                            uint16_t usedPnMtxMask = 1) noexcept;
+                            uint16_t usedPnMtxMask = 1, DrawVertexMotion vertexMotion = {},
+                            const DrawVertexShape& vertexShape = {}) noexcept;
 u8 color_channel(GXChannelID id) noexcept;
 }; // namespace aurora::gx

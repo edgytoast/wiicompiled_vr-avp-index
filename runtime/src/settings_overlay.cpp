@@ -12,6 +12,7 @@
 #include "runtime_config.h"
 #include "runtime_log.h"
 #include "vr/camera_toggle.h"
+#include "vr/mkw_vr_culling.h"
 #include "vr/mkw_vr_first_person.h"
 #include "vr/mkw_vr_policy.h"
 #include "vr/openxr_diagnostics.h"
@@ -173,7 +174,13 @@ int g_vrFirstPersonSeat = RuntimeConfigFile::VrFirstPersonSeat() == "custom" ? 1
 float g_vrCockpitUnitsPerMeter = RuntimeConfigFile::VrCockpitUnitsPerMeter();
 bool g_vrSteeringWheel = RuntimeConfigFile::VrSteeringWheel();
 bool g_vrNativeSteeringWheel = RuntimeConfigFile::VrNativeSteeringWheel();
+bool g_vrPlaceholderSteeringWheel = RuntimeConfigFile::VrPlaceholderSteeringWheel();
+bool g_vrObjectCulling = RuntimeConfigFile::VrObjectCulling();
 bool g_vrHandSteering = RuntimeConfigFile::VrHandSteering();
+constexpr std::array<const char*, 3> kVrCockpitItemHands{"Left", "Right", "Off"};
+bool g_vrCockpitItemThrow = RuntimeConfigFile::VrCockpitItemThrow();
+int g_vrCockpitItemHand = RuntimeConfigFile::VrCockpitItemHand() == "right" ? 1 :
+                          RuntimeConfigFile::VrCockpitItemHand() == "off" ? 2 : 0;
 mkw::vr::WheelTuning g_vrWheelTuning = RuntimeConfigFile::VrWheelTuning();
 float g_vrFirstPersonHeadUp = RuntimeConfigFile::VrFirstPersonHeadUpMeters();
 float g_vrFirstPersonHeadForward = RuntimeConfigFile::VrFirstPersonHeadForwardMeters();
@@ -188,6 +195,7 @@ int g_vrFrameInterpolationMode = [] {
 }();
 int g_vrFirstPersonHiddenModel = RuntimeConfigFile::VrFirstPersonHiddenModel();
 bool g_openxrDiagnosticsLogging = RuntimeConfigFile::DiagnosticsOpenXRLogging(false);
+bool g_firstPersonDiagnosticsLogging = RuntimeConfigFile::DiagnosticsFirstPersonLogging(false);
 // Config spellings and menu labels for the desktop mirror, index-matched to
 // AuroraStereoMirrorView so the combo selection converts to either directly.
 constexpr std::array<const char*, 5> kVrMirrorViewNames{"normal", "both", "left", "right", "none"};
@@ -1213,9 +1221,15 @@ void DrawVrSteeringWheelSettings() {
         mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
     }
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Turns the wheel or handlebar of the vehicle's own model. Off draws a "
-                          "separate VR wheel instead, which is also what appears when a vehicle's "
-                          "own wheel cannot be animated.");
+        ImGui::SetTooltip("Turns the wheel or handlebar of the vehicle's own model.");
+    }
+    if (ImGui::Checkbox("Placeholder wheel or handlebar", &g_vrPlaceholderSteeringWheel)) {
+        RuntimeConfigFile::SetVrPlaceholderSteeringWheel(g_vrPlaceholderSteeringWheel);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Draws a separate VR wheel (karts) or handlebar (bikes) whenever the "
+                          "vehicle's own is not the one turning: with the option above off, or while "
+                          "the game's draws do not take its animation, as in the race's opening pan.");
     }
     ImGui::EndDisabled();
     if (ImGui::Checkbox("Hand steering (by heurazy)", &g_vrHandSteering)) {
@@ -1224,9 +1238,28 @@ void DrawVrSteeringWheelSettings() {
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Squeeze a grip near the wheel or handlebar to take hold of it, and turn "
                           "it to steer, with one hand or both. Releasing both grips gives steering "
-                          "back to the stick, which still aims items. The runtime's hand mesh is "
-                          "used when hand steering was on at launch.");
+                          "back to the stick, which still aims items.");
     }
+    if (ImGui::Combo("Item in cockpit hand", &g_vrCockpitItemHand,
+                     kVrCockpitItemHands.data(), static_cast<int>(kVrCockpitItemHands.size()))) {
+        RuntimeConfigFile::SetVrCockpitItemHand(
+            g_vrCockpitItemHand == 1 ? "right" : g_vrCockpitItemHand == 2 ? "off" : "left");
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Show Player 1's settled inventory item above this palm. "
+                          "Triple items show their remaining count. Using or losing the item hides it.");
+    }
+    ImGui::BeginDisabled(g_vrCockpitItemHand == 2);
+    if (ImGui::Checkbox("Throw the item by swinging that hand", &g_vrCockpitItemThrow)) {
+        RuntimeConfigFile::SetVrCockpitItemThrow(g_vrCockpitItemThrow);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("With the hand off the wheel, swing it quickly forward to throw the item ahead "
+                          "of the kart, or back to throw it behind: the stick and item button the game "
+                          "reads for an aimed throw. Swinging while holding the item button throws the "
+                          "trailed item.");
+    }
+    ImGui::EndDisabled();
 #if defined(MKW_PLATFORM_VISIONOS)
     // The Vision Pro has nothing but hands, and shows the wearer's own.
     ImGui::BeginDisabled(!g_vrHandSteering);
@@ -1246,7 +1279,7 @@ void DrawVrSteeringWheelSettings() {
     }
     ImGui::EndDisabled();
 #elif defined(__ANDROID__)
-    ImGui::BeginDisabled(!g_vrHandSteering);
+    ImGui::BeginDisabled(!g_vrHandSteering && g_vrCockpitItemHand == 2);
     if (ImGui::Checkbox("Tracked hands", &g_vrHandTracking)) {
         RuntimeConfigFile::SetVrHandTracking(g_vrHandTracking);
     }
@@ -1317,7 +1350,8 @@ void DrawVrSteeringWheelSettings() {
                             anchor.bike ? "handlebar" : "wheel",
                             !anchor.native_wheel.valid ? "grips not found"
                             : anchor.native_mesh_prepared ? "vehicle's own"
-                                                          : "VR wheel",
+                            : g_vrSteeringWheel && g_vrPlaceholderSteeringWheel ? "placeholder"
+                                                                                : "vehicle's own, not animated",
                             anchor.units_per_meter, GxNativeWheel::LastDrawCount());
     }
 }
@@ -1436,6 +1470,7 @@ void DrawVrSettings() {
         mkw::vr::MkwVRPolicySetImmersiveRaces(!g_vrFlatScreen);
         mkw::vr::OpenXRSetImmersiveWindow(view == RuntimeConfigFile::VrRaceView::ImmersiveWindow);
         mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
+        mkw::vr::MkwVRObjectCullingApplyConfiguredSettings();
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
@@ -1490,7 +1525,7 @@ void DrawVrSettings() {
     }
 #endif
 #if defined(__ANDROID__)
-    // Shows the live level, which debug.wiicompiled.foveation can override.
+    // Shows the live level Aurora holds.
     g_vrFoveation = static_cast<int>(aurora_get_stereo_foveation());
     if (ImGui::Combo("Foveated rendering", &g_vrFoveation, kVrFoveationLabels.data(),
                      static_cast<int>(kVrFoveationLabels.size()))) {
@@ -1554,7 +1589,8 @@ void DrawVrSettings() {
             "Makes where you are sitting right now the centre of the view, and brings "
             "the menu screen back upright in front of you. The race view moves in "
             "position only, so the horizon stays level and forward is unchanged; use "
-            "your headset's own recenter to change forward.");
+            "your headset's own recenter to change forward. In cockpit view it also "
+            "remeasures the seat when the driver is straight, undamaged and normal size.");
     }
     ImGui::SameLine();
     // Click to arm, then the next key press is captured in HandleEvents.
@@ -1751,17 +1787,36 @@ void DrawVrCameraSettings() {
     }
     DrawVrSteeringWheelSettings();
     ImGui::Separator();
+    ImGui::Text("Object culling");
+    if (ImGui::Checkbox("Hide what the game camera cannot see", &g_vrObjectCulling)) {
+        RuntimeConfigFile::SetVrObjectCulling(g_vrObjectCulling);
+        mkw::vr::MkwVRObjectCullingApplyConfiguredSettings();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "The game's own culling: karts, characters and course objects outside its chase "
+            "camera's view are not drawn, so a head turn or a look over the shoulder finds them "
+            "missing. Off draws them anyway, at some GPU cost, and is the PC's default. The draw "
+            "distance is unchanged, and the Flat screen race view always keeps the game's culling.");
+    }
+    ImGui::Separator();
     if (ImGui::Button("Reset first-person defaults")) {
         g_vrFirstPersonSeat = 0;
         g_vrCockpitUnitsPerMeter = RuntimeConfigFile::kVrCockpitUnitsPerMeterDefault;
         g_vrSteeringWheel = RuntimeConfigFile::kVrSteeringWheelDefault;
         g_vrNativeSteeringWheel = RuntimeConfigFile::kVrNativeSteeringWheelDefault;
+        g_vrPlaceholderSteeringWheel = RuntimeConfigFile::kVrPlaceholderSteeringWheelDefault;
         g_vrHandSteering = RuntimeConfigFile::kVrHandSteeringDefault;
+        g_vrCockpitItemHand = 0;
+        g_vrCockpitItemThrow = RuntimeConfigFile::kVrCockpitItemThrowDefault;
         RuntimeConfigFile::SetVrFirstPersonSeat(RuntimeConfigFile::kVrFirstPersonSeatDefault);
         RuntimeConfigFile::SetVrCockpitUnitsPerMeter(g_vrCockpitUnitsPerMeter);
         RuntimeConfigFile::SetVrSteeringWheel(g_vrSteeringWheel);
         RuntimeConfigFile::SetVrNativeSteeringWheel(g_vrNativeSteeringWheel);
+        RuntimeConfigFile::SetVrPlaceholderSteeringWheel(g_vrPlaceholderSteeringWheel);
         RuntimeConfigFile::SetVrHandSteering(g_vrHandSteering);
+        RuntimeConfigFile::SetVrCockpitItemHand(RuntimeConfigFile::kVrCockpitItemHandDefault);
+        RuntimeConfigFile::SetVrCockpitItemThrow(g_vrCockpitItemThrow);
 #if defined(__ANDROID__) || defined(MKW_PLATFORM_VISIONOS)
         g_vrHandTracking = RuntimeConfigFile::kVrHandTrackingDefault;
         RuntimeConfigFile::SetVrHandTracking(g_vrHandTracking);
@@ -1960,6 +2015,17 @@ void DrawDiagnosticsSettings() {
         ImGui::TextDisabled("OpenXR is not running, so nothing is logged until a VR session starts.");
     }
     ImGui::PopTextWrapPos();
+    if (ImGui::Checkbox("First-person camera logging", &g_firstPersonDiagnosticsLogging)) {
+        RuntimeConfigFile::SetDiagnosticsFirstPersonLogging(g_firstPersonDiagnosticsLogging);
+        mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Writes the first-person camera's anchor, view and kart pose, and the cockpit's\n"
+            "wheel and view checks, to console.log once per second during a race.\n"
+            "For reporting a misplaced first-person view. Off by default; it costs a little\n"
+            "game-thread time while on. Applies immediately and is remembered.");
+    }
 
     ImGui::Separator();
     const bool exporting = g_logExportInProgress.load(std::memory_order_acquire);

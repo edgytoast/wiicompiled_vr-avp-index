@@ -1,4 +1,4 @@
-// Optional GPU smoke test: a 60 Hz GX producer with an independent 90 Hz
+// Optional GPU smoke test: a 60 Hz GX producer with an independent headset-rate
 // compositor. Exercises the real frame worker, eye replay and submission sink.
 #include <aurora/aurora.h>
 #include <aurora/gfx.h>
@@ -9,9 +9,11 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <mutex>
 #include <thread>
@@ -56,6 +58,7 @@ static bool stop = false;
 static uint64_t completed = 0;
 static std::atomic_uint32_t submitted{0};
 static uint64_t wakeLateness = 0, submitTime = 0, skippedTicks = 0, compositorFrames = 0;
+static uint64_t headsetHz = 90, predictionLeadNanos = 40'000'000;
 
 static bool Provide(uint32_t, AuroraStereoFrame* output, void*) {
   std::lock_guard lock(packetMutex);
@@ -73,7 +76,7 @@ static void Submitted(const aurora::stereo::SinkFrame& frame, void*) noexcept {
   packetCv.notify_all();
 }
 static void Log(AuroraLogLevel level, const char* module, const char* message, unsigned int length) {
-  if (level >= LOG_WARNING)
+  if (level >= LOG_WARNING || std::strstr(message, "[vr-motion]") != nullptr)
     std::fprintf(stderr, "%s: %.*s\n", module, static_cast<int>(length), message);
 }
 
@@ -81,8 +84,12 @@ int main(int argc, char** argv) {
   // Extra distinct draws expose CPU uniform/replay costs that a single triangle
   // cannot exercise. Keep the eye targets small to isolate that regression.
   const unsigned drawCount = argc > 1 ? std::max(1, std::atoi(argv[1])) : 1;
+  const bool movingCamera = argc > 6 && std::atoi(argv[6]) != 0;
+  const bool particles = argc > 7 && std::atoi(argv[7]) != 0;
   const int mode = argc < 3 ? 1 : std::clamp(std::atoi(argv[2]), 0, 2);
-  const bool indexed = argc > 3 && std::atoi(argv[3]) != 0;
+  const bool indexed = !particles && argc > 3 && std::atoi(argv[3]) != 0;
+  headsetHz = argc > 4 ? std::clamp(std::atoi(argv[4]), 60, 120) : 90;
+  predictionLeadNanos = argc > 5 ? std::clamp(std::atoi(argv[5]), 0, 100) * 1'000'000ull : 40'000'000;
   std::filesystem::create_directories("stereo-smoke-cache");
   AuroraConfig config{};
   config.appName = "Aurora VR interpolation smoke";
@@ -95,11 +102,12 @@ int main(int argc, char** argv) {
   config.windowPosX = -30000;
   config.windowPosY = -30000;
   config.logCallback = Log;
-  config.logLevel = LOG_WARNING;
+  config.logLevel = LOG_INFO;
   config.xrInterop = true;
   aurora_initialize(argc, argv, &config);
   aurora_set_frame_interpolation_fps(0);
   aurora_set_stereo_frame_interpolation(mode != 0);
+  aurora_set_stereo_motion_logging(true);
   aurora_set_stereo_frame_provider(Provide, nullptr);
   aurora::stereo::set_sink(Encode, Submitted, nullptr);
 
@@ -107,7 +115,7 @@ int main(int argc, char** argv) {
     const auto start = Clock::now();
     uint64_t slot = 1;
     for (uint64_t token = 1;; ++token) {
-      const auto deadline = start + std::chrono::nanoseconds(slot * 1'000'000'000 / 90);
+      const auto deadline = start + std::chrono::nanoseconds(slot * 1'000'000'000 / headsetHz);
       WaitUntil(deadline);
       const auto woke = Clock::now();
       wakeLateness +=
@@ -119,11 +127,11 @@ int main(int argc, char** argv) {
         packet = {};
         packet.frameToken = token;
         packet.contentTag = 42;
-        // Wake to render the next display tick, as xrWaitFrame does, rather
-        // than announcing an image whose display deadline has already passed.
+        // A runtime can predict multiple frames ahead. This must not exhaust
+        // scene history while the producer and compositor maintain their rates.
         packet.displayTimeNanos =
             std::chrono::duration_cast<std::chrono::nanoseconds>(deadline.time_since_epoch()).count() +
-            1'000'000'000 / 90;
+            predictionLeadNanos;
         for (auto& eye : packet.eyes) {
           eye.width = 160;
           eye.height = 120;
@@ -146,7 +154,7 @@ int main(int argc, char** argv) {
       const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count();
       submitTime += std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - woke).count();
       ++compositorFrames;
-      const auto nextSlot = std::max(slot + 1, static_cast<uint64_t>(elapsed) * 90 / 1'000'000'000);
+      const auto nextSlot = std::max(slot + 1, static_cast<uint64_t>(elapsed) * headsetHz / 1'000'000'000);
       skippedTicks += nextSlot - slot - 1;
       slot = nextSlot;
     }
@@ -178,6 +186,19 @@ int main(int argc, char** argv) {
         std::chrono::duration_cast<std::chrono::nanoseconds>(boundary.time_since_epoch()).count(), 16'666'667);
     Mtx44 projection{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, -1, -1}, {0, 0, -1, 0}};
     Mtx transform{{1, 0, 0, static_cast<float>(frame % 60) * 0.01f}, {0, 1, 0, 0}, {0, 0, 1, -3}};
+    const float yaw = movingCamera ? std::sin(static_cast<float>(frame) * 0.08f) * 0.5f : 0;
+    Mtx sceneView{{std::cos(yaw), 0, std::sin(yaw), 0}, {0, 1, 0, 0}, {-std::sin(yaw), 0, std::cos(yaw), 0}};
+    if (movingCamera) {
+      transform[2][3] = -100000;
+      aurora_set_stereo_scene_view(&sceneView[0][0]);
+    }
+    const auto applyView = [&](Mtx viewed) {
+      for (unsigned row = 0; row < 3; ++row)
+        for (unsigned col = 0; col < 4; ++col)
+          viewed[row][col] = (col == 3 ? sceneView[row][3] : 0.f) +
+                             sceneView[row][0] * transform[0][col] + sceneView[row][1] * transform[1][col] +
+                             sceneView[row][2] * transform[2][col];
+    };
     GXSetProjection(projection, GX_PERSPECTIVE);
     GXSetCurrentMtx(GX_PNMTX0);
     GXSetViewport(0, 0, 160, 120, 0, 1);
@@ -195,12 +216,28 @@ int main(int argc, char** argv) {
     // Keep palette triangles small to limit fill cost during uniform stress.
     const float extent = indexed ? 0.02f : 1.0f;
     if (indexed) {
+      Mtx viewed;
+      applyView(viewed);
       for (unsigned matrix = 0; matrix < 10; ++matrix)
-        GXLoadPosMtxImm(transform, matrix * 3);
+        GXLoadPosMtxImm(viewed, matrix * 3);
     }
     for (unsigned draw = 0; draw < drawCount; ++draw) {
       transform[1][3] = static_cast<float>(draw % 20) * 0.01f;
-      GXLoadPosMtxImm(transform, GX_PNMTX0);
+      Mtx viewed;
+      applyView(viewed);
+      if (particles) {
+        // CPU-authored billboard centers, identity XF, current vertex shapes.
+        // Exercise the actual FIFO decoder, seal and late eye-uniform path.
+        Mtx identity{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}};
+        if (draw == 0) GXLoadPosMtxImm(identity, GX_PNMTX0);
+        GXBegin(GX_QUADS, GX_VTXFMT0, 4);
+        for (const auto& corner : {std::pair{-0.01f, -0.01f}, std::pair{0.01f, -0.01f},
+                                   std::pair{0.01f, 0.01f}, std::pair{-0.01f, 0.01f}})
+          GXPosition3f32(viewed[0][3] + corner.first, viewed[1][3] + corner.second, viewed[2][3]);
+        GXEnd();
+        continue;
+      }
+      GXLoadPosMtxImm(viewed, GX_PNMTX0);
       GXBegin(GX_TRIANGLES, GX_VTXFMT0, indexed ? 30 : 3);
       for (unsigned matrix = 0; matrix < (indexed ? 10u : 1u); ++matrix) {
         if (indexed)
@@ -248,6 +285,6 @@ int main(int argc, char** argv) {
               measuredSubmissions, elapsed, fps);
   aurora_shutdown();
   // More headset submissions must not come at the expense of simulation speed.
-  const double target = mode == 2 ? 75 : mode == 1 ? 90 : 60;
+  const double target = mode == 2 ? (headsetHz + 60) / 2.0 : mode == 1 ? headsetHz : 60;
   return 240 / elapsed > 55 && fps > target - 5 && fps < target + 5 ? 0 : 1;
 }

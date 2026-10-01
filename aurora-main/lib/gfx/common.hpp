@@ -321,6 +321,7 @@ struct StereoReplayFrame {
   std::array<StereoReplayEye, AURORA_STEREO_EYE_COUNT> eyes;
   // VR hands and synthetic wheel, drawn per eye after the world (gfx/cockpit.hpp).
   AuroraCockpit cockpit{};
+  AuroraCockpitItem cockpitItem{};
   // The immersive window (AuroraStereoFrame::window): each eye is masked to the
   // 2D layer's screen after its last draw (gfx/window_mask.hpp).
   bool window = false;

@@ -76,7 +76,11 @@ struct RuntimeUserConfig {
     std::optional<float> vrCockpitUnitsPerMeter;
     std::optional<bool> vrSteeringWheel;
     std::optional<bool> vrNativeSteeringWheel;
+    std::optional<bool> vrPlaceholderSteeringWheel;
+    std::optional<bool> vrObjectCulling;
     std::optional<bool> vrHandSteering;
+    std::optional<std::string> vrCockpitItemHand;
+    std::optional<bool> vrCockpitItemThrow;
     std::optional<bool> vrHandTracking;
     std::optional<float> vrWheelKartDegrees;
     std::optional<float> vrWheelBikeDegrees;
@@ -92,6 +96,7 @@ struct RuntimeUserConfig {
     // F10 > Diagnostics: OpenXR pacing and presentation logging in console.log.
     // Off unless set; it is a bug-report aid, not something to leave running.
     std::optional<bool> diagnosticsOpenXRLogging;
+    std::optional<bool> diagnosticsFirstPersonLogging;
     std::optional<float> audioVolume;
     std::optional<float> audioMusicVolume;
     std::optional<float> audioSoundEffectsVolume;
@@ -227,14 +232,34 @@ inline constexpr float kVrCockpitUnitsPerMeterDefault = 100.0f;
 inline constexpr float kVrCockpitUnitsPerMeterMin = 20.0f;
 inline constexpr float kVrCockpitUnitsPerMeterMax = 400.0f;
 // The vehicle's steering wheel or handlebar turns with the steering; the
-// vehicle's own model is animated unless native_steering_wheel is off, which
-// draws a separate VR wheel instead. Hand steering (grabbing that wheel with
-// the tracked controllers, by heurazy) comes with it: the stick still steers
-// until a grip actually takes hold of the wheel. Both launchers register
-// hand_steering with this same default.
+// vehicle's own model is animated unless native_steering_wheel is off.
+// placeholder_steering_wheel draws a separate VR wheel or handlebar whenever
+// the vehicle's own is not the one turning (native_steering_wheel off, or a
+// draw that does not take the animated copy); off, the vehicle's own is all
+// there is. Hand steering (grabbing that wheel with the tracked controllers,
+// by heurazy) comes with it: the stick still steers until a grip actually
+// takes hold of the wheel. Both launchers register hand_steering with this
+// same default.
 inline constexpr bool kVrSteeringWheelDefault = true;
 inline constexpr bool kVrNativeSteeringWheelDefault = true;
+inline constexpr bool kVrPlaceholderSteeringWheelDefault = false;
 inline constexpr bool kVrHandSteeringDefault = true;
+inline constexpr const char* kVrCockpitItemHandDefault = "left";
+// A quick swing of the item hand forward or back throws the item that way.
+inline constexpr bool kVrCockpitItemThrowDefault = true;
+// The game hides karts and objects its own camera cannot see, which a head
+// turn in VR reveals. object_culling false draws them anyway (see
+// vr/mkw_vr_culling.h); it only takes effect while VR is enabled. The PC
+// draws them by default; the Quest keeps the game's culling, since every
+// extra model costs its GPU twice. The macro is the same default for the
+// config file written on first launch.
+#if defined(__ANDROID__)
+inline constexpr bool kVrObjectCullingDefault = true;
+#define MKW_VR_OBJECT_CULLING_DEFAULT_TOML "true"
+#else
+inline constexpr bool kVrObjectCullingDefault = false;
+#define MKW_VR_OBJECT_CULLING_DEFAULT_TOML "false"
+#endif
 // The cockpit hands follow the headset's hand tracking (the controllers' touch
 // sensors while they are held, the cameras once they are put down, when bare
 // hands also drive). Opt-in on the Quest, which has controllers; on by default
@@ -579,9 +604,15 @@ inline void EnsureConfigFile() {
               "first_person_rotation = \"yaw_pitch\"\n"
               "# In the cockpit the vehicle's steering wheel or handlebar turns\n"
               "# with the steering. native_steering_wheel animates the vehicle's\n"
-              "# own model; false draws a separate VR wheel instead.\n"
+              "# own model. placeholder_steering_wheel draws a separate VR wheel\n"
+              "# or handlebar whenever the vehicle's own is not the one turning.\n"
               "steering_wheel = true\n"
               "native_steering_wheel = true\n"
+              "placeholder_steering_wheel = false\n"
+              "# The game hides karts and objects its own camera cannot see.\n"
+              "# object_culling = false draws them anyway, so a head turn or a\n"
+              "# look over the shoulder shows them; it costs GPU time.\n"
+              "object_culling = " MKW_VR_OBJECT_CULLING_DEFAULT_TOML "\n"
               "# Hand steering (by heurazy): squeeze a grip near the wheel or\n"
               "# handlebar to take hold of it with the tracked controllers, and\n"
               "# turn it to steer. Releasing both grips gives steering back to the\n"
@@ -591,6 +622,10 @@ inline void EnsureConfigFile() {
               "# (seconds) a hand that loses tracking keeps hold, and a short\n"
               "# pulse on grab and release. All changeable live from the F10 menu.\n"
               "hand_steering = true\n"
+              "# Show the settled inventory item in one cockpit hand: left, right, or off.\n"
+              "cockpit_item_hand = \"left\"\n"
+              "# Swing that hand forward or back to throw the item that way.\n"
+              "cockpit_item_throw = true\n"
               "wheel_kart_degrees = 90.0\n"
               "wheel_bike_degrees = 45.0\n"
               "wheel_grab_distance = 0.35\n"
@@ -864,7 +899,11 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
         readRangedFloat("cockpit_units_per_meter", kVrCockpitUnitsPerMeterMin, kVrCockpitUnitsPerMeterMax);
     config.vrSteeringWheel = FindConfigValue<bool>(document, "vr", "steering_wheel");
     config.vrNativeSteeringWheel = FindConfigValue<bool>(document, "vr", "native_steering_wheel");
+    config.vrPlaceholderSteeringWheel = FindConfigValue<bool>(document, "vr", "placeholder_steering_wheel");
+    config.vrObjectCulling = FindConfigValue<bool>(document, "vr", "object_culling");
     config.vrHandSteering = FindConfigValue<bool>(document, "vr", "hand_steering");
+    config.vrCockpitItemHand = FindConfigValue<std::string>(document, "vr", "cockpit_item_hand");
+    config.vrCockpitItemThrow = FindConfigValue<bool>(document, "vr", "cockpit_item_throw");
     config.vrHandTracking = FindConfigValue<bool>(document, "vr", "hand_tracking");
     config.vrWheelKartDegrees = readRangedFloat("wheel_kart_degrees", kVrWheelDegreesMin, kVrWheelDegreesMax);
     config.vrWheelBikeDegrees = readRangedFloat("wheel_bike_degrees", kVrWheelDegreesMin, kVrWheelDegreesMax);
@@ -876,6 +915,8 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
         readRangedFloat("wheel_tracking_grace", kVrWheelTrackingGraceMin, kVrWheelTrackingGraceMax);
     config.vrWheelHaptics = FindConfigValue<bool>(document, "vr", "wheel_haptics");
     config.diagnosticsOpenXRLogging = FindConfigValue<bool>(document, "diagnostics", "openxr_logging");
+    config.diagnosticsFirstPersonLogging =
+        FindConfigValue<bool>(document, "diagnostics", "first_person_logging");
 
     auto readVolume = [&](std::string_view key) -> std::optional<float> {
         auto value = FindConfigFloat(document, "audio", key);
@@ -1255,9 +1296,30 @@ inline bool SetVrNativeSteeringWheel(bool value) {
     return WriteSetting("vr", "native_steering_wheel", value ? "true" : "false");
 }
 
+inline bool SetVrPlaceholderSteeringWheel(bool value) {
+    Mutable().vrPlaceholderSteeringWheel = value;
+    return WriteSetting("vr", "placeholder_steering_wheel", value ? "true" : "false");
+}
+
+inline bool SetVrObjectCulling(bool value) {
+    Mutable().vrObjectCulling = value;
+    return WriteSetting("vr", "object_culling", value ? "true" : "false");
+}
+
 inline bool SetVrHandSteering(bool value) {
     Mutable().vrHandSteering = value;
     return WriteSetting("vr", "hand_steering", value ? "true" : "false");
+}
+
+inline bool SetVrCockpitItemHand(const std::string& value) {
+    if (value != "left" && value != "right" && value != "off") return false;
+    Mutable().vrCockpitItemHand = value;
+    return WriteSetting("vr", "cockpit_item_hand", "\"" + value + "\"");
+}
+
+inline bool SetVrCockpitItemThrow(bool value) {
+    Mutable().vrCockpitItemThrow = value;
+    return WriteSetting("vr", "cockpit_item_throw", value ? "true" : "false");
 }
 
 inline bool SetVrHandTracking(bool value) {
@@ -1695,6 +1757,17 @@ inline bool SetDiagnosticsOpenXRLogging(bool value) {
     return WriteSetting("diagnostics", "openxr_logging", value ? "true" : "false");
 }
 
+// The first-person camera's once-a-second anchor, view, pose and cockpit lines
+// (vr/mkw_vr_first_person.cpp): off unless someone is debugging the camera.
+inline bool DiagnosticsFirstPersonLogging(bool fallback = false) {
+    return Get().diagnosticsFirstPersonLogging.value_or(fallback);
+}
+
+inline bool SetDiagnosticsFirstPersonLogging(bool value) {
+    Mutable().diagnosticsFirstPersonLogging = value;
+    return WriteSetting("diagnostics", "first_person_logging", value ? "true" : "false");
+}
+
 inline std::string VrFirstPersonRotation(std::string fallback = kVrFirstPersonRotationDefault) {
     const auto& value = Get().vrFirstPersonRotation;
     return value && IsSupportedVrFirstPersonRotation(*value) ? *value : std::move(fallback);
@@ -1732,8 +1805,25 @@ inline bool VrNativeSteeringWheel(bool fallback = kVrNativeSteeringWheelDefault)
     return Get().vrNativeSteeringWheel.value_or(fallback);
 }
 
+inline bool VrPlaceholderSteeringWheel(bool fallback = kVrPlaceholderSteeringWheelDefault) {
+    return Get().vrPlaceholderSteeringWheel.value_or(fallback);
+}
+
+inline bool VrObjectCulling(bool fallback = kVrObjectCullingDefault) {
+    return Get().vrObjectCulling.value_or(fallback);
+}
+
 inline bool VrHandSteering(bool fallback = kVrHandSteeringDefault) {
     return Get().vrHandSteering.value_or(fallback);
+}
+
+inline std::string VrCockpitItemHand() {
+    const std::string value = Get().vrCockpitItemHand.value_or(kVrCockpitItemHandDefault);
+    return value == "left" || value == "right" || value == "off" ? value : kVrCockpitItemHandDefault;
+}
+
+inline bool VrCockpitItemThrow(bool fallback = kVrCockpitItemThrowDefault) {
+    return Get().vrCockpitItemThrow.value_or(fallback);
 }
 
 inline bool VrHandTracking(bool fallback = kVrHandTrackingDefault) {

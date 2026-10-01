@@ -15,6 +15,22 @@ static RuntimeUserConfig Parse(const std::string& text) {
 }
 
 int main() {
+    for (std::string_view hand : {"left", "right", "off"}) {
+        Require(Parse("[vr]\ncockpit_item_hand = \"" + std::string(hand) + "\"\n")
+                    .vrCockpitItemHand == std::string(hand));
+    }
+    Require(std::string_view(RuntimeConfigFile::kVrCockpitItemHandDefault) == "left");
+    Require(!Parse("[vr]\n").vrCockpitItemHand.has_value());
+    Require(!Parse("[vr]\ncockpit_item_hand = 1\n").vrCockpitItemHand.has_value());
+    Require(RuntimeConfigFile::kVrCockpitItemThrowDefault);
+    Require(Parse("[vr]\ncockpit_item_throw = false\n").vrCockpitItemThrow == false);
+    Require(Parse("[vr]\ncockpit_item_throw = true\n").vrCockpitItemThrow == true);
+    Require(!Parse("[vr]\n").vrCockpitItemThrow.has_value());
+    // [vr] placeholder_steering_wheel: the separate VR wheel or handlebar is opt-in.
+    Require(!RuntimeConfigFile::kVrPlaceholderSteeringWheelDefault);
+    Require(Parse("[vr]\nplaceholder_steering_wheel = true\n").vrPlaceholderSteeringWheel == true);
+    Require(Parse("[vr]\nplaceholder_steering_wheel = false\n").vrPlaceholderSteeringWheel == false);
+    Require(!Parse("[vr]\n").vrPlaceholderSteeringWheel.has_value());
     // [vr] foveation: the Quest's foveated rendering level, index-matched to
     // aurora_set_stereo_foveation.
     for (std::string_view level : RuntimeConfigFile::kVrFoveationLevels) {
@@ -40,6 +56,20 @@ int main() {
     Require(!Parse("[vr]\n").vrHandTracking.has_value());
     Require(!Parse("[vr]\nhand_tracking = 1\n").vrHandTracking.has_value());
     Require(!RuntimeConfigFile::kVrHandTrackingDefault);
+
+    // [vr] object_culling: false draws what the game camera culls. The PC
+    // defaults to that; the Quest keeps the game's culling.
+    Require(Parse("[vr]\nobject_culling = true\n").vrObjectCulling == true);
+    Require(Parse("[vr]\nobject_culling = false\n").vrObjectCulling == false);
+    Require(!Parse("[vr]\n").vrObjectCulling.has_value());
+    Require(!Parse("[vr]\nobject_culling = 0\n").vrObjectCulling.has_value());
+#if defined(__ANDROID__)
+    Require(RuntimeConfigFile::kVrObjectCullingDefault);
+    Require(std::string_view(MKW_VR_OBJECT_CULLING_DEFAULT_TOML) == "true");
+#else
+    Require(!RuntimeConfigFile::kVrObjectCullingDefault);
+    Require(std::string_view(MKW_VR_OBJECT_CULLING_DEFAULT_TOML) == "false");
+#endif
 
     // [vr] immersive_window and flat_screen: one race view in two keys, Flat
     // Screen mode winning, so a file that predates the window reads as before.

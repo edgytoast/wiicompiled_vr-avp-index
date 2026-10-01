@@ -7,6 +7,7 @@
 // and hand steering".
 #pragma once
 #include "common.hpp"
+#include "cockpit_item.hpp"
 #include "../webgpu/gpu.hpp"
 #include <array>
 #include <atomic>
@@ -251,12 +252,44 @@ inline void build_geometry(const AuroraCockpit& cockpit, std::vector<Vertex>& ve
     else glove(vertices,hand,side);
   }
 }
+inline void append_item_badge(const AuroraCockpit& cockpit,const AuroraCockpitItem& item,
+                              std::vector<Vertex>& vertices) {
+  if(!item.valid || item.hand>1 || item.count<1 || item.count>3 ||
+     (item.id!=5 && item.id!=16 && item.id!=17 && item.id!=18) ||
+     !cockpit.hands[item.hand].tracked || !cockpit_item::has_model(item.id)) return;
+  const auto& hand=cockpit.hands[item.hand];
+  if(hand.jointsValid && !joints_finite(hand)) return;
+  M frame;
+  if(!cockpit_item::seat_from_item(hand,frame)) return;
+  // In the item's upright frame, beside the widest model on the hand's outer
+  // side, facing the player like the item.
+  const float side=item.hand==0?-1.0f:1.0f;
+  const size_t first=vertices.size();
+  const V base{side*0.095f,0.035f,0.0f};
+  ellipsoid(vertices,base,{0.016f,0.020f,0.004f},{0.05f,0.08f,0.13f});
+  // A tiny raised seven-segment digit stays legible without creating another
+  // textured game asset. One model is held for every triple inventory ID.
+  const uint8_t digit=item.count==1?0x06:item.count==2?0x5b:0x4f;
+  const V white{0.95f,0.98f,0.85f};
+  const auto segment=[&](int bit,float x0,float y0,float x1,float y1) {
+    if(digit&(1u<<bit)) tube(vertices,add(base,{x0,y0,0.005f}),add(base,{x1,y1,0.005f}),0.0016f,white,5);
+  };
+  segment(0,-0.007f, 0.010f, 0.007f, 0.010f);
+  segment(1, 0.008f, 0.009f, 0.008f, 0.001f);
+  segment(2, 0.008f,-0.001f, 0.008f,-0.009f);
+  segment(3,-0.007f,-0.010f, 0.007f,-0.010f);
+  segment(4,-0.008f,-0.009f,-0.008f,-0.001f);
+  segment(5,-0.008f, 0.001f,-0.008f, 0.009f);
+  segment(6,-0.007f, 0.0f, 0.007f, 0.0f);
+  for(size_t i=first;i<vertices.size();++i) vertices[i].position=point(frame.data(),vertices[i].position);
+}
 inline std::vector<Vertex> geometry(const AuroraCockpit& cockpit) {
   std::vector<Vertex> result;build_geometry(cockpit,result);return result;
 }
 inline std::atomic<uint64_t> meshRevision{1};
 inline std::vector<Vertex> frameVertices;
 inline AuroraCockpit cachedCockpit{};
+inline AuroraCockpitItem cachedCockpitItem{};
 inline uint64_t cachedMeshRevision=0;
 inline wgpu::RenderPipeline pipeline;
 struct SceneDepth {
@@ -268,7 +301,7 @@ inline bool pipelineReversedDepth=false;
 inline wgpu::TextureFormat pipelineFormat{}, pipelineDepthFormat{};
 inline std::array<wgpu::Buffer,2> vertexBuffers;
 inline std::array<uint64_t,2> vertexCapacity{};
-inline void shutdown() { pipeline=nullptr;pipelineSamples=0;vertexBuffers={};vertexCapacity={};cachedMeshRevision=0;frameVertices.clear(); }
+inline void shutdown() { pipeline=nullptr;pipelineSamples=0;vertexBuffers={};vertexCapacity={};cachedMeshRevision=0;cachedCockpitItem={};frameVertices.clear();cockpit_item::shutdown(); }
 inline void render(wgpu::CommandEncoder& cmd,const StereoReplayFrame& frame,uint32_t eye,SceneDepth sceneDepth={},
                    const wgpu::RenderPassEncoder* existingPass=nullptr) {
   if(!frame.cockpit.active || !sceneDepth.valid) return;
@@ -308,9 +341,11 @@ inline void render(wgpu::CommandEncoder& cmd,const StereoReplayFrame& frame,uint
     pipelineReversedDepth=reversedDepth;pipelineDepthFormat=target.depthFormat;
   }
   const auto revision=meshRevision.load();
-  if(cachedMeshRevision!=revision || std::memcmp(&cachedCockpit,&frame.cockpit,sizeof(AuroraCockpit))!=0) {
+  if(cachedMeshRevision!=revision || std::memcmp(&cachedCockpit,&frame.cockpit,sizeof(AuroraCockpit))!=0 ||
+     std::memcmp(&cachedCockpitItem,&frame.cockpitItem,sizeof(AuroraCockpitItem))!=0) {
     build_geometry(frame.cockpit,frameVertices);
-    cachedCockpit=frame.cockpit;cachedMeshRevision=revision;
+    append_item_badge(frame.cockpit,frame.cockpitItem,frameVertices);
+    cachedCockpit=frame.cockpit;cachedCockpitItem=frame.cockpitItem;cachedMeshRevision=revision;
   }
   const auto& vertices=frameVertices;
   if(vertices.empty()) return;
@@ -348,6 +383,7 @@ inline void render(wgpu::CommandEncoder& cmd,const StereoReplayFrame& frame,uint
   // Mark only depth-visible samples; later virtual-screen draws test for zero.
   pass.SetStencilReference(1);
   pass.SetPipeline(pipeline);pass.SetVertexBuffer(0,buffer);pass.Draw(clip.size());
+  cockpit_item::render(pass,frame,eye,sceneDepth.z,sceneDepth.constant);
   pass.SetStencilReference(0);
   if(!existingPass) pass.End();
 }

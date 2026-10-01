@@ -64,7 +64,11 @@ first_person_hidden_model = 0
 first_person_rotation = "yaw_pitch"
 steering_wheel = true
 native_steering_wheel = true
+placeholder_steering_wheel = false
+object_culling = false
 hand_steering = true
+cockpit_item_hand = "left"
+cockpit_item_throw = true
 performance_level = "boost"
 ```
 
@@ -125,13 +129,16 @@ scenes continue at the game's rate; assess interpolation during an immersive rac
 
 VR interpolation is independent of **Graphics > Race frame interpolation**. The simulation,
 physics, audio and VI remain at 60 Hz. Scene motion is delayed by one game frame (about 16.7 ms)
-to interpolate between known transforms; each rendered eye pair uses a fresh predicted head
-pose. This needs enough GPU headroom to render both eyes at the target rate, and carries the
+to interpolate between known transforms. A monotonic scene playback clock is anchored when
+continuous history starts and follows the VI cadence without following per-frame seal jitter.
+Each rendered eye pair still uses a fresh predicted head pose. In particular, a runtime predicting
+head poses 40-60 ms ahead must not advance scene playback beyond its known endpoints.
+This needs enough GPU headroom to render both eyes at the target rate, and carries the
 desktop interpolator's experimental artifacts, especially for unmatched or changing geometry.
 
 Refresh detection uses `XR_FB_display_refresh_rate` when available and the OpenXR predicted
 display period otherwise. Interpolation requires `XR_KHR_win32_convert_performance_counter_time`
-to relate those display deadlines to the game's clock; the menu reports if it is unavailable.
+for the packet's display-time metadata; the menu reports if it is unavailable.
 The old Eager Frame Heartbeat option has been removed and existing `eager_frame_heartbeat`
 settings are ignored. Completed rendering wakes the XR thread immediately. A 50 ms keep-alive
 still protects pauses and window dragging without eager repeats during rendering.
@@ -205,8 +212,7 @@ a render pass at every GX copy, because the copy reads what was drawn before it;
 copies the desktop image made and never performs them, so it keeps drawing in the pass it has open,
 and it leaves out whatever a later clear of the whole color and depth erases. The picture is the
 same with less GPU memory traffic, which a tiled mobile GPU pays for at every split (the "Eye replay
-plan" log line reports each new pass structure). On the Quest, `debug.wiicompiled.eye_passes 0`
-replays one render pass per recorded pass again, for A/B timing (`docs/quest-port.md`).
+plan" log line reports each new pass structure).
 `first_person` and the `first_person_*` values are the first-person camera described below. All
 four are live and are also exposed in the F10 settings bar.
 `performance_level` is the level asked of the runtime through `XR_EXT_performance_settings` for
@@ -304,6 +310,43 @@ see [Steering wheel and hand
 steering](#steering-wheel-and-hand-steering). Turning the wheel moves the controllers, and the game's
 own motion detection still reads them, so a sharp enough turn can read as a shake.
 
+**Held item.** `cockpit_item_hand` accepts `"left"` (default), `"right"`, or `"off"` and is also
+available in F10 > VR. In cockpit view, the selected tracked hand holds one item model from the
+game's `Race/Common.szs` after the roulette settles. The item stands upright just above the palm
+with its front toward the player. It turns only with the hand's heading, so rolling or tilting the
+hand never tips it over. Triple items show their remaining inventory count beside the model, facing
+the player. The display follows player 1's inventory: using, losing, or deploying the
+item removes it from the hand even if a deployed object remains near the kart. Stick steering and
+the existing item buttons still work. The imported models use their static bind pose; item effects
+and animations are not reproduced in the hand. Each material is drawn from its own data: texture
+layers with their wrap modes, SRT and environment mapping, vertex colours, culling, blending and up
+to four TEV stages. Only the lighting is approximated, by a fixed cockpit light in place of the
+course's light set.
+
+**Throwing the held item.** With `cockpit_item_throw` on (the default; F10 > VR and the Quest
+launcher), a quick swing of the item hand forward throws the item ahead of the kart, and a swing back
+throws it behind. The swing plays what the game reads for an aimed throw: the stick pushed fully
+forward or back, the item button (the left trigger: Z, or the GameCube's L) pressed and released
+while it stays pushed, then the stick handed back. Items used on the press and items thrown on the
+release (a trailed shell or banana) both see the aim. Swinging while holding the item button throws
+the trailed item, and that held button is then ignored until it is let go, so it does not use the
+next item of a triple. Only the stick's Y axis moves, so a held wheel keeps steering. A swing counts
+when the hand covers enough ground along the seat's forward axis within a short window, mostly
+along that axis, and is still moving that way: with a controller 18 cm forward or 15 cm back within
+0.12 s. A bare hand gets an easier profile, 15 cm forward or 13 cm back within 0.15 s. The headset's
+cameras lag and smooth a bare hand, and often lose it for a few frames in the middle of a fast swing.
+A loss of up to 0.2 s (0.1 s for a controller) is bridged by the positions either side of it. The
+window counts only tracked time, and across a gap the swing must still average 70 % of the window's
+speed, so a slow drift the cameras briefly lost never throws. Reaching for the wheel, bringing a
+hand back to rest, a sideways sweep and the upward flick of a trick never throw either. The hand
+must not be holding the wheel and must have been free for a quarter of a second, and after a throw
+the next one waits 0.6 s. It works with controllers and tracked hands, in both controller modes, and
+a short pulse confirms it. Each throw's line in the run log gives what the swing measured (for
+example `Held item thrown forward (bare hand, 21 cm in 150 ms, across a tracking gap)`).
+Mario Kart Wii reads tricks and wheelies from the Wii Remote's accelerometer only
+(`MotionController::UpdateForNunchuck` never reads the Nunchuk's), so a swing of the left hand cannot
+trick. With the item in the right hand, a hard swing can also read as a shake of the remote.
+
 **Bare hands.** On the Quest, with `hand_tracking` on and the controllers put down, the hands drive
 `khr/simple_controller`: a right pinch is A with the pointer on the hand's aim ray, the left
 palm-up pinch is + (pause), and in the cockpit, while a hand holds the wheel, that hand holds A and
@@ -384,8 +427,7 @@ never shows an unwritten panel. The quad hangs exactly where the pointer's hits 
 If a backend cannot make the panel's swapchains, it logs that once and the panel is drawn into the
 eye images instead: through the eye's frustum and `viewFromCenter` onto the screen rectangle for an
 immersive eye (including headset-rate interpolated eyes, which reuse the texture), and as a centred
-rectangle on a virtual-screen eye image. On the Quest, `adb shell setprop
-debug.wiicompiled.panel_layer 0` switches to that path at run time, to compare the two.
+rectangle on a virtual-screen eye image.
 
 Measured on a Quest 3 (base game, a Grand Prix start with the player idle, `render_scale = 0.8`,
 60 FPS, eight interleaved rounds per state), the layer costs nothing while the panel is closed. While
@@ -409,14 +451,22 @@ to the local driver's head instead, at one of two seats:
 - `first_person_seat = "cockpit"`, the default, sits you at the driver's own eyes, behind the
   steering wheel, at a life-size scale, so the wheel or handlebar is within reach of your hands.
   The eye is measured once per race from the character's head bone, while the kart drives straight,
-  undamaged and at normal size, and then frozen; until then the bind pose, or the vehicle's authored
-  seat height, stands in. It is kept at least 0.45 m behind the wheel so a long face or a
-  leaned-forward riding pose cannot put it over the controls. The world scale is
+  undamaged and at normal size, and then frozen. Custom models without a separate eye mesh use
+  the animated head with a small upward/forward offset; until calibration completes the bind pose,
+  or the vehicle's authored seat height, stands in. Rejected measurements never alter that fallback.
+  Eight consecutive samples must stay within two units of the first sample, so a slowly moving
+  starting animation cannot qualify just by moving little each frame. The eye is kept at least
+  0.45 m behind the wheel and at most 0.40 m above the neutral hand targets, so long faces and necks
+  do not leave the controls below comfortable reach. The world scale is
   `cockpit_units_per_meter` (default 100) multiplied by the character's eye height over 100 units,
   so tall characters sit at a comparable height, and by the player's current size, so a lightning
   strike or a mega mushroom resizes the view, the wheel and the grab reach together. The seat
   follows the simulation's position and driving direction, never the animated chassis, so damage
   spins and tricks do not throw it around.
+  **Recenter view** (including its key binding) and headset reference-space recentering request a
+  fresh cockpit calibration as well as resetting the headset position. The previous seat stays
+  in place until a new stable, neutral measurement is ready; then height and wheel clearance are
+  recalculated together. Recenter while driving straight at normal size to replace a bad initial seat.
 - `first_person_seat = "custom"` places the head at `first_person_head_up_meters` and its two
   companions in the kart's own frame, at `first_person_units_per_meter`.
 
@@ -480,10 +530,57 @@ only, so the other racers are untouched, and the original values are restored wh
 stops or the race ends. This is the one place the first-person camera modifies the game rather than
 only reading it.
 
-One limitation is worth knowing: Mario Kart still culls the scene from its own chase camera, so a
-wide head turn in first person can reveal the edge of what the game decided to draw. As with the
-rest of the race instrumentation, the object offsets this reads are specific to the project's
-supported PAL `RMCP01` translation.
+In cockpit view, your Bullet Bill keeps its animated arms but hides the body, eyes and rear
+exhaust cone, which otherwise fills the view from inside. The runtime resolves the local racer's
+Killer model and registers its rigid body position arrays with the renderer for that frame.
+Only draws at that Bullet Bill's own model-view transform are skipped; opponents sharing the
+model, arm joints, and the separate ground shadow remain visible. The requests are cleared after
+the frame and when cockpit view stops. This changes rendering only, without modifying game assets
+or the item's behaviour. `mkw_vr_bullet_bill_tests` and Aurora's `HiddenModelTest` cover body/arm
+selection, malformed models, instance matching, and both FIFO and raw draw paths.
+
+As with the rest of the race instrumentation, the object offsets this reads are specific to the
+project's supported PAL `RMCP01` translation.
+
+### Object culling
+
+Mario Kart hides what its own chase camera cannot see, and that camera does not know where the
+headset is looking. Turn your head far enough in an immersive race, or look over your shoulder
+in first person, and karts, characters and course objects are simply missing until the game
+camera catches up; the race intro's pan shows it too, since the other racers are culled from the
+intro camera's narrow view. `object_culling = false` (F10 > Camera > Object culling, also on the
+headset settings panel's Camera tab) draws them anyway, and takes effect immediately. That is
+the PC's default. The Quest defaults to `true`, the game's own culling, because every model
+drawn costs its GPU twice, once per eye.
+
+Measured on a Quest 3 (base game, the first Grand Prix race at Luigi Circuit after the intro, player
+idle, first-person cockpit, `render_scale = 0.8`, foveation medium, six interleaved rounds per
+state, GPU clock fixed at 492 MHz), turning culling off kept 60 FPS in the game and the headset:
+
+| Culling | Draw calls a frame | Both eyes | App GPU per frame | GPU load | CPU load |
+| --- | --- | --- | --- | --- | --- |
+| On | 352 | 7.4 ms | 9.7 ms | 67% | 54% |
+| Off | 482 | 8.9 ms | 11.0 ms | 74% | 64% |
+
+A track that already keeps the Quest's GPU near its limit, such as Retro Rewind's SNES Ghost Valley
+2, would lose headset frames to the extra eye time, hence the Quest default.
+
+The game culls in two places, and the switch covers both. NW4R's scene gather tests each model's
+bounding box against the camera frustum (`nw4r::math::FRUSTUM::IntersectAABB_Ex`); with culling
+off that test reports every box as partially inside. Mario Kart's own `ClipInfoMgr` then tests
+each kart, item and object against per-screen side planes derived from the camera
+(`ClipInfoMgr::UpdateScreenInfo`); with culling off those planes carry zero normals, which no
+model can be beyond. Both functions are replaced by faithful native reimplementations in
+`runtime/src/vr/mkw_vr_culling.cpp`, so with culling on they compute exactly what the translated
+originals did. `mkw_vr_culling_tests` covers the frustum test. What stays as the game decides
+it: the draw distance, the course's area-based clipping groups, and every gameplay rule, since
+none of this changes physics or object updates.
+
+The setting only takes effect while VR is enabled (a session that fell back to the desktop for
+want of a headset included), and not in the Flat screen race view, which shows the game camera's
+own view. It costs GPU time: every model the camera would have dropped is drawn for
+both eyes. On the Quest, where the eye passes are geometry-bound, leave
+it on unless the missing racers bother you more than the frame time.
 
 ## Steering wheel and hand steering
 
@@ -510,9 +607,16 @@ guest's own vertices are never written, and the copies are dropped after the fra
 turn their handle part in the game already; its copy is only re-seated on the cockpit frame so the
 bars stay with your hands while the bike banks. The wheel rides in the same frame as the view: the
 level seat for `"yaw"`, the kart's own orientation for `"yaw_pitch"` and `"full"`. While no draw takes
-the copy (for 30 frames running; the race's opening pan does this) a separate VR wheel stands in,
-which is also what `native_steering_wheel = false` draws. The copy keeps being published, so the
-vehicle's own wheel returns as soon as draws take it again, and the log notes both switches.
+the copy (for 30 frames running; the race's opening pan does this) the vehicle's own is drawn as
+the game poses it. The copy keeps being published, so the vehicle's own wheel turns again as soon as
+draws take it again, and the log notes both switches.
+
+**The placeholder wheel.** `placeholder_steering_wheel = true` (off by default; F10 and the Quest
+launcher's Settings > VR) draws a separate VR wheel for karts, or handlebar for bikes, whenever the
+vehicle's own is not the one turning: with `native_steering_wheel = false`, and during the stretches
+above where no draw takes the copy. Off, only the vehicle's own is seen, and the hands reach for it wherever its geometry is known,
+turning or not; where it is not (a kart whose grips were not found), they reach for where the
+placeholder would stand, in front of the seat.
 
 Validated on the extracted PAL disc's 216 single-player kart/character and Mii combinations
 (all 18 kart types): each resolves its node-0 bone as the runtime does and selects the complete
@@ -726,11 +830,52 @@ latency, runtime throttling and visible blackouts.
 
 With VR interpolation enabled, Aurora retains each sealed race's command stream and matched
 previous/current transform uniforms. New OpenXR packets wake the frame worker between game
-frames. It interpolates at the requested display time, then applies that packet's head pose and
+frames. It interpolates at the local scene playback time, then applies that packet's predicted head pose and
 the scene anchor to both eyes. Native offscreen effects and the 2D HUD retain their game-frame
 updates. A mid-frame EFB readback invalidates retained GPU data; a policy-tag mismatch rejects
 the replay. Missing matches use current transforms, and stalls clamp at the last known pose
 instead of extrapolating. The ordinary desktop interpolation settings remain independent.
+
+Matched rigid draws retain transform history through rotations over 90 degrees per game frame
+(such as spinning kart tires); large spins use spherical interpolation to preserve angular speed
+and wheel shape. A one-matrix draw is split into a rotation and an upper-triangular stretch
+(scale and shear), so a sheared matrix interpolates too. Lakitu sways by tilting his whole
+body's Y axis (`Lakitu::Movement::UpdateScale`): his goggles and eyes ride his face bone as
+one-matrix draws, and his head is skinned to that same bone. When the shear was rejected, the
+goggles stayed on the game frame while the head moved on, and sank into it. Camera/seat
+anchors keep their conservative cut and rigidity guards, and draw translation, matrix validity
+and indexed-palette topology checks still apply. Exact mesh/pipeline identity can
+also retain motion across texture-pattern swaps, as used by the Waluigi Stadium crowd. The crowd's
+image animation itself still updates at the game's cadence; its transform can move at the headset
+rate without snapping whenever the image changes.
+
+For single-player races the guest thread also publishes the recorded scene camera with the
+frame. VR matching and previous transform endpoints are expressed in the current camera's
+coordinates, while replay samples the world-space camera/seat pose separately. Camera turns
+therefore do not trip the 1500-unit object-motion guard on distant scenery. Held particles,
+new objects and rejected billboard animations also follow that sampled camera instead of
+mixing a current-frame view with an interpolated seat. Direct vertices already in view space
+with an identity position matrix retain that matrix, avoiding a second camera transform.
+Particle simulation and texture/vertex animation still run at the game rate. Actual teleports,
+camera cuts and malformed view matrices retain their guards. Multi-camera frames and hosts
+that do not publish a view keep the existing interpolation path.
+
+CPU-built particle quads are paired one quad at a time, and only where the pairing is
+unambiguous. An emitter draws many look-alike quads: a boost speed line (`rk_koukasen`) is two
+crossed 12 × 300 quads, two new lines start on the same ring every frame, and each moves
+further per frame than the gap to its neighbours. Pairing nearest centres swapped about half
+of them and swept every new line in from one that had just died. Each quad therefore also
+records its two edges. A pair must change shape by less than 30%, each side must prefer the
+other, and its cost (squared centre distance plus squared edge change) must beat the runner-up
+among other particles by 1.5×. The two quads of one cross share a centre and do not count as
+rivals. A particle already tracked must land within a quarter of its last step of its
+predicted position. A particle without a path is read two ways, fixed in the world or carried
+with the camera, and the group follows the reading that fits its tracked particles: carried
+ones step less in camera space. A first step is drawn moving only when both readings choose
+it; otherwise it just seeds the path. An unpaired quad is held where the game drew it: in
+camera space when its group follows the camera (speed lines, kart sparks), in the world
+otherwise (smoke left behind). Groups with more than 4096 candidate pairs are held without
+matching.
 
 The D3D12 pacing thread retains the last completed projection or virtual-screen layer and
 resubmits it during stalls, including while moving the desktop window,
@@ -829,8 +974,8 @@ that keeps the colour inside the window with alpha 1 and leaves transparent blac
 one-pixel ramp at the edge. The triangle carries, at each corner, where that pixel's ray meets the
 window's plane in homogeneous window coordinates (`stereo_replay::window_mask`), which interpolate
 exactly across the image. It is drawn in the eye's own last render pass, so it adds no pass and no
-tile load; an eye replayed one render pass per recorded pass (`debug.wiicompiled.eye_passes 0`)
-gives it a pass of its own, as the cockpit overlay has. On
+tile load; an eye that is still split into several render passes gives it a pass of its own, as
+the cockpit overlay has. On
 the Quest the backend submits the passthrough layer, then the projection layer with
 `XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT` (premultiplied alpha), then the settings panel.
 The flag travels with the packet, so the eyes Aurora masked and the layer that blends them always
@@ -851,8 +996,6 @@ reprojects it like any other. Aurora copies the smaller eye into the corner of t
 (`vulkan_interop.cpp`), and does not foveate these eyes: their field of view follows the head, which
 would rebuild the density map every frame, and they are small already. The PC backends copy whole eyes
 into the swapchain, so there the window's eyes stay full size and masked.
-`adb shell setprop debug.wiicompiled.window_eyes 0` renders them whole and masked on the Quest too, to
-compare the two within one session.
 
 Measured on a Quest 3 with a Retro Rewind race paused (the same 439 draw calls every frame,
 `render_scale` 1.0, 60 FPS throughout), switching the race view from the headset panel:
@@ -865,7 +1008,7 @@ Measured on a Quest 3 with a Retro Rewind race paused (the same 439 draw calls e
 The headset raised the GPU's level for the fully immersive race and it still took longer: in clock
 cycles the window's frame is about 42% cheaper (5.0 against 8.6 million), which lets the Quest keep the
 GPU at its lowest level. The compositor's extra time is the passthrough. During a race at `render_scale`
-0.8, switching `debug.wiicompiled.window_eyes`, both eyes took 6.3 to 7.5 ms through the window against
+0.8, switching the two with a temporary debug property, both eyes took 6.3 to 7.5 ms through the window against
 9.1 to 9.5 ms whole and masked at similar draw counts (the compositor's `SF` field read 0.31 against
 0.80), with the clock wandering between 350 and 600 MHz. The saving is smaller than the eye's pixels
 (about 13% of a whole eye's) would suggest because much of an eye's cost is the geometry of every draw,
@@ -911,8 +1054,8 @@ that reason (its bloom chain splits the frame about 20 times). An eye is therefo
 when it is drawn in a single render pass, as every eye is by default; an eye that a partial clear still
 splits is drawn at full rate. The session log reports what happened: "Fragment density maps:
 enabled" at startup, one "eye foveation" line per eye and level with the map's size, and the "Eye
-replay plan" lines. `debug.wiicompiled.foveation <0-3>` overrides the level for A/B timing, and
-`debug.wiicompiled.fdm 0` launches without density maps at all (`docs/quest-port.md`).
+replay plan" lines. `debug.wiicompiled.fdm 0` launches without density maps at all
+(`docs/quest-port.md`).
 
 What it saves depends on how much of an eye's cost is shading pixels. The numbers below are from a
 Quest 3 at Luigi Circuit's Grand Prix start: GPU time of both eyes per frame, all settings
@@ -938,7 +1081,7 @@ did (39 to 41.5 FPS).
 
 ## Diagnostics
 
-**F10 > Diagnostics** holds two bug-report aids.
+**F10 > Diagnostics** holds three bug-report aids.
 
 **OpenXR diagnostic logging** is off by default. When it is off, each hook on the pacing thread is
 one atomic test. It applies immediately and is remembered as:
@@ -959,6 +1102,31 @@ When it is on, `console.log` receives lines tagged `[runtime] [xr-diag]`
   than 0.5° or 0.5 mm. It gives per-eye FOV half-angles, the eye cant (the angle between the two
   eyes' forward axes: 0 for parallel displays, non-zero for canted ones such as Pimax without
   parallel projections), and the IPD.
+- **Scene motion (`[vr-motion]`).** With VR interpolation active, Aurora logs a separate
+  one-second summary. `blended`, `previous`, and `current` count samples inside the two
+  known scene endpoints or clamped to either endpoint. `discontinuous` counts samples
+  without continuous history/timing. `same-time` and `backwards` compare the sampled
+  game-scene timeline, not head poses, pixels, or compositor submission FPS. Persistent
+  `same-time` with fresh XR layers can explain smooth head tracking but juddering steering.
+  The latest `sample-boundary` and `weight` expose exhausted scene history; `display-boundary`
+  and `prediction-lead` describe the independent runtime head-prediction horizon.
+  Latest draw counts distinguish identity `matched` from transform `prepared`; `rejected`
+  means a paired draw failed the transform guards. Unmatched draws can also snap, and
+  these counts do not measure GPU time. `max-rejected` is the highest rejection count
+  observed during the window. `scene-step` gives minimum/maximum forward scene-time
+  advancement per sample in milliseconds; steady 90 Hz scene motion should advance about
+  11.11 ms each time, even when every submission is fresh. Enable the same renderer log with
+  `debug.wiicompiled.fpslog=1` on Android, or `AURORA_VR_MOTION_LOG=1` in the environment
+  before launching a host that does not use OpenXR.
+
+  `camera-separated=true` confirms the frame used the published scene camera and the separate
+  camera/object interpolation path. If false during a single-player race, include that in the
+  capture so a missing/invalid camera publication can be distinguished from object rejection.
+  For steering judder, capture a single-player race with **VR frame interpolation = Auto**
+  (the Graphics interpolation setting is separate). Keep the headset refresh, render scale,
+  camera mode, and opponent count fixed. Compare a stationary head while alternating steering
+  left/right with a stationary kart while turning the head. On PC, keep SSW disabled for this
+  capture so generated compositor frames do not mask the application's scene cadence.
 - **A one-second summary.** Timings are `median/worst` in milliseconds; for `end-margin`, worst is
   the minimum.
 
@@ -1014,6 +1182,18 @@ problems. This instrumentation does not change frame pacing or inspect image pix
   Reference-space change events are never rate-limited.
 - **Presentation changes.** While logging is on, every `[mkw-vr] presentation=` transition is
   logged, not just the first 16.
+
+**First-person camera logging** is off by default as well. When it is on, a race in first person
+writes a set of `[mkw-vr] first-person` and `[mkw-vr] cockpit` lines to `console.log` once per
+second: the anchor's head offset from the race camera, the scene's view matrix and the kart's
+physics pose (with the raw bits of its translation), where each candidate camera sits relative to
+the kart, and the cockpit's wheel placement and race-camera check. They are the first thing to
+read when the first-person view is misplaced. It applies immediately and is remembered as:
+
+```toml
+[diagnostics]
+first_person_logging = false
+```
 
 **Export Logs** opens the system folder picker. It then creates a
 `WiiCompiled-logs-YYYYMMDD-HHMMSS` folder at the chosen location, containing:
@@ -1104,11 +1284,38 @@ ownership and retained-layer submission without a headset.
 
 For a Windows GPU check, configure Aurora with its tests enabled and
 `AURORA_GPU_SMOKE_TESTS=ON`, then build/run `stereo_frame_worker_smoke`. This feeds the actual
-renderer a 60 Hz GX stream and an independent 90 Hz stereo provider. The development check
+renderer a 60 Hz GX stream and an independent 90 Hz stereo provider, with a default 40 ms
+head-prediction lead to exercise the multi-frame horizon seen in VDXR. The development check
 produced 359 new stereo submissions in 4 seconds (89.7 FPS). This verifies submission cadence,
 not full-race performance or visual quality on a headset. Pass a draw count, for example
 `stereo_frame_worker_smoke 2000`, to stress uniform preparation and renderer/producer overlap;
 `stereo_frame_worker_smoke 2000 0` checks native stereo with interpolation Off.
+The fourth and fifth arguments select headset Hz and prediction lead in milliseconds:
+`stereo_frame_worker_smoke 1 1 0 90 65` exercises a 90 Hz headset predicting 65 ms ahead.
+Add a sixth argument of `1` to rotate the published camera around geometry 100000 units away;
+`stereo_frame_worker_smoke 1000 1 1 90 65 1` combines that with indexed-palette stress. Check
+`camera-separated=true`, transform rejection counts and scene cadence together.
+Add a seventh argument of `1` for CPU-authored particle quads, for example
+`stereo_frame_worker_smoke 1000 1 0 90 65 1 1`. Their matrices stay at identity
+while their vertex centers move. VR interpolation records each four-vertex,
+direct-F32 quad separately, pairs it across frames by centre and shape, and
+shifts the current shape to the sampled center. Current texture, colour and
+shape changes still occur at the game's rate; this is position interpolation,
+not a particle simulation or a blend between texture animation frames. The
+smoke's thousand overlapping quads exceed the pairing bound, so they measure
+decoder and replay cost, not pairing. The GX tests cover pairing:
+`VrSpeedLineEmitterKeepsEachStreakOnItsOwnPath` replays a speed-line emitter
+for 90 frames and prints how many quads moved, were held or were misattributed.
+
+Rigid meshes with a stable basis also reject a large reverse jump relative to
+their measured, camera-independent velocity. This holds the new phase when an
+animation resets, instead of interpolating backward through the loop. Coconut
+Mall's escalator uses a repeating 20-unit phase. Normal direction changes remain
+interpolated. `[vr-motion]` reports `vertex-motion` (usable particle pairs in
+the latest seal), `vertex-held` (particle quads drawn where the game put them
+because no unambiguous partner exists yet) and cumulative `wrap-cuts`; check
+those during the affected effects, then confirm the visual result in the headset.
+The `[vr-motion]` scene-step range measures actual playback cadence separately from submission FPS.
 Use `stereo_frame_worker_smoke 1000 1 1` to exercise ten-matrix palettes and their
 larger uniform history, or `stereo_frame_worker_smoke 1000 2 1` to switch interpolation
 On/Off during recording. The test compositor discards obsolete ticks and uses
@@ -1143,7 +1350,7 @@ ends, including mid-frame flushes, so live setting changes cannot invalidate pen
 - The Quest build (`android/`, `docs/quest-port.md`) runs on a Quest 3 through menus and races.
   Lifecycle events and performance (about 43 game FPS) are still open. Apple visionOS packaging
   is not implemented.
-- Scene-specific comfort options, culling fixes and replay/spectator classification are future work.
+- Scene-specific comfort options and replay/spectator classification are future work.
 - Hand steering works on a Quest 3 (2026-09-22): the kart's own wheel animated (228 draws a frame,
   the race camera's view matching the scene's exactly) and the wheel can be grabbed and turned. In
   that race the driver's eye was never calibrated, so the fallback placed the wheel centre about

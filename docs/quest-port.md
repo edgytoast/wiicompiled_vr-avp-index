@@ -153,8 +153,8 @@ keys on it: the first launch with foveation on recompiles every pipeline once.
 
 Measured on the Quest 3 on 2026-09-24. The game was launched with `foveation = "medium"` and
 `debug.wiicompiled.fpslog 1`, then taken by injected presses to Luigi Circuit's Grand Prix
-start, first-person cockpit, player idle. Settings were set through
-`debug.wiicompiled.eye_passes` and `debug.wiicompiled.foveation`, interleaved in 11 s windows
+start, first-person cockpit, player idle. Settings were switched through temporary debug
+properties (removed since the choice was made), interleaved in 11 s windows
 over three or four rounds. Each 5 s `GPU ms/frame` line was assigned to the setting active for
 all of it, using the runtime's own switch log lines. The GPU stayed at clock level 3 (492 MHz)
 at 0.8, and 492 to 525 MHz at 1.3, the unfoveated windows running at the higher clocks.
@@ -972,11 +972,8 @@ the app:
 | --- | --- |
 | `debug.wiicompiled.vtxpad 0` | Turns the stride padding off, to re-check a driver update |
 | `debug.wiicompiled.validation 1` | Keeps WebGPU validation and robustness on in release builds |
-| `debug.wiicompiled.panel_layer 0` | Draws the headset settings panel into the eye images instead of on its own quad layer (`OPENXR.md`, Settings in the headset); read about once a second, so it can be switched while the panel is open |
-| `debug.wiicompiled.eye_passes 0` | Replays each eye in one render pass per recorded pass, as before eyes were drawn in a single pass (`OPENXR.md`); `1` or an empty value restores the single pass. Read about once a second, for A/B timing inside one session |
-| `debug.wiicompiled.foveation <0-3>` | Overrides the foveation level (off, low, medium, high) within one session; an empty value restores the setting. Needs a session launched with foveation on. Read about once a second |
 | `debug.wiicompiled.fdm 0` | Launches without fragment density maps at all, whatever `foveation` says, which also drops their flag from every pipeline; `1` asks for them even with `foveation = "off"` |
-| `debug.wiicompiled.inject <n>:<button>` | Presses `a`, `b`, `x`, `y`, `start`, `up`, `down`, `left` or `right` for 12 XR frames each time `<n>` changes. As a Wii Remote, `x`/`y`/`start` are 1/2/+, the directions push the Nunchuk stick, and `home`, `c` and `z` also exist. `panel` presses the settings panel's button (left Y, or both thumbsticks as a gamepad), opening or closing it (see `OPENXR.md`). `flick` plays the bare hands' flick, one 150 ms shake of the remote (a trick off a ramp, a wheelie on a bike), with the controllers or none |
+| `debug.wiicompiled.inject <n>:<button>` | Presses `a`, `b`, `x`, `y`, `start`, `up`, `down`, `left` or `right` for 12 XR frames each time `<n>` changes. As a Wii Remote, `x`/`y`/`start` are 1/2/+, the directions push the Nunchuk stick, and `home`, `c` and `z` also exist. `panel` presses the settings panel's button (left Y, or both thumbsticks as a gamepad), opening or closing it (see `OPENXR.md`). `flick` plays the bare hands' flick, one 150 ms shake of the remote (a trick off a ramp, a wheelie on a bike), with the controllers or none. `throw_forward` and `throw_backward` play a throw of the held item: the stick pushed that way while the item button is pressed and released (see "Throwing the held item" in `OPENXR.md`) |
 | `debug.wiicompiled.fpslog 1` | Logs the game's rendered frame rate every 5 s, with per-frame averages of the producer's waits for the frame worker's DONE and SEALED phases and of the worker's seal, permit wait, prepare and encode stretches, and of the draw calls the recorded frame holds and the primitives that merged into them (an overlay that stops draws merging shows up there first). A third line reports the GX thread's command ring (records, waits, busy share). A second line gives the GPU time per frame from timestamp queries on every pass (`mono` native render, `eyeL`/`eyeR` replays, `screen`, `panel`, `efbcopy`, `palette`, `peek`, plus `passes-span` from the first pass begin to the last pass end and `between-passes` for copies and idle gaps). The compositor's `VrApi` log line gives headset FPS, `GPU%`, `CPU%`, clock levels and app GPU time (`App=`) |
 
 A `Config.toml` written with `adb push` (or `sed -i` in `adb shell`) belongs

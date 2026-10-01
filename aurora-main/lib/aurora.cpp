@@ -11,6 +11,7 @@
 #include "stereo.hpp"
 #include "stereo_mirror.hpp"
 #include "stereo_interpolation.hpp"
+#include "scene_camera.hpp"
 #include "stereo_overlay.hpp"
 #include "webgpu/fdm.hpp"
 #include "webgpu/gpu.hpp"
@@ -82,6 +83,7 @@ std::atomic<AuroraFrameLogCallback> g_frameLogCallback{nullptr};
 // deadlines derived from it, so the presenter cannot drift. Zero means present when ready.
 std::atomic<uint64_t> g_presentScheduleBaseNanos{0};
 std::atomic<uint64_t> g_presentScheduleIntervalNanos{0};
+std::atomic_bool g_stereoMotionLogging{false};
 
 namespace {
 Module Log("aurora");
@@ -121,6 +123,9 @@ struct StereoSceneAnchor {
   // World units per metre the anchor was built with, or zero when the packet's
   // own scale applies (aurora_set_stereo_scene_anchor_scaled).
   float unitsPerMeter = 0.f;
+  AuroraCockpitItem cockpitItem{};
+  std::array<float, 12> viewFromWorld{};
+  bool viewValid = false;
 };
 // Producer thread only, between aurora_set_stereo_scene_anchor() and the seal
 // that consumes it. Cleared at every seal so a producer that stops publishing
@@ -834,6 +839,7 @@ gfx::StereoReplayFrame make_stereo_replay_frame(const AuroraStereoFrame& input, 
   std::memcpy(&anchorFromScene, sceneAnchor.anchorFromScene.data(), sizeof(anchorFromScene));
   gfx::StereoReplayFrame replay{};
   replay.cockpit = input.cockpit;
+  replay.cockpitItem = sceneAnchor.cockpitItem;
   replay.window = input.mode == AURORA_STEREO_FRAME_IMMERSIVE_REPLAY && input.window;
   // The sealed guest frame owns its scale. The packet may have been sampled
   // just before a change of scale (a character swap, a lightning strike), so
@@ -1945,15 +1951,78 @@ struct RetainedStereoContext {
   StereoSceneAnchor anchor;
   StereoSceneAnchor previousAnchor;
   bool continuous = false;
+  stereo::SceneCameraMotion cameraMotion;
 } g_retainedStereo;
+stereo::ScenePlaybackClock g_stereoPlaybackClock;
+
+void log_stereo_motion(const AuroraStereoFrame& input, uint64_t sampleTime, float weight) {
+  // Environment switch also works for hosts using Aurora without OpenXR.
+  static const bool forced = [] {
+    const char* value = std::getenv("AURORA_VR_MOTION_LOG");
+    bool enabled = value != nullptr && std::strcmp(value, "1") == 0;
+#if defined(__ANDROID__)
+    enabled = enabled || android_debug::property_int("debug.wiicompiled.fpslog", 0) == 1;
+#endif
+    return enabled;
+  }();
+  static stereo::MotionSamples samples;
+  static uint32_t maxRejected = 0;
+  static auto start = std::chrono::steady_clock::now();
+  if (!forced && !g_stereoMotionLogging.load(std::memory_order_relaxed)) {
+    samples = {};
+    maxRejected = 0;
+    start = std::chrono::steady_clock::now();
+    return;
+  }
+  const auto& retained = g_retainedStereo;
+  AuroraFrameInterpolationDiagnostics draws{};
+  gx::get_frame_interpolation_diagnostics(draws);
+  maxRejected = std::max(maxRejected, draws.rejectedDraws);
+  if (samples.samples == 0 && samples.lastSceneTime == 0)
+    start = std::chrono::steady_clock::now();
+  samples.record(sampleTime, retained.boundary, retained.interval, retained.continuous, weight);
+  const auto now = std::chrono::steady_clock::now();
+  const double seconds = std::chrono::duration<double>(now - start).count();
+  if (seconds < 1.0)
+    return;
+  const auto deltaMs = [](uint64_t a, uint64_t b) {
+    return a >= b ? static_cast<double>(a - b) / 1e6 : -static_cast<double>(b - a) / 1e6;
+  };
+  const uint64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+  Log.info("[vr-motion] {:.2f}s samples={} blended={} previous={} current={} discontinuous={} "
+           "same-time={} backwards={} scene-step={:.2f}/{:.2f}ms max-rejected={} | latest "
+           "display-boundary={:.2f}ms prediction-lead={:.2f}ms sample-boundary={:.2f}ms weight={:.3f} | latest draws "
+           "candidates={} matched={} prepared={} rejected={} replay-safe={} camera-separated={} "
+           "vertex-motion={} vertex-held={} wrap-cuts={}",
+           seconds, samples.samples, samples.blended, samples.atPrevious, samples.atCurrent,
+           samples.discontinuous, samples.repeated, samples.backwards,
+           samples.minStep == UINT64_MAX ? 0.0 : samples.minStep / 1e6, samples.maxStep / 1e6, maxRejected,
+           deltaMs(input.displayTimeNanos, retained.boundary), deltaMs(input.displayTimeNanos, nowNs),
+           deltaMs(sampleTime, retained.boundary), weight,
+           draws.candidates, draws.matches, draws.preparedDraws, draws.rejectedDraws, draws.replaySafe,
+           retained.cameraMotion.active, draws.vertexMotionDraws, draws.vertexMotionHeld, draws.animationWrapCuts);
+  samples.clear_window();
+  maxRejected = 0;
+  start = now;
+}
 
 gfx::StereoReplayFrame interpolated_stereo_frame(const AuroraStereoFrame& input, float& weight) {
   const auto& retained = g_retainedStereo;
+  const uint64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now().time_since_epoch()).count();
+  const uint64_t sampleTime = g_stereoPlaybackClock.sample_time(now);
   weight = retained.continuous
-               ? stereo::interpolation_weight(input.displayTimeNanos, retained.boundary, retained.interval)
+               ? stereo::interpolation_weight(sampleTime, retained.boundary, retained.interval)
                : 1.0f;
+  log_stereo_motion(input, sampleTime, weight);
   auto anchor = retained.anchor;
-  if (weight < 1.0f && anchor.active && retained.previousAnchor.active) {
+  if (weight < 1.0f && retained.cameraMotion.active) {
+    Mat3x4<float> result;
+    if (retained.cameraMotion.sample(weight, result)) {
+      std::memcpy(anchor.anchorFromScene.data(), &result, sizeof(result));
+      anchor.active = true;
+    }
+  } else if (weight < 1.0f && anchor.active && retained.previousAnchor.active) {
     Mat3x4<float> previous, current, result;
     std::memcpy(&previous, retained.previousAnchor.anchorFromScene.data(), sizeof(previous));
     std::memcpy(&current, anchor.anchorFromScene.data(), sizeof(current));
@@ -2009,6 +2078,27 @@ void seal_frame_locked(gfx::SealedFrame& sealedFrame, SealedFrameContext& ctx, u
   // pre-first-frame UINT32_MAX value to logical frame zero.
   ctx.logicalFrame = gfx::current_frame() + 1;
   gfx::set_stereo_local_player_count(sceneAnchor.localPlayerCount);
+  ctx.scheduleBaseNanos = g_presentScheduleBaseNanos.load(std::memory_order_acquire);
+  ctx.scheduleIntervalNanos = g_presentScheduleIntervalNanos.load(std::memory_order_acquire);
+  bool continuous = g_retainedStereo.contentTag == contentTag &&
+                    g_retainedStereo.interval != 0 && ctx.scheduleIntervalNanos != 0 &&
+                    ctx.scheduleBaseNanos > g_retainedStereo.boundary &&
+                    ctx.scheduleBaseNanos - g_retainedStereo.boundary <= ctx.scheduleIntervalNanos * 3 / 2 &&
+                    g_retainedStereo.anchor.active == sceneAnchor.active &&
+                    g_retainedStereo.anchor.localPlayerCount == sceneAnchor.localPlayerCount;
+  stereo::SceneCameraMotion cameraMotion;
+  if (continuous && gx::stereo_frame_interpolation_active() && sceneAnchor.localPlayerCount == 1 &&
+      sceneAnchor.viewValid && g_retainedStereo.anchor.viewValid) {
+    Mat3x4<float> previousView, currentView, previousAnchor, currentAnchor;
+    std::memcpy(static_cast<void*>(&previousView), g_retainedStereo.anchor.viewFromWorld.data(), sizeof(previousView));
+    std::memcpy(static_cast<void*>(&currentView), sceneAnchor.viewFromWorld.data(), sizeof(currentView));
+    std::memcpy(static_cast<void*>(&previousAnchor), g_retainedStereo.anchor.anchorFromScene.data(), sizeof(previousAnchor));
+    std::memcpy(static_cast<void*>(&currentAnchor), sceneAnchor.anchorFromScene.data(), sizeof(currentAnchor));
+    // A real camera cut uses current endpoints for the whole scene.
+    continuous = cameraMotion.prepare(previousView, currentView, previousAnchor, currentAnchor);
+  }
+  gx::set_frame_interpolation_view_rebase(cameraMotion.active ? &cameraMotion.currentFromPrevious : nullptr,
+                                         cameraMotion.active ? &cameraMotion.previousFromCurrent : nullptr);
   if (const auto stereoInput = request_stereo_frame(ctx.logicalFrame, contentTag)) {
     ctx.stereoInput = stereoInput;
     ctx.stereoFrameToken = stereoInput->frameToken;
@@ -2066,15 +2156,14 @@ void seal_frame_locked(gfx::SealedFrame& sealedFrame, SealedFrameContext& ctx, u
   // encode phase reads only worker-private state.
   gfx::seal_frame(sealedFrame);
   ctx.retainStereo = gx::stereo_frame_interpolation_active() && gfx::has_late_stereo_replay(sealedFrame);
-  const bool continuous = ctx.retainStereo && g_retainedStereo.contentTag == contentTag &&
-                          g_retainedStereo.interval != 0 && ctx.scheduleIntervalNanos != 0 &&
-                          ctx.scheduleBaseNanos > g_retainedStereo.boundary &&
-                          ctx.scheduleBaseNanos - g_retainedStereo.boundary <= ctx.scheduleIntervalNanos * 3 / 2 &&
-                          g_retainedStereo.anchor.active == sceneAnchor.active;
+  continuous = continuous && ctx.retainStereo;
   const auto previousAnchor = g_retainedStereo.anchor;
   g_retainedStereo = {contentTag,       ctx.scheduleBaseNanos, ctx.scheduleIntervalNanos,
                       ctx.logicalFrame, sceneAnchor,           previousAnchor,
-                      continuous};
+                      continuous, cameraMotion};
+  const uint64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now().time_since_epoch()).count();
+  g_stereoPlaybackClock.begin_scene(ctx.scheduleBaseNanos, now, continuous);
   gfx::expire_bind_group_cache();
 }
 
@@ -2716,6 +2805,10 @@ void set_stereo_scene_anchor(const float anchorFromScene[12]) noexcept {
   g_pendingSceneAnchor = anchor;
 }
 
+void set_stereo_cockpit_item(const AuroraCockpitItem* item) noexcept {
+  g_pendingSceneAnchor.cockpitItem = item != nullptr ? *item : AuroraCockpitItem{};
+}
+
 #ifdef AURORA_ENABLE_GX
 namespace stereo {
 void set_sink(SinkCallback callback, SubmitCallback submitted, void* userdata) noexcept {
@@ -2775,6 +2868,23 @@ void aurora_set_stereo_scene_anchor_scaled(const float anchorFromScene[12], floa
   if (aurora::g_pendingSceneAnchor.active && (bits & 0x7f800000u) != 0x7f800000u && unitsPerMeter > 0.f) {
     aurora::g_pendingSceneAnchor.unitsPerMeter = unitsPerMeter;
   }
+}
+
+void aurora_set_stereo_scene_view(const float viewFromWorld[12]) {
+  auto& pending = aurora::g_pendingSceneAnchor;
+  pending.viewValid = false;
+  if (viewFromWorld == nullptr) return;
+  for (size_t i = 0; i < 12; ++i) {
+    uint32_t bits;
+    std::memcpy(&bits, viewFromWorld + i, sizeof(bits));
+    if ((bits & 0x7f800000u) == 0x7f800000u) return;
+  }
+  std::memcpy(pending.viewFromWorld.data(), viewFromWorld, sizeof(pending.viewFromWorld));
+  pending.viewValid = true;
+}
+
+void aurora_set_stereo_cockpit_item(const AuroraCockpitItem* item) {
+  aurora::set_stereo_cockpit_item(item);
 }
 void aurora_set_stereo_local_player_count(uint32_t count) {
   aurora::g_pendingStereoLocalPlayerCount = count >= 1 && count <= 4 ? count : 1;
@@ -2849,6 +2959,10 @@ void aurora_get_frame_interpolation_diagnostics(AuroraFrameInterpolationDiagnost
   if (diagnostics != nullptr) {
     aurora::gx::get_frame_interpolation_diagnostics(*diagnostics);
   }
+}
+
+void aurora_set_stereo_motion_logging(bool enabled) {
+  aurora::g_stereoMotionLogging.store(enabled, std::memory_order_relaxed);
 }
 
 void aurora_get_present_timing(AuroraPresentTiming* timing) {
