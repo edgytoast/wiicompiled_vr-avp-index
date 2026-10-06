@@ -6,11 +6,11 @@ WiiCompiled Vision is the Apple Vision Pro app of this fork of [WiiCompiled](htt
 
 - An Apple Silicon Mac (M1 or later), with about 15 GB free besides Xcode
 - Xcode 16 or later with the visionOS platform (**Xcode > Settings > Components**), and your Apple ID signed in under **Xcode > Settings > Accounts**. A free account works, but its apps stop opening after 7 days.
-- Homebrew with CMake, Ninja and the .NET 8 SDK. The translator targets .NET 8, and Homebrew's plain `dotnet-sdk` cask is now a newer major version that can't run it, so install the .NET 8 one:
+- Homebrew with CMake, Ninja and the .NET SDK 8 or newer:
 
   ```sh
   brew install cmake ninja
-  brew install --cask dotnet-sdk@8
+  brew install --cask dotnet-sdk
   ```
 
   Building Dawn, the graphics library, also uses Python 3 and git.
@@ -37,30 +37,16 @@ There's no prebuilt app or TestFlight build for Apple Vision Pro: visionOS only 
 Start from a checkout of the `vision-pro` branch (the tutorial uses `git clone --branch vision-pro https://github.com/iChris4/Wiicompiled_VR.git`).
 
 1. Pair the headset. On the Vision Pro, open **Settings > General > Remote Devices**. On the Mac, open **Xcode > Window > Devices and Simulators**, pair the headset and enter the code it shows. Turn on **Developer Mode** when asked (**Settings > Privacy & Security > Developer Mode**) and restart the headset.
-2. Set your own bundle identifier (below).
-3. Run the script: double-click `visionos/Make-VisionOS-App.command` in Finder, or in Terminal:
+2. Run the script: double-click `visionos/Make-VisionOS-App.command` in Finder, or in Terminal:
 
    ```sh
    visionos/Make-VisionOS-App.command --game /path/to/RMCP01.rvz
    ```
 
-   Add `--retro-rewind download` to include [Retro Rewind](https://wiki.tockdom.com/wiki/Retro_Rewind); then, on the headset, pick it in the Play tab and press **Download Retro Rewind** (about 2 GB from Retro Rewind's server). If Xcode has several teams, pass `--team TEAMID`; `--device UDID` picks the headset. The script checks the Mac, extracts the disc, translates the game, builds and signs the app, installs it, copies the disc and launches the app. The first build takes 30 to 60 minutes; later runs skip the finished steps. Keep the headset unlocked and awake while it installs and copies.
-4. The first time, trust your developer profile on the headset: **Settings > General > VPN & Device Management**, tap your Apple ID, then **Trust**. Open **WiiCompiled Vision** from the Home View and press **Play**.
+   Add `--retro-rewind download` to include [Retro Rewind](https://wiki.tockdom.com/wiki/Retro_Rewind); then, on the headset, pick it in the Play tab and press **Download Retro Rewind** (about 2 GB from Retro Rewind's server). If Xcode has several teams, the script asks which one signs the app (or pass `--team TEAMID`); `--device UDID` picks the headset. The app's bundle identifier is made from that team's ID; `--bundle-id com.yourname.wiicompiled` chooses another. The script checks the Mac, extracts the disc, translates the game, builds and signs the app, installs it, copies the disc and launches the app. The first build takes 30 to 60 minutes; later runs skip the finished steps. Keep the headset unlocked and awake while it installs and copies.
+3. The first time, trust your developer profile on the headset: **Settings > General > VPN & Device Management**, tap your Apple ID, then **Trust**. Open **WiiCompiled Vision** from the Home View and press **Play**.
 
-With a free Apple ID, run `visionos/Make-VisionOS-App.command --reinstall` every 7 days to sign the app again. To update, pull and run the script again. If you edited the two files for your bundle identifier, `git stash && git pull && git stash pop` keeps your change.
-
-### Your own bundle identifier
-
-The app's bundle identifier is `org.wiicompiled.vision`. It's already registered to a developer team, and an identifier belongs to one team, so signing with your own team needs one of your own, such as `com.yourname.wiicompiled`. The scripts have no option for it yet. Before your first build, change it in both places:
-
-- `visionos/CMakeLists.txt`: the default value of `MKW_VISIONOS_BUNDLE_ID`
-- `visionos/Make-VisionOS-App.command`: the line `bundle="org.wiicompiled.vision"`, which the disc copy and launch steps use
-
-CMake keeps the value from its first configure, so if `build-visionos/` already exists from an earlier run, set it there too:
-
-```sh
-cmake -S visionos -B build-visionos -DMKW_VISIONOS_BUNDLE_ID=com.yourname.wiicompiled
-```
+With a free Apple ID, run `visionos/Make-VisionOS-App.command --reinstall` every 7 days to sign the app again. To update, `git pull` and run the script again.
 
 To run the steps by hand instead (translation, Dawn, then `visionos/Build-VisionOS.sh`), see *Building* in [docs/visionos-port.md](docs/visionos-port.md#building).
 
