@@ -63,3 +63,7 @@ To run the steps by hand instead (translation, Dawn, then `visionos/Build-Vision
 - Each run of the game needs a fresh launch of the app.
 - If Retro Rewind online play stops with error 61070, turn off iCloud Private Relay, or **Limit IP Address Tracking** for your Wi-Fi network. The tutorial explains why.
 - Comfort, frame timing and the bare-hand gestures are still being tuned on hardware; [docs/visionos-port.md](docs/visionos-port.md) lists the known gaps.
+
+## Support
+
+This fork keeps Mario Kart Wii installable on Apple Vision Pro. It's maintained as part of the [AVP Ports Index](https://github.com/edgytoast/avp-ports-index), which tracks every port we can find and runs a safety check on each one. If this guide got you playing, you can [buy me a coffee](https://buymeacoffee.com/adminpz) to help keep it running.
